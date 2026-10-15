@@ -6,7 +6,7 @@ struct OmniStationDockApp: App {
         WindowGroup {
             WelcomeView()
                 .preferredColorScheme(.dark)
-                .statusBarHidden(true)
+                .statusBarHidden(false)
         }
     }
 }
