@@ -4,6 +4,12 @@ struct WelcomeView: View {
     @State private var isVisible = false
     @State private var showHome = false
 
+    init() {
+        // Si el ajuste «Bienvenida animada» está desactivado, se entra directo a la pantalla principal.
+        let showWelcome = UserDefaults.standard.object(forKey: "showWelcome") as? Bool ?? true
+        _showHome = State(initialValue: !showWelcome)
+    }
+
     var body: some View {
         ZStack {
             if showHome {
