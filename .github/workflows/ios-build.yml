@@ -2,9 +2,6 @@ name: Build and Release OmniStation Dock
 
 on:
   workflow_dispatch:
-  push:
-    branches:
-      - main
 
 permissions:
   contents: write
