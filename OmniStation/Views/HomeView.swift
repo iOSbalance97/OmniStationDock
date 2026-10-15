@@ -32,12 +32,12 @@ struct HomeView: View {
     ]
 
     private let games: [(name: String, platform: String, symbol: String, tint: Color)] = [
-        ("God of War", "PS2", "flame.fill", Color(red: 0.64, green: 0.22, blue: 0.17)),
-        ("Silent Hill 2", "PS2", "moon.fill", Color(red: 0.22, green: 0.38, blue: 0.55)),
-        ("Resident Evil 4", "GameCube", "eye.fill", Color(red: 0.42, green: 0.31, blue: 0.22)),
-        ("Pokémon Esmeralda", "GBA", "leaf.fill", Color(red: 0.15, green: 0.48, blue: 0.35)),
-        ("Mario Kart DS", "NDS", "flag.checkered", Color(red: 0.72, green: 0.23, blue: 0.21)),
-        ("Pokémon Rojo Fuego", "GBA", "bolt.fill", Color(red: 0.73, green: 0.29, blue: 0.19))
+        ("God of War", "PS2", "flame.fill", Color(red: 0.05, green: 0.42, blue: 1.0)),
+        ("Silent Hill 2", "PS2", "moon.fill", Color(red: 0.10, green: 0.30, blue: 0.78)),
+        ("Resident Evil 4", "GameCube", "eye.fill", Color(red: 0.06, green: 0.58, blue: 0.95)),
+        ("Pokémon Esmeralda", "GBA", "leaf.fill", Color(red: 0.00, green: 0.72, blue: 1.0)),
+        ("Mario Kart DS", "NDS", "flag.checkered", Color(red: 0.10, green: 0.46, blue: 1.0)),
+        ("Pokémon Rojo Fuego", "GBA", "bolt.fill", Color(red: 0.16, green: 0.82, blue: 1.0))
     ]
 
     private var filteredGames: [(name: String, platform: String, symbol: String, tint: Color)] {
@@ -75,9 +75,9 @@ struct HomeView: View {
 
     private var background: some View {
         ZStack {
-            Color(red: 0.008, green: 0.018, blue: 0.043)
+            Color(red: 0.003, green: 0.008, blue: 0.025)
             RadialGradient(
-                colors: [Color.blue.opacity(0.24), .clear],
+                colors: [Color(red: 0.0, green: 0.35, blue: 1.0).opacity(0.34), Color.cyan.opacity(0.08), .clear],
                 center: .topLeading,
                 startRadius: 10,
                 endRadius: 560
@@ -102,7 +102,7 @@ struct HomeView: View {
 
             HStack(spacing: 0) {
                 Text("OmniStation").foregroundStyle(.white)
-                Text(" Dock").foregroundStyle(Color(red: 0.22, green: 0.62, blue: 1))
+                Text(" Dock").foregroundStyle(Color(red: 0.08, green: 0.68, blue: 1.0))
             }
             .font(.system(size: compact ? 19 : 22, weight: .bold, design: .rounded))
             .lineLimit(1)
@@ -123,12 +123,13 @@ struct HomeView: View {
                             .frame(width: compact ? 38 : 43, height: compact ? 36 : 41)
                             .background {
                                 RoundedRectangle(cornerRadius: 13, style: .continuous)
-                                    .fill(selectedSection == section ? Color.cyan.opacity(0.16) : Color.white.opacity(0.055))
+                                    .fill(selectedSection == section ? Color.cyan.opacity(0.24) : Color.white.opacity(0.055))
                             }
                             .overlay {
                                 RoundedRectangle(cornerRadius: 13, style: .continuous)
-                                    .stroke(selectedSection == section ? Color.cyan.opacity(0.52) : Color.white.opacity(0.1), lineWidth: 1)
+                                    .stroke(selectedSection == section ? Color.cyan : Color.white.opacity(0.12), lineWidth: selectedSection == section ? 1.4 : 1)
                             }
+                            .shadow(color: selectedSection == section ? Color.cyan.opacity(0.42) : .clear, radius: 12, y: 0)
                     }
                     .buttonStyle(.plain)
                     .accessibilityLabel(section.rawValue)
@@ -183,12 +184,12 @@ struct HomeView: View {
         VStack(alignment: .leading, spacing: 0) {
             ZStack(alignment: .bottomLeading) {
                 LinearGradient(
-                    colors: [Color(red: 0.08, green: 0.31, blue: 0.65), Color(red: 0.015, green: 0.055, blue: 0.13), .black],
+                    colors: [Color(red: 0.02, green: 0.40, blue: 1.0), Color(red: 0.015, green: 0.12, blue: 0.34), Color(red: 0.002, green: 0.012, blue: 0.04)],
                     startPoint: .topLeading,
                     endPoint: .bottomTrailing
                 )
                 Circle()
-                    .fill(Color.cyan.opacity(0.16))
+                    .fill(Color.cyan.opacity(0.24))
                     .frame(width: 170, height: 170)
                     .blur(radius: 24)
                     .offset(x: 95, y: -70)
@@ -228,7 +229,7 @@ struct HomeView: View {
                 RoundedRectangle(cornerRadius: 22, style: .continuous)
                     .stroke(LinearGradient(colors: [.cyan.opacity(0.5), .white.opacity(0.08)], startPoint: .topLeading, endPoint: .bottomTrailing), lineWidth: 1)
             }
-            .shadow(color: .blue.opacity(0.13), radius: 16, y: 6)
+             .shadow(color: .blue.opacity(0.28), radius: 20, y: 5)
         }
     }
 
@@ -254,7 +255,7 @@ struct HomeView: View {
                             Capsule().fill(
                                 selectedPlatform == platform.name
                                 ? LinearGradient(colors: [.blue, Color.cyan.opacity(0.78)], startPoint: .topLeading, endPoint: .bottomTrailing)
-                                : LinearGradient(colors: [.white.opacity(0.09), .white.opacity(0.035)], startPoint: .top, endPoint: .bottom)
+                                : LinearGradient(colors: [Color.blue.opacity(0.15), .white.opacity(0.035)], startPoint: .top, endPoint: .bottom)
                             )
                         }
                         .overlay {
@@ -325,9 +326,9 @@ struct HomeView: View {
                 LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 12), count: landscape ? 2 : 1), spacing: 10) {
                     settingRow("Apariencia", subtitle: "Tema oscuro y acentos azules", symbol: "paintpalette.fill", tint: .cyan)
                     settingRow("Biblioteca", subtitle: "Carpetas y organización", symbol: "square.grid.2x2.fill", tint: .blue)
-                    settingRow("Plataformas", subtitle: "Gestionar emuladores y sistemas", symbol: "gamecontroller.fill", tint: .green)
-                    settingRow("Controles", subtitle: "Mando y navegación", symbol: "dpad.fill", tint: .orange)
-                    settingRow("Acerca de", subtitle: "OmniStation Dock · versión 0.0.3", symbol: "info.circle.fill", tint: .purple)
+                    settingRow("Plataformas", subtitle: "Gestionar emuladores y sistemas", symbol: "gamecontroller.fill", tint: Color(red: 0.0, green: 0.72, blue: 1.0))
+                    settingRow("Controles", subtitle: "Mando y navegación", symbol: "dpad.fill", tint: Color(red: 0.18, green: 0.46, blue: 1.0))
+                    settingRow("Acerca de", subtitle: "OmniStation Dock · versión 0.0.4", symbol: "info.circle.fill", tint: Color.cyan)
                 }
             }
             .padding(.horizontal, 16)
@@ -413,7 +414,7 @@ private struct GameTile: View {
         VStack(alignment: .leading, spacing: compact ? 6 : 8) {
             ZStack {
                 LinearGradient(
-                    colors: [game.tint.opacity(0.92), Color(red: 0.015, green: 0.035, blue: 0.08)],
+                    colors: [game.tint.opacity(0.98), Color(red: 0.008, green: 0.025, blue: 0.075)],
                     startPoint: .topLeading,
                     endPoint: .bottomTrailing
                 )
@@ -462,11 +463,11 @@ private extension View {
                 RoundedRectangle(cornerRadius: 18, style: .continuous)
                     .stroke(
                         LinearGradient(
-                            colors: [.white.opacity(0.17), .cyan.opacity(0.07), .white.opacity(0.035)],
+                            colors: [.cyan.opacity(0.42), .white.opacity(0.14), .blue.opacity(0.22)],
                             startPoint: .topLeading,
                             endPoint: .bottomTrailing
                         ),
-                        lineWidth: 1
+                        lineWidth: 1.15
                     )
             }
     }

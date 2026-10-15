@@ -53,7 +53,8 @@ struct WelcomeView: View {
                             width: min(min(geometry.size.width * 0.52, geometry.size.height * 0.29), 245),
                             height: min(min(geometry.size.width * 0.52, geometry.size.height * 0.29), 245)
                         )
-                        .shadow(color: .blue.opacity(0.42), radius: 28)
+                        .shadow(color: Color.cyan.opacity(0.42), radius: 34)
+                        .shadow(color: Color.blue.opacity(0.34), radius: 52)
                         .accessibilityLabel("Planeta de OmniStation Dock")
 
                     VStack(spacing: 3) {
@@ -69,7 +70,7 @@ struct WelcomeView: View {
                             .tracking(geometry.size.width < 400 ? 7 : 10)
                             .foregroundStyle(
                                 LinearGradient(
-                                    colors: [Color(red: 0.2, green: 0.55, blue: 1), .cyan],
+                                    colors: [Color(red: 0.08, green: 0.42, blue: 1), Color(red: 0.0, green: 0.88, blue: 1)],
                                     startPoint: .leading,
                                     endPoint: .trailing
                                 )
@@ -91,7 +92,7 @@ struct WelcomeView: View {
                         .frame(width: min(geometry.size.width * 0.52, 210), height: 3)
                         .overlay(alignment: .leading) {
                             Capsule()
-                                .fill(LinearGradient(colors: [.blue, .cyan], startPoint: .leading, endPoint: .trailing))
+                                .fill(LinearGradient(colors: [Color(red: 0.08, green: 0.42, blue: 1), Color(red: 0.0, green: 0.9, blue: 1)], startPoint: .leading, endPoint: .trailing))
                                 .frame(width: isVisible ? min(geometry.size.width * 0.52, 210) : 8, height: 3)
                                 .shadow(color: .cyan, radius: 8)
                         }
