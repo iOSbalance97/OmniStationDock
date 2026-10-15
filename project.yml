@@ -1,19 +1,22 @@
+
 name: OmniStationDock
+
 options:
   bundleIdPrefix: com.omnistation
   deploymentTarget:
     iOS: "17.0"
   createIntermediateGroups: true
+
 targets:
   OmniStationDock:
     type: application
     platform: iOS
     sources:
-      - path: OmniStationDock
+      - path: OmniStation
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.omnistation.dock
-        PRODUCT_NAME: OmniStation Dock
+        PRODUCT_NAME: OmniStationDock
         SWIFT_VERSION: "5.0"
         TARGETED_DEVICE_FAMILY: "1"
         GENERATE_INFOPLIST_FILE: YES
