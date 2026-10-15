@@ -46,15 +46,16 @@ struct WelcomeView: View {
                 VStack(spacing: 0) {
                     Spacer(minLength: 24)
 
-                    Image("OmniLogo")
+                    Image("WelcomePlanet")
                         .resizable()
                         .scaledToFit()
                         .frame(
-                            width: min(min(geometry.size.width * 0.52, geometry.size.height * 0.29), 245),
-                            height: min(min(geometry.size.width * 0.52, geometry.size.height * 0.29), 245)
+                            width: min(min(geometry.size.width * 0.62, geometry.size.height * 0.32), 285),
+                            height: min(min(geometry.size.width * 0.62, geometry.size.height * 0.32), 285)
                         )
-                        .shadow(color: Color.cyan.opacity(0.42), radius: 34)
-                        .shadow(color: Color.blue.opacity(0.34), radius: 52)
+                        .interpolation(.high)
+                        .shadow(color: Color.cyan.opacity(0.52), radius: 34)
+                        .shadow(color: Color.blue.opacity(0.42), radius: 52)
                         .accessibilityLabel("Planeta de OmniStation Dock")
 
                     VStack(spacing: 3) {

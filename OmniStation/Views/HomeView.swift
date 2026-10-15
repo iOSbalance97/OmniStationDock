@@ -74,19 +74,32 @@ struct HomeView: View {
     }
 
     private var background: some View {
-        ZStack {
-            Color(red: 0.003, green: 0.008, blue: 0.025)
-            RadialGradient(
-                colors: [Color(red: 0.0, green: 0.35, blue: 1.0).opacity(0.34), Color.cyan.opacity(0.08), .clear],
-                center: .topLeading,
-                startRadius: 10,
-                endRadius: 560
-            )
-            LinearGradient(
-                colors: [.clear, Color.black.opacity(0.38)],
-                startPoint: .top,
-                endPoint: .bottom
-            )
+        GeometryReader { geometry in
+            ZStack {
+                Image("SpaceBackground")
+                    .resizable()
+                    .scaledToFill()
+                    .frame(width: geometry.size.width, height: geometry.size.height)
+                    .clipped()
+                // Keep the nebula visible while protecting text contrast.
+                LinearGradient(
+                    colors: [
+                        Color(red: 0.005, green: 0.018, blue: 0.055).opacity(0.22),
+                        Color(red: 0.002, green: 0.012, blue: 0.035).opacity(0.48),
+                        Color.black.opacity(0.72)
+                    ],
+                    startPoint: .topLeading,
+                    endPoint: .bottomTrailing
+                )
+                RadialGradient(
+                    colors: [Color.cyan.opacity(0.12), .clear],
+                    center: .topLeading,
+                    startRadius: 5,
+                    endRadius: geometry.size.width * 0.9
+                )
+            }
+            .frame(width: geometry.size.width, height: geometry.size.height)
+            .ignoresSafeArea()
         }
         .ignoresSafeArea()
     }
@@ -96,7 +109,8 @@ struct HomeView: View {
             Image("OmniLogo")
                 .resizable()
                 .scaledToFit()
-                .frame(width: compact ? 34 : 42, height: compact ? 34 : 42)
+                .frame(width: compact ? 40 : 48, height: compact ? 40 : 48)
+                .interpolation(.high)
                 .clipShape(RoundedRectangle(cornerRadius: compact ? 11 : 14, style: .continuous))
                 .shadow(color: .cyan.opacity(0.24), radius: 9)
 
@@ -104,7 +118,8 @@ struct HomeView: View {
                 Text("OmniStation").foregroundStyle(.white)
                 Text(" Dock").foregroundStyle(Color(red: 0.08, green: 0.68, blue: 1.0))
             }
-            .font(.system(size: compact ? 19 : 22, weight: .bold, design: .rounded))
+            .font(.system(size: compact ? 20 : 23, weight: .bold, design: .rounded))
+            .tracking(0.15)
             .lineLimit(1)
             .minimumScaleFactor(0.75)
 
@@ -120,7 +135,7 @@ struct HomeView: View {
                         Image(systemName: section.symbol)
                             .font(.system(size: compact ? 15 : 17, weight: .semibold))
                             .foregroundStyle(selectedSection == section ? Color.cyan : .white.opacity(0.76))
-                            .frame(width: compact ? 38 : 43, height: compact ? 36 : 41)
+                            .frame(width: compact ? 42 : 46, height: compact ? 40 : 44)
                             .background {
                                 RoundedRectangle(cornerRadius: 13, style: .continuous)
                                     .fill(selectedSection == section ? Color.cyan.opacity(0.24) : Color.white.opacity(0.055))
@@ -184,14 +199,14 @@ struct HomeView: View {
         VStack(alignment: .leading, spacing: 0) {
             ZStack(alignment: .bottomLeading) {
                 LinearGradient(
-                    colors: [Color(red: 0.02, green: 0.40, blue: 1.0), Color(red: 0.015, green: 0.12, blue: 0.34), Color(red: 0.002, green: 0.012, blue: 0.04)],
+                    colors: [Color(red: 0.015, green: 0.22, blue: 0.58).opacity(0.94), Color(red: 0.015, green: 0.08, blue: 0.22).opacity(0.94), Color(red: 0.002, green: 0.009, blue: 0.03).opacity(0.98)],
                     startPoint: .topLeading,
                     endPoint: .bottomTrailing
                 )
                 Circle()
-                    .fill(Color.cyan.opacity(0.24))
+                    .fill(Color.cyan.opacity(0.34))
                     .frame(width: 170, height: 170)
-                    .blur(radius: 24)
+                    .blur(radius: 30)
                     .offset(x: 95, y: -70)
                 Image(systemName: "flame.fill")
                     .font(.system(size: 82, weight: .light))
@@ -246,11 +261,12 @@ struct HomeView: View {
                             Image(systemName: platform.symbol)
                                 .font(.system(size: 11, weight: .semibold))
                             Text(platform.name)
-                                .font(.system(size: 11, weight: .semibold))
+                                .font(.system(size: 12, weight: .semibold))
                         }
                         .foregroundStyle(selectedPlatform == platform.name ? .white : .white.opacity(0.72))
-                        .padding(.horizontal, compact ? 11 : 13)
-                        .padding(.vertical, compact ? 8 : 10)
+                        .padding(.horizontal, compact ? 13 : 15)
+                        .padding(.vertical, compact ? 10 : 12)
+                        .contentShape(Capsule())
                         .background {
                             Capsule().fill(
                                 selectedPlatform == platform.name
@@ -263,9 +279,10 @@ struct HomeView: View {
                         }
                     }
                     .buttonStyle(.plain)
+                    .contentShape(Capsule())
                 }
             }
-            .padding(.vertical, 2)
+            .padding(.vertical, 5)
         }
     }
 
@@ -328,7 +345,7 @@ struct HomeView: View {
                     settingRow("Biblioteca", subtitle: "Carpetas y organización", symbol: "square.grid.2x2.fill", tint: .blue)
                     settingRow("Plataformas", subtitle: "Gestionar emuladores y sistemas", symbol: "gamecontroller.fill", tint: Color(red: 0.0, green: 0.72, blue: 1.0))
                     settingRow("Controles", subtitle: "Mando y navegación", symbol: "dpad.fill", tint: Color(red: 0.18, green: 0.46, blue: 1.0))
-                    settingRow("Acerca de", subtitle: "OmniStation Dock · versión 0.0.4", symbol: "info.circle.fill", tint: Color.cyan)
+                    settingRow("Acerca de", subtitle: "OmniStation Dock · versión 0.0.5", symbol: "info.circle.fill", tint: Color.cyan)
                 }
             }
             .padding(.horizontal, 16)
@@ -414,12 +431,12 @@ private struct GameTile: View {
         VStack(alignment: .leading, spacing: compact ? 6 : 8) {
             ZStack {
                 LinearGradient(
-                    colors: [game.tint.opacity(0.98), Color(red: 0.008, green: 0.025, blue: 0.075)],
+                    colors: [game.tint.opacity(0.76), Color(red: 0.015, green: 0.055, blue: 0.14).opacity(0.94), Color(red: 0.003, green: 0.012, blue: 0.04)],
                     startPoint: .topLeading,
                     endPoint: .bottomTrailing
                 )
                 Circle()
-                    .fill(.white.opacity(0.08))
+                    .fill(Color.cyan.opacity(0.12))
                     .frame(width: compact ? 64 : 90, height: compact ? 64 : 90)
                     .blur(radius: 2)
                     .offset(x: 24, y: -22)
@@ -444,7 +461,8 @@ private struct GameTile: View {
             .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
 
             Text(game.name)
-                .font(.system(size: compact ? 11 : 12, weight: .semibold))
+                .font(.system(size: compact ? 11 : 12, weight: .semibold, design: .rounded))
+                .tracking(0.1)
                 .lineLimit(2)
                 .foregroundStyle(.white.opacity(0.95))
                 .frame(maxWidth: .infinity, minHeight: compact ? 28 : 30, alignment: .topLeading)
@@ -458,17 +476,30 @@ private struct GameTile: View {
 private extension View {
     func glassCard() -> some View {
         self
-            .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 18, style: .continuous))
+            .background {
+                RoundedRectangle(cornerRadius: 18, style: .continuous)
+                    .fill(.ultraThinMaterial)
+                    .overlay {
+                        RoundedRectangle(cornerRadius: 18, style: .continuous)
+                            .fill(LinearGradient(colors: [Color.blue.opacity(0.09), .black.opacity(0.22)], startPoint: .topLeading, endPoint: .bottomTrailing))
+                    }
+            }
             .overlay {
                 RoundedRectangle(cornerRadius: 18, style: .continuous)
                     .stroke(
                         LinearGradient(
-                            colors: [.cyan.opacity(0.42), .white.opacity(0.14), .blue.opacity(0.22)],
+                            colors: [.white.opacity(0.28), .cyan.opacity(0.28), .white.opacity(0.055)],
                             startPoint: .topLeading,
                             endPoint: .bottomTrailing
                         ),
-                        lineWidth: 1.15
+                        lineWidth: 1.1
                     )
+            }
+            .overlay(alignment: .top) {
+                RoundedRectangle(cornerRadius: 18, style: .continuous)
+                    .fill(LinearGradient(colors: [.white.opacity(0.08), .clear], startPoint: .top, endPoint: .bottom))
+                    .frame(height: 24)
+                    .allowsHitTesting(false)
             }
     }
 }
