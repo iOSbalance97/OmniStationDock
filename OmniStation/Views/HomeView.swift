@@ -52,7 +52,9 @@ struct HomeView: View {
     // Puntos de scroll en los que logo y título terminan de desvanecerse (menos = más rápido).
     private static let titleCollapseDistance: CGFloat = 36
     // Altura de la barra superior mientras no se ha medido.
-    private static let defaultHeaderHeight: CGFloat = 63
+    private static let defaultHeaderHeight: CGFloat = 57
+    // Logo junto al nombre: desactivado (no borrado). Ponlo en true para volver a mostrarlo.
+    private static let showHeaderLogo = false
 
     private var headerHeight: CGFloat {
         frames["header"]?.height ?? Self.defaultHeaderHeight
@@ -130,24 +132,26 @@ struct HomeView: View {
 
     private func topBar(compact: Bool) -> some View {
         HStack(spacing: compact ? 10 : 12) {
-            // Logo y título: se desvanecen y suben un poco mientras se desliza.
+            // Título (y logo, si se activa): se desvanecen y suben un poco mientras se desliza.
             HStack(spacing: compact ? 10 : 12) {
-                Image("OmniLogo")
-                    .resizable()
-                    .interpolation(.high)
-                    .scaledToFit()
-                    .frame(width: compact ? 40 : 48, height: compact ? 40 : 48)
-                    .clipShape(RoundedRectangle(cornerRadius: compact ? 11 : 14, style: .continuous))
-                    .shadow(color: .cyan.opacity(0.24), radius: 9)
+                if Self.showHeaderLogo {
+                    Image("OmniLogo")
+                        .resizable()
+                        .interpolation(.high)
+                        .scaledToFit()
+                        .frame(width: compact ? 40 : 48, height: compact ? 40 : 48)
+                        .clipShape(RoundedRectangle(cornerRadius: compact ? 11 : 14, style: .continuous))
+                        .shadow(color: .cyan.opacity(0.24), radius: 9)
+                }
 
-                HStack(spacing: 4) {
+                HStack(spacing: 5) {
                     Text("OmniStation")
                         .foregroundStyle(.white)
                     Text("Dock")
                         .foregroundStyle(Color(red: 0.08, green: 0.68, blue: 1.0))
                 }
-                .font(.system(size: compact ? 16 : 18, weight: .bold, design: .rounded))
-                .tracking(-0.35)
+                .font(.system(size: compact ? 22 : 26, weight: .bold, design: .rounded))
+                .tracking(-0.5)
                 .lineLimit(1)
                 .fixedSize(horizontal: false, vertical: true)
                 .minimumScaleFactor(0.82)
@@ -171,13 +175,16 @@ struct HomeView: View {
                             .font(.system(size: compact ? 15 : 17, weight: .semibold))
                             .foregroundStyle(selectedSection == section ? Color.cyan : .white.opacity(0.76))
                             .frame(width: compact ? 38 : 42, height: compact ? 38 : 42)
-                            .background {
-                                RoundedRectangle(cornerRadius: 13, style: .continuous)
-                                    .fill(selectedSection == section ? Color.cyan.opacity(0.24) : Color.white.opacity(0.055))
-                            }
+                            .liquidGlass(
+                                in: RoundedRectangle(cornerRadius: 13, style: .continuous),
+                                tint: selectedSection == section ? Color.cyan : nil,
+                                interactive: true
+                            )
                             .overlay {
-                                RoundedRectangle(cornerRadius: 13, style: .continuous)
-                                    .stroke(selectedSection == section ? Color.cyan : Color.white.opacity(0.12), lineWidth: selectedSection == section ? 1.4 : 1)
+                                if selectedSection == section {
+                                    RoundedRectangle(cornerRadius: 13, style: .continuous)
+                                        .strokeBorder(Color.cyan.opacity(0.9), lineWidth: 1.2)
+                                }
                             }
                             .shadow(color: selectedSection == section ? Color.cyan.opacity(0.42) : .clear, radius: 12, y: 0)
                     }
@@ -278,50 +285,49 @@ struct HomeView: View {
             }
             .frame(minHeight: 175)
             .clipShape(RoundedRectangle(cornerRadius: 22, style: .continuous))
-            .overlay {
-                RoundedRectangle(cornerRadius: 22, style: .continuous)
-                    .stroke(LinearGradient(colors: [.cyan.opacity(0.5), .white.opacity(0.08)], startPoint: .topLeading, endPoint: .bottomTrailing), lineWidth: 1)
-            }
+            .glassRim(in: RoundedRectangle(cornerRadius: 22, style: .continuous))
              .shadow(color: .blue.opacity(0.28), radius: 20, y: 5)
         }
     }
 
     private func platformFilters(compact: Bool) -> some View {
         ScrollView(.horizontal, showsIndicators: false) {
-            HStack(spacing: 7) {
+            HStack(spacing: 8) {
                 ForEach(platforms, id: \.name) { platform in
+                    let isSelected = selectedPlatform == platform.name
                     Button {
                         withAnimation(.easeInOut(duration: 0.18)) {
                             selectedPlatform = platform.name
                         }
                     } label: {
-                        HStack(spacing: 6) {
+                        HStack(spacing: 7) {
                             Image(systemName: platform.symbol)
-                                .font(.system(size: 11, weight: .semibold))
+                                .font(.system(size: 13, weight: .semibold))
                             Text(platform.name)
-                                .font(.system(size: 12, weight: .semibold))
+                                .font(.system(size: 14, weight: .semibold))
                         }
-                        .foregroundStyle(selectedPlatform == platform.name ? .white : .white.opacity(0.72))
-                        .padding(.horizontal, compact ? 13 : 15)
-                        .padding(.vertical, compact ? 10 : 12)
+                        .foregroundStyle(isSelected ? Color.white : Color.white.opacity(0.78))
+                        .padding(.horizontal, compact ? 15 : 17)
+                        .padding(.vertical, compact ? 11 : 13)
                         .contentShape(Capsule())
-                        .background {
-                            Capsule().fill(
-                                selectedPlatform == platform.name
-                                ? LinearGradient(colors: [.blue, Color.cyan.opacity(0.78)], startPoint: .topLeading, endPoint: .bottomTrailing)
-                                : LinearGradient(colors: [Color.blue.opacity(0.15), .white.opacity(0.035)], startPoint: .top, endPoint: .bottom)
-                            )
-                        }
+                        .liquidGlass(
+                            in: Capsule(),
+                            tint: isSelected ? Color(red: 0.05, green: 0.45, blue: 1.0) : nil,
+                            interactive: true
+                        )
                         .overlay {
-                            Capsule().stroke(selectedPlatform == platform.name ? .cyan.opacity(0.55) : .white.opacity(0.1), lineWidth: 1)
+                            if isSelected {
+                                Capsule().strokeBorder(Color.cyan.opacity(0.7), lineWidth: 1)
+                            }
                         }
+                        .shadow(color: isSelected ? Color.cyan.opacity(0.30) : Color.clear, radius: 10)
                     }
                     .buttonStyle(.plain)
                     .contentShape(Capsule())
                 }
             }
             .padding(.horizontal, 12)
-            .padding(.vertical, 5)
+            .padding(.vertical, 8)
         }
         // Fade the scroll edges instead of covering the first/last chips with overlays.
         .mask {
@@ -508,7 +514,8 @@ private struct GameTile: View {
                             .font(.system(size: 9, weight: .bold))
                             .padding(.horizontal, 7)
                             .padding(.vertical, 4)
-                            .background(.black.opacity(0.4), in: Capsule())
+                            .background(.ultraThinMaterial, in: Capsule())
+                            .overlay(Capsule().strokeBorder(Color.white.opacity(0.22), lineWidth: 0.5))
                         Spacer()
                     }
                     Spacer()
@@ -517,6 +524,7 @@ private struct GameTile: View {
             }
             .frame(height: compact ? 90 : 118)
             .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+            .glassRim(in: RoundedRectangle(cornerRadius: 14, style: .continuous))
 
             Text(game.name)
                 .font(.system(size: compact ? 11 : 12, weight: .semibold, design: .rounded))
@@ -569,33 +577,111 @@ private extension View {
         }
     }
 
-    func glassCard() -> some View {
-        self
-            .background {
-                RoundedRectangle(cornerRadius: 18, style: .continuous)
-                    .fill(.ultraThinMaterial)
-                    .overlay {
-                        RoundedRectangle(cornerRadius: 18, style: .continuous)
-                            .fill(LinearGradient(colors: [Color.blue.opacity(0.09), .black.opacity(0.22)], startPoint: .topLeading, endPoint: .bottomTrailing))
-                    }
-            }
-            .overlay {
-                RoundedRectangle(cornerRadius: 18, style: .continuous)
-                    .stroke(
-                        LinearGradient(
-                            colors: [.white.opacity(0.28), .cyan.opacity(0.28), .white.opacity(0.055)],
-                            startPoint: .topLeading,
-                            endPoint: .bottomTrailing
-                        ),
-                        lineWidth: 1.1
-                    )
-            }
-            .overlay(alignment: .top) {
-                RoundedRectangle(cornerRadius: 18, style: .continuous)
-                    .fill(LinearGradient(colors: [.white.opacity(0.08), .clear], startPoint: .top, endPoint: .bottom))
-                    .frame(height: 24)
-                    .allowsHitTesting(false)
-            }
+    func glassCard(cornerRadius: CGFloat = 18) -> some View {
+        liquidGlass(in: RoundedRectangle(cornerRadius: cornerRadius, style: .continuous))
+    }
+
+    /// Cristal líquido. En iOS 26, compilando con Xcode 26, usa el `glassEffect` nativo de Apple;
+    /// en el resto, una imitación con material translúcido, reflejos y borde de luz.
+    @ViewBuilder
+    func liquidGlass<S: InsettableShape>(in shape: S, tint: Color? = nil, interactive: Bool = false) -> some View {
+        #if compiler(>=6.2)
+        if #available(iOS 26.0, *) {
+            glassEffect(nativeGlass(tint: tint, interactive: interactive), in: shape)
+        } else {
+            modifier(LiquidGlassFallback(shape: shape, tint: tint))
+        }
+        #else
+        modifier(LiquidGlassFallback(shape: shape, tint: tint))
+        #endif
+    }
+
+    /// Solo el borde de luz y el reflejo superior (sin fondo), para paneles que ya tienen el suyo.
+    func glassRim<S: InsettableShape>(in shape: S) -> some View {
+        modifier(LiquidGlassRim(shape: shape))
+    }
+
+    #if compiler(>=6.2)
+    @available(iOS 26.0, *)
+    private func nativeGlass(tint: Color?, interactive: Bool) -> Glass {
+        var glass = Glass.regular
+        if let tint { glass = glass.tint(tint.opacity(0.55)) }
+        if interactive { glass = glass.interactive() }
+        return glass
+    }
+    #endif
+}
+
+private struct LiquidGlassRim<S: InsettableShape>: ViewModifier {
+    let shape: S
+
+    func body(content: Content) -> some View {
+        content
+            .overlay { sheen }
+            .overlay { rim }
+    }
+
+    // Reflejo suave en la mitad superior.
+    private var sheen: some View {
+        shape
+            .fill(LinearGradient(
+                colors: [Color.white.opacity(0.16), Color.white.opacity(0)],
+                startPoint: .top,
+                endPoint: .center
+            ))
+            .allowsHitTesting(false)
+    }
+
+    // Borde de luz: brillante arriba a la izquierda, tenue en medio, un destello abajo a la derecha.
+    private var rim: some View {
+        shape
+            .strokeBorder(
+                LinearGradient(
+                    stops: [
+                        Gradient.Stop(color: Color.white.opacity(0.60), location: 0),
+                        Gradient.Stop(color: Color.white.opacity(0.10), location: 0.38),
+                        Gradient.Stop(color: Color.cyan.opacity(0.16), location: 0.72),
+                        Gradient.Stop(color: Color.white.opacity(0.34), location: 1)
+                    ],
+                    startPoint: .topLeading,
+                    endPoint: .bottomTrailing
+                ),
+                lineWidth: 1
+            )
+            .allowsHitTesting(false)
+    }
+}
+
+private struct LiquidGlassFallback<S: InsettableShape>: ViewModifier {
+    let shape: S
+    let tint: Color?
+
+    func body(content: Content) -> some View {
+        content
+            .background { glassFill }
+            .modifier(LiquidGlassRim(shape: shape))
+    }
+
+    private var glassFill: some View {
+        ZStack {
+            shape.fill(.ultraThinMaterial)
+            shape.fill(tintGradient)
+        }
+    }
+
+    private var tintGradient: LinearGradient {
+        if let tint {
+            return LinearGradient(
+                colors: [tint.opacity(0.80), tint.opacity(0.38)],
+                startPoint: .topLeading,
+                endPoint: .bottomTrailing
+            )
+        }
+        return LinearGradient(
+            colors: [Color.blue.opacity(0.09), Color.black.opacity(0.22)],
+            startPoint: .topLeading,
+            endPoint: .bottomTrailing
+        )
     }
 }
 
