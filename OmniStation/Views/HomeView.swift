@@ -1,13 +1,17 @@
 import SwiftUI
 
+private typealias Game = (name: String, platform: String, symbol: String, tint: Color)
+
 private enum DockSection: String, CaseIterable {
     case inicio = "Inicio"
+    case favoritos = "Favoritos"
     case busqueda = "Búsqueda"
     case ajustes = "Ajustes"
 
     var symbol: String {
         switch self {
         case .inicio: return "house.fill"
+        case .favoritos: return "star.fill"
         case .busqueda: return "magnifyingglass"
         case .ajustes: return "gearshape.fill"
         }
@@ -21,6 +25,17 @@ struct HomeView: View {
     // Posiciones medidas en pantalla: "header", "scroll" (zona de scroll) y "content" (contenido).
     @State private var frames: [String: CGRect] = [:]
 
+    // Ajustes (se guardan en el dispositivo).
+    @AppStorage("favoriteGames") private var favoritesRaw = ""
+    @AppStorage("compactGrid") private var compactGrid = false
+    @AppStorage("showWelcome") private var showWelcome = true
+    @AppStorage("hapticsEnabled") private var hapticsEnabled = true
+    @AppStorage("showHeaderLogo") private var showHeaderLogo = false
+
+    @State private var showComingSoon = false
+    @State private var showAbout = false
+    @State private var confirmClearFavorites = false
+
     private let platforms: [(name: String, symbol: String)] = [
         ("Todos", "square.grid.2x2.fill"),
         ("PS2", "gamecontroller.fill"),
@@ -33,7 +48,7 @@ struct HomeView: View {
         ("GBA", "gameboy")
     ]
 
-    private let games: [(name: String, platform: String, symbol: String, tint: Color)] = [
+    private let games: [Game] = [
         ("God of War", "PS2", "flame.fill", Color(red: 0.05, green: 0.42, blue: 1.0)),
         ("Silent Hill 2", "PS2", "moon.fill", Color(red: 0.10, green: 0.30, blue: 0.78)),
         ("Resident Evil 4", "GameCube", "eye.fill", Color(red: 0.06, green: 0.58, blue: 0.95)),
@@ -42,7 +57,7 @@ struct HomeView: View {
         ("Pokémon Rojo Fuego", "GBA", "bolt.fill", Color(red: 0.16, green: 0.82, blue: 1.0))
     ]
 
-    private var filteredGames: [(name: String, platform: String, symbol: String, tint: Color)] {
+    private var filteredGames: [Game] {
         games.filter {
             (selectedPlatform == "Todos" || $0.platform == selectedPlatform) &&
             (searchText.isEmpty || $0.name.localizedCaseInsensitiveContains(searchText))
@@ -53,8 +68,6 @@ struct HomeView: View {
     private static let titleCollapseDistance: CGFloat = 36
     // Altura de la barra superior mientras no se ha medido.
     private static let defaultHeaderHeight: CGFloat = 57
-    // Logo junto al nombre: desactivado (no borrado). Ponlo en true para volver a mostrarlo.
-    private static let showHeaderLogo = false
 
     private var headerHeight: CGFloat {
         frames["header"]?.height ?? Self.defaultHeaderHeight
@@ -83,18 +96,31 @@ struct HomeView: View {
             ZStack(alignment: .top) {
                 background
                 Group {
-                    if selectedSection == .inicio {
-                        homeContent(landscape: landscape)
-                    } else if selectedSection == .busqueda {
-                        searchContent(landscape: landscape)
-                    } else {
-                        settingsContent(landscape: landscape)
+                    switch selectedSection {
+                    case .inicio: homeContent(landscape: landscape)
+                    case .favoritos: favoritesContent(landscape: landscape)
+                    case .busqueda: searchContent(landscape: landscape)
+                    case .ajustes: settingsContent(landscape: landscape)
                     }
                 }
                 topBar(compact: landscape)
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
             .onPreferenceChange(FramesKey.self) { frames = $0 }
+            .alert("Próximamente", isPresented: $showComingSoon) {
+                Button("Entendido", role: .cancel) {}
+            } message: {
+                Text("Esta opción llegará en una próxima fase.")
+            }
+            .alert("OmniStation Dock", isPresented: $showAbout) {
+                Button("Cerrar", role: .cancel) {}
+            } message: {
+                Text("Versión \(appVersion)\nBundle ID: \(Bundle.main.bundleIdentifier ?? "—")")
+            }
+            .confirmationDialog("¿Borrar todos los favoritos?", isPresented: $confirmClearFavorites, titleVisibility: .visible) {
+                Button("Borrar favoritos", role: .destructive) { favoritesRaw = "" }
+                Button("Cancelar", role: .cancel) {}
+            }
             .preferredColorScheme(.dark)
         }
     }
@@ -131,10 +157,10 @@ struct HomeView: View {
     }
 
     private func topBar(compact: Bool) -> some View {
-        HStack(spacing: compact ? 10 : 12) {
+        HStack(spacing: 0) {
             // Título (y logo, si se activa): se desvanecen y suben un poco mientras se desliza.
             HStack(spacing: compact ? 10 : 12) {
-                if Self.showHeaderLogo {
+                if showHeaderLogo {
                     Image("OmniLogo")
                         .resizable()
                         .interpolation(.high)
@@ -150,7 +176,7 @@ struct HomeView: View {
                     Text("Dock")
                         .foregroundStyle(Color(red: 0.08, green: 0.68, blue: 1.0))
                 }
-                .font(.system(size: compact ? 22 : 26, weight: .bold, design: .rounded))
+                .font(.system(size: compact ? (showHeaderLogo ? 18 : 22) : (showHeaderLogo ? 20 : 25), weight: .bold, design: .rounded))
                 .tracking(-0.5)
                 .lineLimit(1)
                 .fixedSize(horizontal: false, vertical: true)
@@ -162,11 +188,12 @@ struct HomeView: View {
             .offset(y: -10 * titleHidden)
             .scaleEffect(1 - 0.06 * titleHidden, anchor: .leading)
 
-            Spacer(minLength: 5)
+            Spacer(minLength: 8)
 
-            HStack(spacing: 7) {
+            HStack(spacing: 6) {
                 ForEach(DockSection.allCases, id: \.self) { section in
                     Button {
+                        tapHaptic()
                         withAnimation(.easeInOut(duration: 0.2)) {
                             selectedSection = section
                         }
@@ -174,7 +201,7 @@ struct HomeView: View {
                         Image(systemName: section.symbol)
                             .font(.system(size: compact ? 15 : 17, weight: .semibold))
                             .foregroundStyle(selectedSection == section ? Color.cyan : .white.opacity(0.76))
-                            .frame(width: compact ? 38 : 42, height: compact ? 38 : 42)
+                            .frame(width: compact ? 36 : 40, height: compact ? 36 : 40)
                             .liquidGlass(
                                 in: RoundedRectangle(cornerRadius: 13, style: .continuous),
                                 tint: selectedSection == section ? Color.cyan : nil,
@@ -192,6 +219,7 @@ struct HomeView: View {
                     .accessibilityLabel(section.rawValue)
                 }
             }
+            .layoutPriority(2)
         }
         .padding(.horizontal, 12)
         .padding(.top, 8)
@@ -210,14 +238,14 @@ struct HomeView: View {
                             .frame(maxWidth: geometryWidthFraction(0.34))
                         VStack(alignment: .leading, spacing: 12) {
                             sectionHeading("Juegos recientes", detail: "\(filteredGames.count) elementos")
-                            gameGrid(columns: 3, compact: true)
+                            gameGrid(filteredGames, columns: 3, compact: true)
                         }
                         .frame(maxWidth: .infinity, alignment: .leading)
                     }
                 } else {
                     featuredPanel
                     sectionHeading("Tu biblioteca", detail: "\(filteredGames.count) elementos")
-                    gameGrid(columns: 2, compact: false)
+                    gameGrid(filteredGames, columns: compactGrid ? 3 : 2, compact: compactGrid)
                 }
 
                 if filteredGames.isEmpty {
@@ -296,6 +324,7 @@ struct HomeView: View {
                 ForEach(platforms, id: \.name) { platform in
                     let isSelected = selectedPlatform == platform.name
                     Button {
+                        tapHaptic()
                         withAnimation(.easeInOut(duration: 0.18)) {
                             selectedPlatform = platform.name
                         }
@@ -356,11 +385,13 @@ struct HomeView: View {
         }
     }
 
-    private func gameGrid(columns: Int, compact: Bool) -> some View {
+    private func gameGrid(_ items: [Game], columns: Int, compact: Bool) -> some View {
         let gridColumns = Array(repeating: GridItem(.flexible(), spacing: compact ? 10 : 12), count: columns)
         return LazyVGrid(columns: gridColumns, alignment: .leading, spacing: compact ? 10 : 13) {
-            ForEach(filteredGames, id: \.name) { game in
-                GameTile(game: game, compact: compact)
+            ForEach(items, id: \.name) { game in
+                GameTile(game: game, compact: compact, isFavorite: favoriteNames.contains(game.name)) {
+                    toggleFavorite(game.name)
+                }
             }
         }
     }
@@ -378,7 +409,7 @@ struct HomeView: View {
                 searchBar
                 platformFilters(compact: landscape)
                 sectionHeading("Resultados", detail: "\(filteredGames.count) encontrados")
-                gameGrid(columns: landscape ? 4 : 2, compact: landscape)
+                gameGrid(filteredGames, columns: landscape ? 4 : (compactGrid ? 3 : 2), compact: landscape || compactGrid)
                 if filteredGames.isEmpty { emptyResults }
             }
             .padding(.horizontal, 16)
@@ -388,6 +419,76 @@ struct HomeView: View {
         }
         .reportFrame("scroll")
         .topFade(clear: fadeClearHeight, fade: headerHeight)
+    }
+
+    // MARK: - Favoritos
+
+    private var favoriteNames: Set<String> {
+        Set(favoritesRaw.split(separator: "|").map(String.init))
+    }
+
+    private var favoriteGames: [Game] {
+        let names = favoriteNames
+        return games.filter { names.contains($0.name) }
+    }
+
+    private func toggleFavorite(_ name: String) {
+        var names = favoriteNames
+        if names.contains(name) { names.remove(name) } else { names.insert(name) }
+        favoritesRaw = names.sorted().joined(separator: "|")
+        tapHaptic()
+    }
+
+    private func favoritesContent(landscape: Bool) -> some View {
+        ScrollView(showsIndicators: false) {
+            VStack(alignment: .leading, spacing: 18) {
+                VStack(alignment: .leading, spacing: 5) {
+                    Text("Favoritos")
+                        .font(.system(size: 28, weight: .bold, design: .rounded))
+                    Text("Tus juegos marcados con estrella.")
+                        .font(.subheadline)
+                        .foregroundStyle(.white.opacity(0.55))
+                }
+
+                if favoriteGames.isEmpty {
+                    emptyFavorites
+                } else {
+                    sectionHeading("Tus favoritos", detail: "\(favoriteGames.count) elementos")
+                    gameGrid(favoriteGames, columns: landscape ? 4 : (compactGrid ? 3 : 2), compact: landscape || compactGrid)
+                }
+            }
+            .padding(.horizontal, 16)
+            .padding(.top, headerHeight + 8)
+            .padding(.bottom, 24)
+            .reportFrame("content")
+        }
+        .reportFrame("scroll")
+        .topFade(clear: fadeClearHeight, fade: headerHeight)
+    }
+
+    private var emptyFavorites: some View {
+        ContentUnavailableView(
+            "Aún no hay favoritos",
+            systemImage: "star",
+            description: Text("Toca la estrella de un juego para guardarlo aquí.")
+        )
+        .frame(maxWidth: .infinity)
+        .padding(.vertical, 28)
+        .glassCard()
+    }
+
+    // MARK: - Ajustes
+
+    private var appVersion: String {
+        let info = Bundle.main.infoDictionary
+        let version = info?["CFBundleShortVersionString"] as? String ?? "?"
+        let build = info?["CFBundleVersion"] as? String ?? "?"
+        return "\(version) (\(build))"
+    }
+
+    private func tapHaptic() {
+        guard hapticsEnabled else { return }
+        UIImpactFeedbackGenerator(style: .light).impactOccurred()
     }
 
     private func settingsContent(landscape: Bool) -> some View {
@@ -401,12 +502,44 @@ struct HomeView: View {
                         .foregroundStyle(.white.opacity(0.55))
                 }
 
-                LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 12), count: landscape ? 2 : 1), spacing: 10) {
-                    settingRow("Apariencia", subtitle: "Tema oscuro y acentos azules", symbol: "paintpalette.fill", tint: .cyan)
-                    settingRow("Biblioteca", subtitle: "Carpetas y organización", symbol: "square.grid.2x2.fill", tint: .blue)
-                    settingRow("Plataformas", subtitle: "Gestionar emuladores y sistemas", symbol: "gamecontroller.fill", tint: Color(red: 0.0, green: 0.72, blue: 1.0))
-                    settingRow("Controles", subtitle: "Mando y navegación", symbol: "dpad.fill", tint: Color(red: 0.18, green: 0.46, blue: 1.0))
-                    settingRow("Acerca de", subtitle: "OmniStation Dock · versión 0.0.5", symbol: "info.circle.fill", tint: Color.cyan)
+                LazyVGrid(
+                    columns: Array(repeating: GridItem(.flexible(), spacing: 12), count: landscape ? 3 : 2),
+                    spacing: 12
+                ) {
+                    settingToggleCard("Cuadrícula compacta", subtitle: "3 columnas en vertical", symbol: "square.grid.3x3.fill", tint: Color.cyan, isOn: $compactGrid)
+                    settingToggleCard("Bienvenida animada", subtitle: "Pantalla de inicio al abrir", symbol: "sparkles", tint: Color(red: 0.30, green: 0.60, blue: 1.0), isOn: $showWelcome)
+                    settingToggleCard("Vibración", subtitle: "Respuesta háptica al tocar", symbol: "iphone.radiowaves.left.and.right", tint: Color(red: 0.0, green: 0.72, blue: 1.0), isOn: $hapticsEnabled)
+                    settingToggleCard("Logo en cabecera", subtitle: "Icono junto al nombre", symbol: "photo.fill", tint: Color(red: 0.18, green: 0.46, blue: 1.0), isOn: $showHeaderLogo)
+
+                    settingCard("Plataformas", subtitle: "Emuladores y sistemas", symbol: "gamecontroller.fill", tint: Color(red: 0.0, green: 0.72, blue: 1.0), action: {
+                        tapHaptic()
+                        showComingSoon = true
+                    }) {
+                        settingBadge("PRONTO")
+                    }
+
+                    settingCard("Mandos", subtitle: "Control con mando", symbol: "dpad.fill", tint: Color(red: 0.18, green: 0.46, blue: 1.0), action: {
+                        tapHaptic()
+                        showComingSoon = true
+                    }) {
+                        settingBadge("PRONTO")
+                    }
+
+                    settingCard("Borrar favoritos", subtitle: "Quita todos los marcados", symbol: "star.slash.fill", tint: Color.orange, action: {
+                        tapHaptic()
+                        if !favoriteNames.isEmpty { confirmClearFavorites = true }
+                    }) {
+                        settingBadge("\(favoriteNames.count)", tint: Color.orange)
+                    }
+
+                    settingCard("Acerca de", subtitle: "Versión \(appVersion)", symbol: "info.circle.fill", tint: Color.cyan, action: {
+                        tapHaptic()
+                        showAbout = true
+                    }) {
+                        Image(systemName: "chevron.right")
+                            .font(.system(size: 11, weight: .bold))
+                            .foregroundStyle(Color.white.opacity(0.38))
+                    }
                 }
             }
             .padding(.horizontal, 16)
@@ -418,24 +551,69 @@ struct HomeView: View {
         .topFade(clear: fadeClearHeight, fade: headerHeight)
     }
 
-    private func settingRow(_ title: String, subtitle: String, symbol: String, tint: Color) -> some View {
-        HStack(spacing: 12) {
-            Image(systemName: symbol)
-                .font(.system(size: 17, weight: .semibold))
-                .foregroundStyle(tint)
-                .frame(width: 42, height: 42)
-                .background(tint.opacity(0.13), in: RoundedRectangle(cornerRadius: 13, style: .continuous))
-            VStack(alignment: .leading, spacing: 4) {
-                Text(title).font(.system(size: 14, weight: .semibold))
-                Text(subtitle).font(.system(size: 11)).foregroundStyle(.white.opacity(0.48))
+    /// Tarjeta de ajuste: icono arriba, control a la derecha (interruptor, etiqueta...) y texto debajo.
+    private func settingCard<Trailing: View>(
+        _ title: String,
+        subtitle: String,
+        symbol: String,
+        tint: Color,
+        action: @escaping () -> Void,
+        @ViewBuilder trailing: () -> Trailing
+    ) -> some View {
+        let trailingView = trailing()
+        return Button(action: action) {
+            VStack(alignment: .leading, spacing: 10) {
+                HStack(alignment: .center) {
+                    Image(systemName: symbol)
+                        .font(.system(size: 17, weight: .semibold))
+                        .foregroundStyle(tint)
+                        .frame(width: 40, height: 40)
+                        .background(tint.opacity(0.14), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+                    Spacer(minLength: 4)
+                    trailingView
+                }
+                VStack(alignment: .leading, spacing: 4) {
+                    Text(title)
+                        .font(.system(size: 14, weight: .semibold))
+                        .foregroundStyle(.white)
+                        .lineLimit(1)
+                        .minimumScaleFactor(0.85)
+                    Text(subtitle)
+                        .font(.system(size: 11))
+                        .foregroundStyle(.white.opacity(0.5))
+                        .lineLimit(2)
+                        .multilineTextAlignment(.leading)
+                }
+                Spacer(minLength: 0)
             }
-            Spacer()
-            Image(systemName: "chevron.right")
-                .font(.system(size: 11, weight: .bold))
-                .foregroundStyle(.white.opacity(0.38))
+            .padding(13)
+            .frame(maxWidth: .infinity, minHeight: 132, alignment: .topLeading)
+            .glassCard(interactive: true)
         }
-        .padding(13)
-        .glassCard()
+        .buttonStyle(.plain)
+    }
+
+    private func settingToggleCard(_ title: String, subtitle: String, symbol: String, tint: Color, isOn: Binding<Bool>) -> some View {
+        settingCard(title, subtitle: subtitle, symbol: symbol, tint: tint, action: {
+            isOn.wrappedValue.toggle()
+            tapHaptic()
+        }) {
+            Toggle(title, isOn: isOn)
+                .labelsHidden()
+                .tint(Color.cyan)
+                .fixedSize()
+                .allowsHitTesting(false)
+        }
+    }
+
+    private func settingBadge(_ text: String, tint: Color = Color.cyan) -> some View {
+        Text(text)
+            .font(.system(size: 9, weight: .bold, design: .rounded))
+            .tracking(0.6)
+            .foregroundStyle(tint)
+            .padding(.horizontal, 8)
+            .padding(.vertical, 4)
+            .background(tint.opacity(0.14), in: Capsule())
     }
 
     private var searchBar: some View {
@@ -488,8 +666,10 @@ struct HomeView: View {
 }
 
 private struct GameTile: View {
-    let game: (name: String, platform: String, symbol: String, tint: Color)
+    let game: Game
     var compact: Bool = false
+    var isFavorite: Bool = false
+    var onToggleFavorite: () -> Void = {}
 
     var body: some View {
         VStack(alignment: .leading, spacing: compact ? 6 : 8) {
@@ -517,6 +697,16 @@ private struct GameTile: View {
                             .background(.ultraThinMaterial, in: Capsule())
                             .overlay(Capsule().strokeBorder(Color.white.opacity(0.22), lineWidth: 0.5))
                         Spacer()
+                        Button(action: onToggleFavorite) {
+                            Image(systemName: isFavorite ? "star.fill" : "star")
+                                .font(.system(size: compact ? 11 : 13, weight: .bold))
+                                .foregroundStyle(isFavorite ? Color.yellow : Color.white.opacity(0.85))
+                                .frame(width: compact ? 24 : 28, height: compact ? 24 : 28)
+                                .background(.ultraThinMaterial, in: Circle())
+                                .overlay(Circle().strokeBorder(Color.white.opacity(0.22), lineWidth: 0.5))
+                        }
+                        .buttonStyle(.plain)
+                        .accessibilityLabel(isFavorite ? "Quitar de favoritos" : "Añadir a favoritos")
                     }
                     Spacer()
                 }
@@ -577,8 +767,8 @@ private extension View {
         }
     }
 
-    func glassCard(cornerRadius: CGFloat = 18) -> some View {
-        liquidGlass(in: RoundedRectangle(cornerRadius: cornerRadius, style: .continuous))
+    func glassCard(cornerRadius: CGFloat = 18, interactive: Bool = false) -> some View {
+        liquidGlass(in: RoundedRectangle(cornerRadius: cornerRadius, style: .continuous), interactive: interactive)
     }
 
     /// Cristal líquido. En iOS 26, compilando con Xcode 26, usa el `glassEffect` nativo de Apple;
