@@ -85,7 +85,24 @@ struct HomeView: View {
         }
     }
     private var searchBar: some View {
-        HStack(spacing: 10) { Image(systemName: "magnifyingglass").foregroundStyle(.cyan); TextField("Buscar juegos y plataformas…", text: $searchText).font(.subheadline); if !searchText.isEmpty { Button { searchText = "" } label: { Image(systemName: "xmark.circle.fill").foregroundStyle(.white.opacity(0.45) } } }
+        
+HStack(spacing: 10) {
+    Image(systemName: "magnifyingglass")
+        .foregroundStyle(.cyan)
+
+    TextField("Buscar juegos y plataformas…", text: $searchText)
+        .font(.subheadline)
+
+    if !searchText.isEmpty {
+        Button {
+            searchText = ""
+        } label: {
+            Image(systemName: "xmark.circle.fill")
+                .foregroundStyle(.white.opacity(0.45))
+        }
+    }
+}
+
         }.padding(13).glassCard()
     }
     private var platformFilters: some View {
