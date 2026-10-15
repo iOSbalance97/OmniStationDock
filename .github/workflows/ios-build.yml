@@ -1,10 +1,13 @@
-name: Build OmniStation Dock IPA
+name: Build and Release OmniStation Dock
 
 on:
+  workflow_dispatch:
   push:
     branches:
       - main
-  workflow_dispatch:
+
+permissions:
+  contents: write
 
 jobs:
   build:
@@ -20,7 +23,7 @@ jobs:
       - name: Generate Xcode project
         run: xcodegen generate
 
-      - name: Build for iPhone
+      - name: Build iOS app
         run: |
           xcodebuild \
             -project OmniStationDock.xcodeproj \
@@ -33,15 +36,21 @@ jobs:
 
       - name: Package IPA
         run: |
+          set -e
           APP_PATH="build/Build/Products/Release-iphoneos/OmniStationDock.app"
           test -d "$APP_PATH"
           mkdir -p Payload
           cp -R "$APP_PATH" Payload/
           /usr/bin/zip -qry OmniStationDock.ipa Payload
+          test -s OmniStationDock.ipa
+          unzip -t OmniStationDock.ipa
 
-      - name: Upload IPA
-        uses: actions/upload-artifact@v4
-        with:
-          name: OmniStationDock-IPA
-          path: OmniStationDock.ipa
-          if-no-files-found: error
+      - name: Publish GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          VERSION="build-${GITHUB_RUN_NUMBER}"
+          gh release create "$VERSION" OmniStationDock.ipa \
+            --title "OmniStation Dock ${VERSION}" \
+            --notes "Compilación automática de OmniStation Dock." \
+            --prerelease
