@@ -47,10 +47,8 @@ struct HomeView: View {
         }
     }
 
-    private var isLandscape: Bool {
-        // GeometryReader below provides the actual layout decision.
-        false
-    }
+    // Altura del degradado con el que el contenido se desvanece bajo la barra superior.
+    private static let topFadeHeight: CGFloat = 18
 
     var body: some View {
         GeometryReader { geometry in
@@ -107,12 +105,12 @@ struct HomeView: View {
     private func topBar(compact: Bool) -> some View {
         HStack(spacing: compact ? 10 : 12) {
             Image("OmniLogo")
-            .resizable()
-            .interpolation(.high)
-            .scaledToFit()
-            .frame(width: compact ? 40 : 48, height: compact ? 40 : 48)
-            .clipShape(RoundedRectangle(cornerRadius: compact ? 11 : 14, style: .continuous))
-            .shadow(color: .cyan.opacity(0.24), radius: 9)
+                .resizable()
+                .interpolation(.high)
+                .scaledToFit()
+                .frame(width: compact ? 40 : 48, height: compact ? 40 : 48)
+                .clipShape(RoundedRectangle(cornerRadius: compact ? 11 : 14, style: .continuous))
+                .shadow(color: .cyan.opacity(0.24), radius: 9)
 
             HStack(spacing: 4) {
                 Text("OmniStation")
@@ -158,7 +156,7 @@ struct HomeView: View {
         }
         .padding(.horizontal, 12)
         .padding(.top, 8)
-        .padding(.bottom, 7)
+        .padding(.bottom, 3)
     }
 
     private func homeContent(landscape: Bool) -> some View {
@@ -189,9 +187,10 @@ struct HomeView: View {
                 notice
             }
             .padding(.horizontal, 16)
-            .padding(.top, 5)
+            .padding(.top, Self.topFadeHeight)
             .padding(.bottom, 24)
         }
+        .topFade(Self.topFadeHeight)
     }
 
     private func geometryWidthFraction(_ fraction: CGFloat) -> CGFloat {
@@ -342,9 +341,10 @@ struct HomeView: View {
                 if filteredGames.isEmpty { emptyResults }
             }
             .padding(.horizontal, 16)
-            .padding(.top, 8)
+            .padding(.top, Self.topFadeHeight)
             .padding(.bottom, 24)
         }
+        .topFade(Self.topFadeHeight)
     }
 
     private func settingsContent(landscape: Bool) -> some View {
@@ -367,9 +367,10 @@ struct HomeView: View {
                 }
             }
             .padding(.horizontal, 16)
-            .padding(.top, 8)
+            .padding(.top, Self.topFadeHeight)
             .padding(.bottom, 24)
         }
+        .topFade(Self.topFadeHeight)
     }
 
     private func settingRow(_ title: String, subtitle: String, symbol: String, tint: Color) -> some View {
@@ -492,6 +493,26 @@ private struct GameTile: View {
 }
 
 private extension View {
+    /// Desvanece el borde superior para que el contenido se disuelva al deslizar
+    /// en lugar de cortarse en seco justo debajo de la barra superior.
+    func topFade(_ height: CGFloat) -> some View {
+        mask {
+            VStack(spacing: 0) {
+                LinearGradient(
+                    stops: [
+                        .init(color: .clear, location: 0),
+                        .init(color: .black.opacity(0.55), location: 0.5),
+                        .init(color: .black, location: 1)
+                    ],
+                    startPoint: .top,
+                    endPoint: .bottom
+                )
+                .frame(height: height)
+                Rectangle().fill(.black)
+            }
+        }
+    }
+
     func glassCard() -> some View {
         self
             .background {
