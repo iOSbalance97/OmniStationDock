@@ -107,12 +107,12 @@ struct HomeView: View {
     private func topBar(compact: Bool) -> some View {
         HStack(spacing: compact ? 10 : 12) {
             Image("OmniLogo")
-                .resizable()
-                .scaledToFit()
-                .frame(width: compact ? 40 : 48, height: compact ? 40 : 48)
-                .interpolation(.high)
-                .clipShape(RoundedRectangle(cornerRadius: compact ? 11 : 14, style: .continuous))
-                .shadow(color: .cyan.opacity(0.24), radius: 9)
+            .resizable()
+            .interpolation(.high)
+            .scaledToFit()
+            .frame(width: compact ? 40 : 48, height: compact ? 40 : 48)
+            .clipShape(RoundedRectangle(cornerRadius: compact ? 11 : 14, style: .continuous))
+            .shadow(color: .cyan.opacity(0.24), radius: 9)
 
             HStack(spacing: 4) {
                 Text("OmniStation")
