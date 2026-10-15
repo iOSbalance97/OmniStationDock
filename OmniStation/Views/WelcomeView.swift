@@ -53,8 +53,11 @@ struct WelcomeView: View {
                             width: min(min(geometry.size.width * 0.62, geometry.size.height * 0.32), 285),
                             height: min(min(geometry.size.width * 0.62, geometry.size.height * 0.32), 285)
                         )
-                        .shadow(color: Color.cyan.opacity(0.52), radius: 34)
-                        .shadow(color: Color.blue.opacity(0.42), radius: 52)
+                        // Screen blending suppresses the dark square baked into the artwork,
+                        // letting the planet sit visually over the cosmic background.
+                        .blendMode(.screen)
+                        .shadow(color: Color.cyan.opacity(0.34), radius: 22)
+                        .shadow(color: Color.blue.opacity(0.26), radius: 38)
                         .accessibilityLabel("Planeta de OmniStation Dock")
 
                     VStack(spacing: 3) {

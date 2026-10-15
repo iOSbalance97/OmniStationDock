@@ -110,19 +110,25 @@ struct HomeView: View {
                 .resizable()
                 .scaledToFit()
                 .frame(width: compact ? 40 : 48, height: compact ? 40 : 48)
+                .interpolation(.high)
                 .clipShape(RoundedRectangle(cornerRadius: compact ? 11 : 14, style: .continuous))
                 .shadow(color: .cyan.opacity(0.24), radius: 9)
 
-            HStack(spacing: 0) {
-                Text("OmniStation").foregroundStyle(.white)
-                Text(" Dock").foregroundStyle(Color(red: 0.08, green: 0.68, blue: 1.0))
+            HStack(spacing: 4) {
+                Text("OmniStation")
+                    .foregroundStyle(.white)
+                Text("Dock")
+                    .foregroundStyle(Color(red: 0.08, green: 0.68, blue: 1.0))
             }
-            .font(.system(size: compact ? 20 : 23, weight: .bold, design: .rounded))
-            .tracking(0.15)
+            .font(.system(size: compact ? 16 : 18, weight: .bold, design: .rounded))
+            .tracking(-0.35)
             .lineLimit(1)
-            .minimumScaleFactor(0.75)
+            .fixedSize(horizontal: false, vertical: true)
+            .minimumScaleFactor(0.82)
+            .layoutPriority(1)
+            .shadow(color: Color.cyan.opacity(0.12), radius: 8, y: 0)
 
-            Spacer(minLength: 8)
+            Spacer(minLength: 5)
 
             HStack(spacing: 7) {
                 ForEach(DockSection.allCases, id: \.self) { section in
@@ -134,7 +140,7 @@ struct HomeView: View {
                         Image(systemName: section.symbol)
                             .font(.system(size: compact ? 15 : 17, weight: .semibold))
                             .foregroundStyle(selectedSection == section ? Color.cyan : .white.opacity(0.76))
-                            .frame(width: compact ? 42 : 46, height: compact ? 40 : 44)
+                            .frame(width: compact ? 38 : 42, height: compact ? 38 : 42)
                             .background {
                                 RoundedRectangle(cornerRadius: 13, style: .continuous)
                                     .fill(selectedSection == section ? Color.cyan.opacity(0.24) : Color.white.opacity(0.055))
@@ -150,10 +156,9 @@ struct HomeView: View {
                 }
             }
         }
-        .padding(.horizontal, 16)
-        .padding(.top, 10)
-        .padding(.bottom, 12)
-        .background(.black.opacity(0.18))
+        .padding(.horizontal, 12)
+        .padding(.top, 8)
+        .padding(.bottom, 7)
     }
 
     private func homeContent(landscape: Bool) -> some View {
@@ -281,7 +286,21 @@ struct HomeView: View {
                     .contentShape(Capsule())
                 }
             }
+            .padding(.horizontal, 12)
             .padding(.vertical, 5)
+        }
+        // Fade the scroll edges instead of covering the first/last chips with overlays.
+        .mask {
+            LinearGradient(
+                stops: [
+                    .init(color: .clear, location: 0),
+                    .init(color: .black, location: 0.055),
+                    .init(color: .black, location: 0.94),
+                    .init(color: .clear, location: 1)
+                ],
+                startPoint: .leading,
+                endPoint: .trailing
+            )
         }
     }
 
