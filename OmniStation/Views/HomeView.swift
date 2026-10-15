@@ -18,6 +18,8 @@ struct HomeView: View {
     @State private var searchText = ""
     @State private var selectedPlatform = "Todos"
     @State private var selectedSection: DockSection = .inicio
+    // Posiciones medidas en pantalla: "header", "scroll" (zona de scroll) y "content" (contenido).
+    @State private var frames: [String: CGRect] = [:]
 
     private let platforms: [(name: String, symbol: String)] = [
         ("Todos", "square.grid.2x2.fill"),
@@ -47,16 +49,38 @@ struct HomeView: View {
         }
     }
 
-    // Altura del degradado con el que el contenido se desvanece bajo la barra superior.
-    private static let topFadeHeight: CGFloat = 18
+    // Puntos de scroll en los que logo y título terminan de desvanecerse (menos = más rápido).
+    private static let titleCollapseDistance: CGFloat = 36
+    // Altura de la barra superior mientras no se ha medido.
+    private static let defaultHeaderHeight: CGFloat = 63
+
+    private var headerHeight: CGFloat {
+        frames["header"]?.height ?? Self.defaultHeaderHeight
+    }
+
+    /// Cuánto ha subido el contenido respecto a su posición de reposo (0 sin deslizar).
+    private var scrollOffset: CGFloat {
+        guard let header = frames["header"], let content = frames["content"] else { return 0 }
+        return max(0, header.minY - content.minY)
+    }
+
+    /// 0 = logo y título visibles, 1 = ocultos del todo.
+    private var titleHidden: CGFloat {
+        min(1, scrollOffset / Self.titleCollapseDistance)
+    }
+
+    /// Zona por encima de la barra (p. ej. bajo la barra de estado) donde el contenido no se ve.
+    private var fadeClearHeight: CGFloat {
+        guard let header = frames["header"], let scroll = frames["scroll"] else { return 0 }
+        return max(0, header.minY - scroll.minY)
+    }
 
     var body: some View {
         GeometryReader { geometry in
             let landscape = geometry.size.width > geometry.size.height
-            ZStack {
+            ZStack(alignment: .top) {
                 background
-                VStack(spacing: 0) {
-                    topBar(compact: landscape)
+                Group {
                     if selectedSection == .inicio {
                         homeContent(landscape: landscape)
                     } else if selectedSection == .busqueda {
@@ -65,8 +89,10 @@ struct HomeView: View {
                         settingsContent(landscape: landscape)
                     }
                 }
+                topBar(compact: landscape)
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .onPreferenceChange(FramesKey.self) { frames = $0 }
             .preferredColorScheme(.dark)
         }
     }
@@ -104,27 +130,33 @@ struct HomeView: View {
 
     private func topBar(compact: Bool) -> some View {
         HStack(spacing: compact ? 10 : 12) {
-            Image("OmniLogo")
-                .resizable()
-                .interpolation(.high)
-                .scaledToFit()
-                .frame(width: compact ? 40 : 48, height: compact ? 40 : 48)
-                .clipShape(RoundedRectangle(cornerRadius: compact ? 11 : 14, style: .continuous))
-                .shadow(color: .cyan.opacity(0.24), radius: 9)
+            // Logo y título: se desvanecen y suben un poco mientras se desliza.
+            HStack(spacing: compact ? 10 : 12) {
+                Image("OmniLogo")
+                    .resizable()
+                    .interpolation(.high)
+                    .scaledToFit()
+                    .frame(width: compact ? 40 : 48, height: compact ? 40 : 48)
+                    .clipShape(RoundedRectangle(cornerRadius: compact ? 11 : 14, style: .continuous))
+                    .shadow(color: .cyan.opacity(0.24), radius: 9)
 
-            HStack(spacing: 4) {
-                Text("OmniStation")
-                    .foregroundStyle(.white)
-                Text("Dock")
-                    .foregroundStyle(Color(red: 0.08, green: 0.68, blue: 1.0))
+                HStack(spacing: 4) {
+                    Text("OmniStation")
+                        .foregroundStyle(.white)
+                    Text("Dock")
+                        .foregroundStyle(Color(red: 0.08, green: 0.68, blue: 1.0))
+                }
+                .font(.system(size: compact ? 16 : 18, weight: .bold, design: .rounded))
+                .tracking(-0.35)
+                .lineLimit(1)
+                .fixedSize(horizontal: false, vertical: true)
+                .minimumScaleFactor(0.82)
+                .layoutPriority(1)
+                .shadow(color: Color.cyan.opacity(0.12), radius: 8, y: 0)
             }
-            .font(.system(size: compact ? 16 : 18, weight: .bold, design: .rounded))
-            .tracking(-0.35)
-            .lineLimit(1)
-            .fixedSize(horizontal: false, vertical: true)
-            .minimumScaleFactor(0.82)
-            .layoutPriority(1)
-            .shadow(color: Color.cyan.opacity(0.12), radius: 8, y: 0)
+            .opacity(1 - titleHidden)
+            .offset(y: -10 * titleHidden)
+            .scaleEffect(1 - 0.06 * titleHidden, anchor: .leading)
 
             Spacer(minLength: 5)
 
@@ -156,7 +188,8 @@ struct HomeView: View {
         }
         .padding(.horizontal, 12)
         .padding(.top, 8)
-        .padding(.bottom, 3)
+        .padding(.bottom, 7)
+        .reportFrame("header")
     }
 
     private func homeContent(landscape: Bool) -> some View {
@@ -187,10 +220,12 @@ struct HomeView: View {
                 notice
             }
             .padding(.horizontal, 16)
-            .padding(.top, Self.topFadeHeight)
+            .padding(.top, headerHeight + 5)
             .padding(.bottom, 24)
+            .reportFrame("content")
         }
-        .topFade(Self.topFadeHeight)
+        .reportFrame("scroll")
+        .topFade(clear: fadeClearHeight, fade: headerHeight)
     }
 
     private func geometryWidthFraction(_ fraction: CGFloat) -> CGFloat {
@@ -341,10 +376,12 @@ struct HomeView: View {
                 if filteredGames.isEmpty { emptyResults }
             }
             .padding(.horizontal, 16)
-            .padding(.top, Self.topFadeHeight)
+            .padding(.top, headerHeight + 8)
             .padding(.bottom, 24)
+            .reportFrame("content")
         }
-        .topFade(Self.topFadeHeight)
+        .reportFrame("scroll")
+        .topFade(clear: fadeClearHeight, fade: headerHeight)
     }
 
     private func settingsContent(landscape: Bool) -> some View {
@@ -367,10 +404,12 @@ struct HomeView: View {
                 }
             }
             .padding(.horizontal, 16)
-            .padding(.top, Self.topFadeHeight)
+            .padding(.top, headerHeight + 8)
             .padding(.bottom, 24)
+            .reportFrame("content")
         }
-        .topFade(Self.topFadeHeight)
+        .reportFrame("scroll")
+        .topFade(clear: fadeClearHeight, fade: headerHeight)
     }
 
     private func settingRow(_ title: String, subtitle: String, symbol: String, tint: Color) -> some View {
@@ -492,22 +531,39 @@ private struct GameTile: View {
     }
 }
 
+private struct FramesKey: PreferenceKey {
+    static let defaultValue: [String: CGRect] = [:]
+    static func reduce(value: inout [String: CGRect], nextValue: () -> [String: CGRect]) {
+        value.merge(nextValue()) { _, new in new }
+    }
+}
+
 private extension View {
-    /// Desvanece el borde superior para que el contenido se disuelva al deslizar
-    /// en lugar de cortarse en seco justo debajo de la barra superior.
-    func topFade(_ height: CGFloat) -> some View {
+    /// Mide la posición en pantalla de esta vista y la publica con un nombre.
+    func reportFrame(_ id: String) -> some View {
+        background {
+            GeometryReader { proxy in
+                Color.clear.preference(key: FramesKey.self, value: [id: proxy.frame(in: .global)])
+            }
+        }
+    }
+
+    /// Desvanece el contenido que sube por detrás de la barra superior: invisible en la
+    /// zona de arriba (`clear`) y cada vez más visible a lo largo de `fade` puntos.
+    func topFade(clear: CGFloat, fade: CGFloat) -> some View {
         mask {
             VStack(spacing: 0) {
+                Color.clear.frame(height: clear)
                 LinearGradient(
                     stops: [
                         .init(color: .clear, location: 0),
-                        .init(color: .black.opacity(0.55), location: 0.5),
+                        .init(color: .black.opacity(0.35), location: 0.5),
                         .init(color: .black, location: 1)
                     ],
                     startPoint: .top,
                     endPoint: .bottom
                 )
-                .frame(height: height)
+                .frame(height: fade)
                 Rectangle().fill(.black)
             }
         }
