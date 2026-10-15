@@ -84,26 +84,26 @@ struct HomeView: View {
             Button {} label: { Image(systemName: "slider.horizontal.3").font(.system(size: 17, weight: .semibold)).foregroundStyle(.white).frame(width: 42, height: 42).glassCard() }
         }
     }
+    
     private var searchBar: some View {
-        
-HStack(spacing: 10) {
-    Image(systemName: "magnifyingglass")
-        .foregroundStyle(.cyan)
+        HStack(spacing: 10) {
+            Image(systemName: "magnifyingglass")
+                .foregroundStyle(.cyan)
 
-    TextField("Buscar juegos y plataformas…", text: $searchText)
-        .font(.subheadline)
+            TextField("Buscar juegos y plataformas…", text: $searchText)
+                .font(.subheadline)
 
-    if !searchText.isEmpty {
-        Button {
-            searchText = ""
-        } label: {
-            Image(systemName: "xmark.circle.fill")
-                .foregroundStyle(.white.opacity(0.45))
+            if !searchText.isEmpty {
+                Button {
+                    searchText = ""
+                } label: {
+                    Image(systemName: "xmark.circle.fill")
+                        .foregroundStyle(.white.opacity(0.45))
+                }
+            }
         }
-    }
-}
-
-        }.padding(13).glassCard()
+        .padding(13)
+        .glassCard()
     }
     private var platformFilters: some View {
         ScrollView(.horizontal, showsIndicators: false) { HStack(spacing: 8) { ForEach(platforms, id: \.self) { platform in
