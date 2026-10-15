@@ -1,11 +1,10 @@
-
-name: Build OmniStation Dock
+name: Build OmniStation Dock IPA
 
 on:
-  workflow_dispatch:
   push:
     branches:
       - main
+  workflow_dispatch:
 
 jobs:
   build:
@@ -15,33 +14,34 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Select Xcode
-        run: sudo xcode-select -s /Applications/Xcode.app
-
       - name: Install XcodeGen
         run: brew install xcodegen
 
       - name: Generate Xcode project
         run: xcodegen generate
 
-      - name: Build iOS Simulator app
+      - name: Build for iPhone
         run: |
           xcodebuild \
             -project OmniStationDock.xcodeproj \
             -scheme OmniStationDock \
-            -sdk iphonesimulator \
+            -sdk iphoneos \
             -configuration Release \
             -derivedDataPath build \
             CODE_SIGNING_ALLOWED=NO \
             build
 
-      - name: Package app
+      - name: Package IPA
         run: |
-          cd build/Build/Products/Release-iphonesimulator
-          zip -r "$GITHUB_WORKSPACE/OmniStationDock-Simulator.zip" OmniStationDock.app
+          APP_PATH="build/Build/Products/Release-iphoneos/OmniStationDock.app"
+          test -d "$APP_PATH"
+          mkdir -p Payload
+          cp -R "$APP_PATH" Payload/
+          /usr/bin/zip -qry OmniStationDock.ipa Payload
 
-      - name: Upload build artifact
+      - name: Upload IPA
         uses: actions/upload-artifact@v4
         with:
-          name: OmniStationDock-Simulator
-          path: OmniStationDock-Simulator.zip
+          name: OmniStationDock-IPA
+          path: OmniStationDock.ipa
+          if-no-files-found: error
