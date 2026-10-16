@@ -261,7 +261,7 @@ struct HomeView: View {
                 controllerSearchFocused = false
                 switch section {
                 case .inicio: controllerSelectedArea = "games"
-                case .busqueda: controllerSelectedArea = gamepadConnected ? "alphabet" : "games"
+                case .busqueda: controllerSelectedArea = gamepadConnected ? "search" : "games"
                 case .favoritos: controllerSelectedArea = "games"
                 case .ajustes: controllerSelectedArea = "settings"; controllerSelectedSettingIndex = 0
                 }
@@ -274,7 +274,7 @@ struct HomeView: View {
             }
             .onChange(of: controllers.controllers.count) { _, count in
                 if selectedSection == .busqueda {
-                    controllerSelectedArea = count > 0 ? "alphabet" : "games"
+                    controllerSelectedArea = count > 0 ? "search" : "games"
                     controllerSearchFocused = false
                 }
             }
@@ -484,8 +484,6 @@ struct HomeView: View {
     }
 
     private func moveControllerSelection(_ direction: ControllerMonitor.Direction) {
-        // Si hay una ventana de selección abierta, no mover la interfaz que queda detrás.
-        guard sheet == nil, dialog == nil, !showAbout, !showPhotoPicker, !showFolderImporter else { return }
         if selectedSection == .ajustes {
             moveSettingsSelection(direction)
             return
@@ -604,8 +602,6 @@ struct HomeView: View {
     }
 
     private func activateControllerSelection() {
-        // Los botones de la ventana/modal deben recibir la acción antes que Ajustes.
-        guard sheet == nil, dialog == nil, !showAbout, !showPhotoPicker, !showFolderImporter else { return }
         if selectedSection == .ajustes {
             activateSelectedSetting()
             return
@@ -823,13 +819,8 @@ struct HomeView: View {
             }
             .onChange(of: controllerSelectedGameID) { _, id in
                 guard let id else { return }
-                let items = controllerGames
-                let index = items.firstIndex(where: { $0.id == id }) ?? 0
-                let landscape = UIScreen.main.bounds.width > UIScreen.main.bounds.height
-                let columns = landscape ? (selectedSection == .inicio ? 3 : 4) : (compactGrid ? 3 : 2)
-                let anchor: UnitPoint = index < columns ? .top : .center
                 withAnimation(.easeInOut(duration: 0.2)) {
-                    proxy.scrollTo("game-\(id)", anchor: anchor)
+                    proxy.scrollTo("game-\(id)", anchor: .center)
                 }
             }
             .onChange(of: controllerSelectedArea) { _, area in
@@ -842,12 +833,12 @@ struct HomeView: View {
                 default: target = controllerSelectedGameID.map { "game-\($0)" }
                 }
                 if let target {
-                    withAnimation(.easeInOut(duration: 0.2)) { proxy.scrollTo(target, anchor: .top) }
+                    withAnimation(.easeInOut(duration: 0.2)) { proxy.scrollTo(target, anchor: .center) }
                 }
             }
             .onChange(of: controllerSelectedSettingIndex) { _, index in
                 withAnimation(.easeInOut(duration: 0.2)) {
-                    proxy.scrollTo("setting-\(index)", anchor: index < 4 ? .top : .center)
+                    proxy.scrollTo("setting-\(index)", anchor: .center)
                 }
             }
             .reportFrame("scroll")
@@ -1078,11 +1069,7 @@ struct HomeView: View {
             }
         }
         .onAppear {
-            DispatchQueue.main.async {
-                withAnimation(.easeInOut(duration: 0.22)) {
-                    proxy.scrollTo("platform-\(selectedPlatform)", anchor: .center)
-                }
-            }
+            proxy.scrollTo("platform-\(selectedPlatform)", anchor: .center)
         }
         // Fade the scroll edges instead of covering the first/last chips with overlays.
         .mask {
@@ -1191,7 +1178,7 @@ struct HomeView: View {
         .glassCard()
         .id("alphabet-bar")
         .overlay {
-            if gamepadConnected && selectedSection == .busqueda && controllerSelectedArea == "alphabet" {
+            if controllerSelectedArea == "alphabet" {
                 RoundedRectangle(cornerRadius: 18, style: .continuous)
                     .stroke(Color.cyan.opacity(0.98), lineWidth: 2)
                     .allowsHitTesting(false)
