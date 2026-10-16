@@ -808,7 +808,7 @@ struct HomeView: View {
 
     // MARK: - Estructura común de pantallas con scroll
 
-    private func screen<Content: View>(topGap: CGFloat = 8, @ViewBuilder _ content: () -> Content) -> some View {
+    private func screen<Content: View>(topGap: CGFloat = 8, @ViewBuilder _ content: @escaping () -> Content) -> some View {
         ScrollViewReader { proxy in
             ScrollView(showsIndicators: false) {
                 content()
