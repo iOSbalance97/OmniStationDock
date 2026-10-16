@@ -446,7 +446,7 @@ struct HomeView: View {
     }
 
     private func cyclePlatform(_ step: Int) {
-        let names = platforms.map(\\.name)
+        let names = platforms.map(\.name)
         guard !names.isEmpty else { return }
         let current = names.firstIndex(of: selectedPlatform) ?? 0
         selectedPlatform = names[(current + step + names.count) % names.count]
