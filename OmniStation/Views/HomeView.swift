@@ -41,6 +41,8 @@ struct HomeView: View {
     // Posiciones medidas en pantalla: "header", "scroll" (zona de scroll) y "content" (contenido).
     @State private var frames: [String: CGRect] = [:]
     @State private var featuredIndex = 0
+    // Selección explícita para la cruceta: no dependemos del focus automático de SwiftUI.
+    @State private var controllerSelectedGameID: String?
 
     // Ajustes (se guardan en el dispositivo).
     @AppStorage("favoriteGames") private var favoritesRaw = ""
@@ -243,6 +245,15 @@ struct HomeView: View {
             .onChange(of: showSampleGames) { _, _ in refreshLibrary() }
             .onChange(of: selectedSection) { _, section in
                 if section == .inicio { refreshLibrary() }
+                controllerSelectedGameID = controllerGames.first?.id
+            }
+            .onChange(of: selectedPlatform) { _, _ in
+                controllerSelectedGameID = controllerGames.first?.id
+            }
+            .onChange(of: searchText) { _, _ in
+                if let selected = controllerSelectedGameID, !controllerGames.contains(where: { $0.id == selected }) {
+                    controllerSelectedGameID = controllerGames.first?.id
+                }
             }
             .onChange(of: controllerNavigation) { _, value in controllers.navigationEnabled = value }
             .onChange(of: keepLandscape) { _, value in
@@ -254,9 +265,15 @@ struct HomeView: View {
             }
             .onAppear {
                 controllers.navigationEnabled = controllerNavigation
-                controllers.onShoulder = { step in cyclePlatform(step) }
+                controllers.onShoulder = { step in
+                    // En Ajustes los hombros no cambian de plataforma: no hay filtros visibles.
+                    guard selectedSection != .ajustes else { return }
+                    cyclePlatform(step)
+                }
                 controllers.onTrigger = { step in cycleSection(step) }
                 controllers.onCancel = { handleControllerCancel() }
+                controllers.onDirection = { direction in moveControllerSelection(direction) }
+                controllers.onAccept = { activateControllerSelection() }
                 if keepLandscape {
                     DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) {
                         OrientationController.apply(landscape: true)
@@ -426,6 +443,41 @@ struct HomeView: View {
         guard hdmiForced else { return }
         hdmiForced = false
         OrientationController.apply(landscape: keepLandscape)
+    }
+
+    /// Juegos que forman parte de la navegación interna de la pantalla actual.
+    /// Los filtros y la navegación principal siguen reservados a L1/R1 y L2/R2.
+    private var controllerGames: [Game] {
+        switch selectedSection {
+        case .inicio, .busqueda: return filteredGames
+        case .favoritos: return favoriteGames
+        case .ajustes: return []
+        }
+    }
+
+    private func moveControllerSelection(_ direction: ControllerMonitor.Direction) {
+        let items = controllerGames
+        guard !items.isEmpty else { return }
+        let current = items.firstIndex { $0.id == controllerSelectedGameID } ?? 0
+        let landscape = UIScreen.main.bounds.width > UIScreen.main.bounds.height
+        let columns: Int
+        if landscape { columns = selectedSection == .inicio ? 3 : 4 }
+        else { columns = compactGrid ? 3 : 2 }
+        var next = current
+        switch direction {
+        case .left: next = max(0, current - 1)
+        case .right: next = min(items.count - 1, current + 1)
+        case .up: next = max(0, current - columns)
+        case .down: next = min(items.count - 1, current + columns)
+        }
+        controllerSelectedGameID = items[next].id
+        feedback()
+    }
+
+    private func activateControllerSelection() {
+        guard let id = controllerSelectedGameID,
+              let game = controllerGames.first(where: { $0.id == id }) else { return }
+        open(game)
     }
 
     private func cycleSection(_ step: Int) {
@@ -860,6 +912,7 @@ struct HomeView: View {
                     game: game,
                     compact: compact,
                     isFavorite: isFavorite,
+                    isControllerSelected: controllerSelectedGameID == game.id,
                     favoriteLabel: isFavorite ? tr("Quitar de favoritos") : tr("Añadir a favoritos"),
                     removeLabel: tr("Quitar de la biblioteca"),
                     onToggleFavorite: { toggleFavorite(game.id) },
@@ -1173,6 +1226,7 @@ private struct GameTile: View {
     let game: Game
     var compact: Bool = false
     var isFavorite: Bool = false
+    var isControllerSelected: Bool = false
     var favoriteLabel: String = ""
     var removeLabel: String = ""
     var onToggleFavorite: () -> Void = {}
@@ -1236,7 +1290,7 @@ private struct GameTile: View {
         .frame(maxWidth: .infinity, alignment: .leading)
         .glassCard()
         .overlay {
-            if isFocused {
+            if isControllerSelected || isFocused {
                 RoundedRectangle(cornerRadius: 18, style: .continuous)
                     .stroke(Color.cyan.opacity(0.98), lineWidth: 2.5)
                     .shadow(color: Color.cyan.opacity(0.72), radius: 10)

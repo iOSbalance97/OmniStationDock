@@ -493,10 +493,13 @@ final class ControllerMonitor: ObservableObject {
             } else {
                 direction = nil
             }
-            guard let direction else { return }
+            guard let direction else {
+                self.lastDirection = nil
+                return
+            }
             let now = ProcessInfo.processInfo.systemUptime
-            // Evita que el muestreo continuo de la cruceta dispare decenas de pasos.
-            guard direction != self.lastDirection || now - self.lastDirectionAt > 0.22 else { return }
+            // Un paso al pulsar y repetición moderada si se mantiene la dirección.
+            guard direction != self.lastDirection || now - self.lastDirectionAt > 0.32 else { return }
             self.lastDirection = direction
             self.lastDirectionAt = now
             DispatchQueue.main.async { self.onDirection?(direction) }
