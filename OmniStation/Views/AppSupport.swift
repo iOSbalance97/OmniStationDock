@@ -419,6 +419,17 @@ final class ControllerMonitor: ObservableObject {
     var onTrigger: ((Int) -> Void)?
     /// B/círculo: volver atrás.
     var onCancel: (() -> Void)?
+    /// Cruceta: navegación direccional dentro de la interfaz.
+    var onDirection: ((Direction) -> Void)?
+    /// A/X: activar el elemento que tenga el foco.
+    var onAccept: (() -> Void)?
+
+    enum Direction {
+        case up, down, left, right
+    }
+
+    private var lastDirectionAt: TimeInterval = 0
+    private var lastDirection: Direction?
 
     private var tokens: [NSObjectProtocol] = []
 
@@ -469,6 +480,30 @@ final class ControllerMonitor: ObservableObject {
         pad.rightTrigger.pressedChangedHandler = { [weak self] _, _, pressed in
             guard pressed, self?.navigationEnabled == true else { return }
             self?.onTrigger?(1)
+        }
+        // La cruceta debe registrarse explícitamente: focusable() por sí solo no
+        // convierte los eventos de GCController en navegación SwiftUI en iOS.
+        pad.dpad.valueChangedHandler = { [weak self] _, x, y in
+            guard let self, self.navigationEnabled else { return }
+            let direction: Direction?
+            if abs(x) > abs(y), abs(x) > 0.5 {
+                direction = x < 0 ? .left : .right
+            } else if abs(y) > 0.5 {
+                direction = y < 0 ? .down : .up
+            } else {
+                direction = nil
+            }
+            guard let direction else { return }
+            let now = ProcessInfo.processInfo.systemUptime
+            // Evita que el muestreo continuo de la cruceta dispare decenas de pasos.
+            guard direction != self.lastDirection || now - self.lastDirectionAt > 0.22 else { return }
+            self.lastDirection = direction
+            self.lastDirectionAt = now
+            DispatchQueue.main.async { self.onDirection?(direction) }
+        }
+        pad.buttonA.pressedChangedHandler = { [weak self] _, _, pressed in
+            guard pressed, self?.navigationEnabled == true else { return }
+            DispatchQueue.main.async { self?.onAccept?() }
         }
         pad.buttonB.pressedChangedHandler = { [weak self] _, _, pressed in
             guard pressed, self?.navigationEnabled == true else { return }

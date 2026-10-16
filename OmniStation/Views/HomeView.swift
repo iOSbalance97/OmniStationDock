@@ -1169,6 +1169,7 @@ struct HomeView: View {
 }
 
 private struct GameTile: View {
+    @Environment(\.isFocused) private var isFocused
     let game: Game
     var compact: Bool = false
     var isFavorite: Bool = false
@@ -1234,7 +1235,17 @@ private struct GameTile: View {
         .padding(7)
         .frame(maxWidth: .infinity, alignment: .leading)
         .glassCard()
+        .overlay {
+            if isFocused {
+                RoundedRectangle(cornerRadius: 18, style: .continuous)
+                    .stroke(Color.cyan.opacity(0.98), lineWidth: 2.5)
+                    .shadow(color: Color.cyan.opacity(0.72), radius: 10)
+                    .padding(-2)
+                    .allowsHitTesting(false)
+            }
+        }
         .contentShape(Rectangle())
+        .focusable()
         .onTapGesture(perform: onOpen)
         .contextMenu {
             Button(action: onToggleFavorite) {
