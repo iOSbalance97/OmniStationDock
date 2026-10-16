@@ -15,8 +15,8 @@ targets:
     settings:
       base:
         
-        MARKETING_VERSION: "0.0.6"
-        CURRENT_PROJECT_VERSION: "6"
+        MARKETING_VERSION: "0.0.7"
+        CURRENT_PROJECT_VERSION: "7"
         PRODUCT_BUNDLE_IDENTIFIER: com.omnistation.dock
         PRODUCT_NAME: OmniStationDock
         SWIFT_VERSION: "5.0"
