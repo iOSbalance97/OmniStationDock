@@ -401,7 +401,7 @@ final class HDMIMonitor: ObservableObject {
     }
 }
 
-/// Lista los mandos conectados y, si se activa, usa L1/R1 para cambiar de pestaña.
+/// Detecta mandos GameController y expone sus controles a la interfaz.
 final class ControllerMonitor: ObservableObject {
     struct Info: Identifiable, Equatable {
         let id: String
@@ -411,82 +411,87 @@ final class ControllerMonitor: ObservableObject {
         let charging: Bool
     }
 
+    enum Direction { case up, down, left, right }
     @Published private(set) var controllers: [Info] = []
     var navigationEnabled = true
-    /// L1/R1: -1/+1 para cambiar de plataforma.
-    var onShoulder: ((Int) -> Void)?
-    /// L2/R2: -1/+1 para cambiar de sección principal.
-    var onTrigger: ((Int) -> Void)?
-    /// O/B: cancelar o volver atrás.
+
+    /// L1/R1: cambiar plataforma. -1 anterior, +1 siguiente.
+    var onPlatformShoulder: ((Int) -> Void)?
+    /// L2/R2: cambiar sección. -1 anterior, +1 siguiente.
+    var onSectionTrigger: ((Int) -> Void)?
+    /// Cruceta/joystick digital para navegación entre elementos.
+    var onDirection: ((Direction) -> Void)?
+    /// Botón principal (X/A) y secundario (O/B).
+    var onAccept: (() -> Void)?
     var onCancel: (() -> Void)?
 
     private var tokens: [NSObjectProtocol] = []
-    private var triggerPressed: [ObjectIdentifier: (left: Bool, right: Bool)] = [:]
+    private var boundControllers = Set<ObjectIdentifier>()
 
     init() {
         refresh()
         let center = NotificationCenter.default
-        let names: [Notification.Name] = [.GCControllerDidConnect, .GCControllerDidDisconnect]
-        for name in names {
+        for name in [Notification.Name.GCControllerDidConnect, .GCControllerDidDisconnect] {
             tokens.append(center.addObserver(forName: name, object: nil, queue: .main) { [weak self] _ in
                 self?.refresh()
             })
         }
     }
 
-    deinit {
-        tokens.forEach { NotificationCenter.default.removeObserver($0) }
-    }
+    deinit { tokens.forEach { NotificationCenter.default.removeObserver($0) } }
 
     func refresh() {
         let list = GCController.controllers()
         controllers = list.enumerated().map { index, controller in
             let level = controller.battery.map { Int(($0.batteryLevel * 100).rounded()) }
-            return Info(
-                id: "\(index)-\(controller.vendorName ?? "")",
-                name: controller.vendorName ?? "Mando",
-                category: controller.productCategory,
-                battery: level,
-                charging: controller.battery?.batteryState == .charging
-            )
+            return Info(id: "\\(index)-\\(controller.vendorName ?? \"\")",
+                        name: controller.vendorName ?? "Mando",
+                        category: controller.productCategory,
+                        battery: level,
+                        charging: controller.battery?.batteryState == .charging)
         }
-        list.forEach(bind)
+        for controller in list { bind(controller) }
     }
 
     private func bind(_ controller: GCController) {
-        guard let pad = controller.extendedGamepad else { return }
+        let identifier = ObjectIdentifier(controller)
+        guard boundControllers.insert(identifier).inserted,
+              let pad = controller.extendedGamepad else { return }
+
         pad.leftShoulder.pressedChangedHandler = { [weak self] _, _, pressed in
             guard pressed, self?.navigationEnabled == true else { return }
-            self?.onShoulder?(-1)
+            self?.onPlatformShoulder?(-1)
         }
         pad.rightShoulder.pressedChangedHandler = { [weak self] _, _, pressed in
             guard pressed, self?.navigationEnabled == true else { return }
-            self?.onShoulder?(1)
+            self?.onPlatformShoulder?(1)
         }
-
-        // L2/R2 are analog triggers; fire once when crossing the press threshold.
-        let key = ObjectIdentifier(controller)
-        triggerPressed[key] = (false, false)
-        pad.leftTrigger.valueChangedHandler = { [weak self] _, value, _ in
-            guard let self, self.navigationEnabled else { return }
-            let pressed = value > 0.65
-            let wasPressed = self.triggerPressed[key]?.left ?? false
-            if pressed && !wasPressed { self.onTrigger?(-1) }
-            self.triggerPressed[key] = (pressed, self.triggerPressed[key]?.right ?? false)
+        pad.leftTrigger.pressedChangedHandler = { [weak self] _, _, pressed in
+            guard pressed, self?.navigationEnabled == true else { return }
+            self?.onSectionTrigger?(-1)
         }
-        pad.rightTrigger.valueChangedHandler = { [weak self] _, value, _ in
-            guard let self, self.navigationEnabled else { return }
-            let pressed = value > 0.65
-            let wasPressed = self.triggerPressed[key]?.right ?? false
-            if pressed && !wasPressed { self.onTrigger?(1) }
-            self.triggerPressed[key] = (self.triggerPressed[key]?.left ?? false, pressed)
+        pad.rightTrigger.pressedChangedHandler = { [weak self] _, _, pressed in
+            guard pressed, self?.navigationEnabled == true else { return }
+            self?.onSectionTrigger?(1)
+        }
+        pad.dpad.up.pressedChangedHandler = { [weak self] _, _, pressed in
+            if pressed, self?.navigationEnabled == true { self?.onDirection?(.up) }
+        }
+        pad.dpad.down.pressedChangedHandler = { [weak self] _, _, pressed in
+            if pressed, self?.navigationEnabled == true { self?.onDirection?(.down) }
+        }
+        pad.dpad.left.pressedChangedHandler = { [weak self] _, _, pressed in
+            if pressed, self?.navigationEnabled == true { self?.onDirection?(.left) }
+        }
+        pad.dpad.right.pressedChangedHandler = { [weak self] _, _, pressed in
+            if pressed, self?.navigationEnabled == true { self?.onDirection?(.right) }
+        }
+        pad.buttonA.pressedChangedHandler = { [weak self] _, _, pressed in
+            if pressed, self?.navigationEnabled == true { self?.onAccept?() }
         }
         pad.buttonB.pressedChangedHandler = { [weak self] _, _, pressed in
-            guard pressed, self?.navigationEnabled == true else { return }
-            self?.onCancel?()
+            if pressed, self?.navigationEnabled == true { self?.onCancel?() }
         }
-        // A/X is deliberately left to SwiftUI's native focus engine so it activates
-        // the currently focused control rather than a hard-coded screen action.
     }
 }
 

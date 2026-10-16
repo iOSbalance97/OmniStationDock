@@ -254,7 +254,27 @@ struct HomeView: View {
             }
             .onAppear {
                 controllers.navigationEnabled = controllerNavigation
-                controllers.onShoulder = { step in cycleSection(step) }
+                controllers.onPlatformShoulder = { step in cyclePlatform(step) }
+                controllers.onSectionTrigger = { step in cycleSection(step) }
+                controllers.onDirection = { direction in
+                    switch direction {
+                    case .left: cyclePlatform(-1)
+                    case .right: cyclePlatform(1)
+                    case .up: cycleSection(-1)
+                    case .down: cycleSection(1)
+                    }
+                }
+                controllers.onAccept = {
+                    if selectedSection == .inicio, let game = featured.indices.contains(featuredIndex) ? featured[featuredIndex] : filteredGames.first {
+                        open(game)
+                    } else if selectedSection == .favoritos, let game = favoriteGames.first {
+                        open(game)
+                    }
+                }
+                controllers.onCancel = {
+                    withAnimation(.easeInOut(duration: 0.2)) { selectedSection = .inicio }
+                    searchText = ""
+                }
                 if keepLandscape {
                     DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) {
                         OrientationController.apply(landscape: true)
@@ -345,7 +365,6 @@ struct HomeView: View {
                     .font(.system(size: 13, weight: .bold))
                     .foregroundStyle(Color.cyan)
                     .buttonStyle(.plain)
-                    .focusable()
                 }
             }
             .padding(.horizontal, 16)
@@ -424,6 +443,14 @@ struct HomeView: View {
         guard hdmiForced else { return }
         hdmiForced = false
         OrientationController.apply(landscape: keepLandscape)
+    }
+
+    private func cyclePlatform(_ step: Int) {
+        let names = platforms.map(\\.name)
+        guard !names.isEmpty else { return }
+        let current = names.firstIndex(of: selectedPlatform) ?? 0
+        selectedPlatform = names[(current + step + names.count) % names.count]
+        feedback()
     }
 
     private func cycleSection(_ step: Int) {
@@ -567,7 +594,6 @@ struct HomeView: View {
                             .shadow(color: selectedSection == section ? Color.cyan.opacity(0.42) : .clear, radius: 12, y: 0)
                     }
                     .buttonStyle(.plain)
-                    .focusable()
                     .accessibilityLabel(tr(section.rawValue))
                 }
             }
@@ -729,7 +755,6 @@ struct HomeView: View {
                     .background(LinearGradient(colors: [.blue, .cyan.opacity(0.78)], startPoint: .leading, endPoint: .trailing), in: Capsule())
                 }
                 .buttonStyle(.plain)
-                    .focusable()
                 .padding(.top, 3)
             }
             .padding(18)
@@ -789,7 +814,6 @@ struct HomeView: View {
                         .shadow(color: isSelected ? Color.cyan.opacity(0.30) : Color.clear, radius: 10)
                     }
                     .buttonStyle(.plain)
-                    .focusable()
                     .contentShape(Capsule())
                 }
             }
@@ -1063,7 +1087,6 @@ struct HomeView: View {
             .glassCard(interactive: true)
         }
         .buttonStyle(.plain)
-                    .focusable()
     }
 
     private func settingToggleCard(_ title: String, subtitle: String, symbol: String, tint: Color, isOn: Binding<Bool>) -> some View {
@@ -1103,7 +1126,6 @@ struct HomeView: View {
                     Image(systemName: "xmark.circle.fill").foregroundStyle(.white.opacity(0.5))
                 }
                 .buttonStyle(.plain)
-                    .focusable()
             }
         }
         .padding(.horizontal, 14)
@@ -1186,7 +1208,6 @@ private struct GameTile: View {
                                 .overlay(Circle().strokeBorder(Color.white.opacity(0.22), lineWidth: 0.5))
                         }
                         .buttonStyle(.plain)
-                    .focusable()
                         .accessibilityLabel(favoriteLabel)
                     }
                     Spacer()
