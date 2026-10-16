@@ -43,6 +43,9 @@ struct HomeView: View {
     @State private var featuredIndex = 0
     // Selección explícita para la cruceta: no dependemos del focus automático de SwiftUI.
     @State private var controllerSelectedGameID: String?
+    @State private var controllerSelectedSettingTitle: String?
+    @State private var controllerSettingTitles: [String] = []
+    @State private var controllerSettingActions: [String: () -> Void] = [:]
 
     // Ajustes (se guardan en el dispositivo).
     @AppStorage("favoriteGames") private var favoritesRaw = ""
@@ -456,6 +459,22 @@ struct HomeView: View {
     }
 
     private func moveControllerSelection(_ direction: ControllerMonitor.Direction) {
+        if selectedSection == .ajustes {
+            let items = controllerSettingTitles
+            guard !items.isEmpty else { return }
+            let current = items.firstIndex(of: controllerSelectedSettingTitle ?? "") ?? 0
+            let columns = UIScreen.main.bounds.width > UIScreen.main.bounds.height ? 3 : 2
+            let next: Int
+            switch direction {
+            case .left: next = max(0, current - 1)
+            case .right: next = min(items.count - 1, current + 1)
+            case .up: next = max(0, current - columns)
+            case .down: next = min(items.count - 1, current + columns)
+            }
+            controllerSelectedSettingTitle = items[next]
+            feedback()
+            return
+        }
         let items = controllerGames
         guard !items.isEmpty else { return }
         let current = items.firstIndex { $0.id == controllerSelectedGameID } ?? 0
@@ -475,6 +494,12 @@ struct HomeView: View {
     }
 
     private func activateControllerSelection() {
+        if selectedSection == .ajustes {
+            guard let title = controllerSelectedSettingTitle,
+                  let action = controllerSettingActions[title] else { return }
+            action()
+            return
+        }
         guard let id = controllerSelectedGameID,
               let game = controllerGames.first(where: { $0.id == id }) else { return }
         open(game)
@@ -1141,9 +1166,28 @@ struct HomeView: View {
             .padding(13)
             .frame(maxWidth: .infinity, minHeight: 132, alignment: .topLeading)
             .glassCard(interactive: true)
+                .overlay {
+                    if selectedSection == .ajustes && controllerSelectedSettingTitle == title {
+                        RoundedRectangle(cornerRadius: 18, style: .continuous)
+                            .stroke(Color.cyan.opacity(0.98), lineWidth: 2.5)
+                            .shadow(color: Color.cyan.opacity(0.72), radius: 10)
+                            .padding(-2)
+                            .allowsHitTesting(false)
+                    }
+                }
         }
         .buttonStyle(ControllerFocusableButtonStyle())
-                    .focusable()
+        .focusable()
+        .onAppear {
+            if !controllerSettingTitles.contains(title) { controllerSettingTitles.append(title) }
+            controllerSettingActions[title] = action
+            if controllerSelectedSettingTitle == nil { controllerSelectedSettingTitle = title }
+        }
+        .onDisappear {
+            controllerSettingTitles.removeAll { $0 == title }
+            controllerSettingActions.removeValue(forKey: title)
+            if controllerSelectedSettingTitle == title { controllerSelectedSettingTitle = controllerSettingTitles.first }
+        }
     }
 
     private func settingToggleCard(_ title: String, subtitle: String, symbol: String, tint: Color, isOn: Binding<Bool>) -> some View {
