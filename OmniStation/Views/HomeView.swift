@@ -45,6 +45,7 @@ struct HomeView: View {
     @State private var controllerSelectedGameID: String?
     // Zona seleccionada por la cruceta: juegos, destacados o búsqueda.
     @State private var controllerSelectedArea = "games"
+    @State private var controllerSelectedSettingIndex = 0
     @FocusState private var controllerSearchFocused: Bool
 
     // Ajustes (se guardan en el dispositivo).
@@ -251,10 +252,10 @@ struct HomeView: View {
                 controllerSelectedGameID = controllerGames.first?.id
                 controllerSearchFocused = false
                 switch section {
-                case .inicio: controllerSelectedArea = featured.isEmpty ? "games" : "featured"
-                case .busqueda: controllerSelectedArea = "search"
+                case .inicio: controllerSelectedArea = "games"
+                case .busqueda: controllerSelectedArea = "games"
                 case .favoritos: controllerSelectedArea = "games"
-                case .ajustes: controllerSelectedArea = "games"
+                case .ajustes: controllerSelectedArea = "settings"; controllerSelectedSettingIndex = 0
                 }
             }
             .onChange(of: selectedPlatform) { _, _ in
@@ -466,50 +467,92 @@ struct HomeView: View {
     }
 
     private func moveControllerSelection(_ direction: ControllerMonitor.Direction) {
-        // La cruceta navega por el contenido; los filtros y las secciones siguen reservados a L/R.
-        if selectedSection == .inicio {
-            if controllerSelectedArea == "featured" {
-                if direction == .down || direction == .right { controllerSelectedArea = "games"; feedback() }
-                return
+        if selectedSection == .ajustes {
+            moveSettingsSelection(direction)
+            return
+        }
+        if selectedSection == .inicio, controllerSelectedArea == "featured" {
+            switch direction {
+            case .down:
+                controllerSelectedArea = "games"
+                controllerSelectedGameID = controllerGames.first?.id
+            case .left:
+                if !featured.isEmpty { featuredIndex = (featuredIndex - 1 + featured.count) % featured.count }
+            case .right:
+                if !featured.isEmpty { featuredIndex = (featuredIndex + 1) % featured.count }
+            case .up: break
             }
-            if direction == .up, !featured.isEmpty {
-                controllerSelectedArea = "featured"
-                feedback()
-                return
-            }
-        } else if selectedSection == .busqueda {
-            if controllerSelectedArea == "search" {
-                if direction == .down { controllerSelectedArea = "games"; controllerSearchFocused = false; feedback() }
-                return
-            }
-            if direction == .up {
-                controllerSelectedArea = "search"
+            feedback()
+            return
+        }
+        // Navegación geométrica: solo se cambia de zona al llegar al borde real
+        // de la cuadrícula, nunca por pulsar arriba desde cualquier fila.
+        if selectedSection == .busqueda, controllerSelectedArea == "search" {
+            if direction == .down {
+                controllerSelectedArea = "games"
+                controllerSelectedGameID = controllerGames.first?.id
                 controllerSearchFocused = false
                 feedback()
-                return
             }
+            return
         }
 
         let items = controllerGames
-        guard !items.isEmpty else { return }
+        guard !items.isEmpty else {
+            if selectedSection == .inicio, !featured.isEmpty, direction == .down {
+                controllerSelectedArea = "featured"
+                controllerSelectedGameID = nil
+                feedback()
+            }
+            return
+        }
         let current = items.firstIndex { $0.id == controllerSelectedGameID } ?? 0
         let landscape = UIScreen.main.bounds.width > UIScreen.main.bounds.height
-        let columns: Int
-        if landscape { columns = selectedSection == .inicio ? 3 : 4 }
-        else { columns = compactGrid ? 3 : 2 }
+        let columns = landscape ? (selectedSection == .inicio ? 3 : 4) : (compactGrid ? 3 : 2)
+        let isTopRow = current < columns
         var next = current
+
         switch direction {
-        case .left: next = max(0, current - 1)
-        case .right: next = min(items.count - 1, current + 1)
-        case .up: next = max(0, current - columns)
-        case .down: next = min(items.count - 1, current + columns)
+        case .left:
+            next = max(0, current - 1)
+        case .right:
+            next = min(items.count - 1, current + 1)
+        case .up:
+            if isTopRow {
+                if selectedSection == .inicio, !featured.isEmpty {
+                    controllerSelectedArea = "featured"
+                    controllerSelectedGameID = nil
+                    controllerSearchFocused = false
+                    feedback()
+                    return
+                }
+                if selectedSection == .busqueda {
+                    controllerSelectedArea = "search"
+                    controllerSearchFocused = false
+                    controllerSelectedGameID = nil
+                    feedback()
+                    return
+                }
+            } else {
+                next = max(0, current - columns)
+            }
+        case .down:
+            if current + columns < items.count {
+                next = current + columns
+            }
         }
+
         controllerSelectedArea = "games"
         controllerSelectedGameID = items[next].id
+        controllerSearchFocused = false
         feedback()
     }
 
     private func activateControllerSelection() {
+        if selectedSection == .ajustes {
+            activateSelectedSetting()
+            return
+        }
         if selectedSection == .inicio, controllerSelectedArea == "featured", !featured.isEmpty {
             open(featured[min(max(featuredIndex, 0), featured.count - 1)])
             return
@@ -1019,6 +1062,54 @@ struct HomeView: View {
 
     // MARK: - Ajustes
 
+    // Orden de tarjetas de Ajustes: coincide con el orden visual de las tres cuadrículas.
+    private var controllerSettingTitles: [String] {
+        [tr("Mandos"), tr("Vibración"), tr("Sonido al pulsar"), tr("Dock en horizontal"), tr("Horizontal con HDMI"), tr("Acerca de"),
+         tr("Fondo personalizado"), tr("Idioma"), tr("Reorganizar plataformas"), tr("Cuadrícula completa"), tr("Bienvenida animada"), tr("Logo en cabecera"),
+         tr("Escaneo de juegos"), tr("Vincular carpeta"), tr("Acceso directo (URL)"), tr("Juegos de ejemplo"), tr("Borrar favoritos"), tr("Quitar añadidos")]
+    }
+
+    private func moveSettingsSelection(_ direction: ControllerMonitor.Direction) {
+        let count = controllerSettingTitles.count
+        let columns = UIScreen.main.bounds.width > UIScreen.main.bounds.height ? 3 : 2
+        let current = min(max(controllerSelectedSettingIndex, 0), count - 1)
+        var next = current
+        switch direction {
+        case .left: next = current % columns == 0 ? current : current - 1
+        case .right: next = current % columns == columns - 1 || current + 1 >= count ? current : current + 1
+        case .up: next = max(0, current - columns)
+        case .down: next = min(count - 1, current + columns)
+        }
+        controllerSelectedSettingIndex = next
+        controllerSelectedArea = "settings"
+        feedback()
+    }
+
+    private func activateSelectedSetting() {
+        switch controllerSelectedSettingIndex {
+        case 0: sheet = .controllers
+        case 1: hapticsEnabled.toggle()
+        case 2: clickSound.toggle()
+        case 3: keepLandscape.toggle()
+        case 4: hdmiAutoLandscape.toggle()
+        case 5: showAbout = true
+        case 6: if customBackground == nil { showPhotoPicker = true } else { dialog = .background }
+        case 7: dialog = .language
+        case 8: sheet = .platformOrder
+        case 9: compactGrid.toggle()
+        case 10: showWelcome.toggle()
+        case 11: showHeaderLogo.toggle()
+        case 12: scanLibrary()
+        case 13: showFolderImporter = true
+        case 14: sheet = .addShortcut
+        case 15: showSampleGames.toggle()
+        case 16: if !favoriteNames.isEmpty { dialog = .clearFavorites }
+        case 17: if !libraryGames.isEmpty { dialog = .clearLibrary }
+        default: break
+        }
+        feedback()
+    }
+
     private func settingsContent(landscape: Bool) -> some View {
         screen {
             VStack(alignment: .leading, spacing: 14) {
@@ -1194,7 +1285,18 @@ struct HomeView: View {
             .glassCard(interactive: true)
         }
         .buttonStyle(ControllerFocusableButtonStyle())
-                    .focusable()
+        .focusable()
+        .overlay {
+            if selectedSection == .ajustes,
+               controllerSelectedArea == "settings",
+               controllerSettingTitles.indices.contains(controllerSelectedSettingIndex),
+               controllerSettingTitles[controllerSelectedSettingIndex] == title {
+                RoundedRectangle(cornerRadius: 18, style: .continuous)
+                    .stroke(Color.cyan.opacity(0.98), lineWidth: 2.5)
+                    .shadow(color: Color.cyan.opacity(0.65), radius: 9)
+                    .allowsHitTesting(false)
+            }
+        }
     }
 
     private func settingToggleCard(_ title: String, subtitle: String, symbol: String, tint: Color, isOn: Binding<Bool>) -> some View {
@@ -1350,7 +1452,7 @@ private struct GameTile: View {
         .frame(maxWidth: .infinity, alignment: .leading)
         .glassCard()
         .overlay {
-            if isControllerSelected || isFocused {
+            if isControllerSelected {
                 RoundedRectangle(cornerRadius: 18, style: .continuous)
                     .stroke(Color.cyan.opacity(0.98), lineWidth: 2.5)
                     .shadow(color: Color.cyan.opacity(0.72), radius: 10)
