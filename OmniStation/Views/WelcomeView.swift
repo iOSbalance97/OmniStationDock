@@ -1,9 +1,15 @@
 import SwiftUI
 
 struct WelcomeView: View {
+    @AppStorage("appLanguage") private var appLanguage = "system"
     @State private var isVisible = false
     @State private var showHome = false
-    @AppStorage("dock.animatedWelcome") private var animatedWelcome = true
+
+    init() {
+        // Si el ajuste «Bienvenida animada» está desactivado, se entra directo a la pantalla principal.
+        let showWelcome = UserDefaults.standard.object(forKey: "showWelcome") as? Bool ?? true
+        _showHome = State(initialValue: !showWelcome)
+    }
 
     var body: some View {
         ZStack {
@@ -16,15 +22,10 @@ struct WelcomeView: View {
         .preferredColorScheme(.dark)
         .task {
             guard !showHome else { return }
-            if animatedWelcome {
-                withAnimation(.easeOut(duration: 0.9)) { isVisible = true }
-                try? await Task.sleep(nanoseconds: 2_500_000_000)
-            } else {
-                isVisible = true
-                try? await Task.sleep(nanoseconds: 250_000_000)
-            }
+            withAnimation(.easeOut(duration: 0.9)) { isVisible = true }
+            try? await Task.sleep(nanoseconds: 2_500_000_000)
             guard !Task.isCancelled else { return }
-            withAnimation(.easeInOut(duration: animatedWelcome ? 0.45 : 0.1)) { showHome = true }
+            withAnimation(.easeInOut(duration: 0.45)) { showHome = true }
         }
     }
 
@@ -52,15 +53,15 @@ struct WelcomeView: View {
                 VStack(spacing: 0) {
                     Spacer(minLength: 24)
 
+                    // El PNG del planeta es transparente y con el anillo completo (ya no hace falta mezclar).
+                    let planetSize = min(min(geometry.size.width * 0.80, geometry.size.height * 0.40), 380)
                     Image("WelcomePlanet")
                         .resizable()
+                        .interpolation(.high)
                         .scaledToFit()
-                        .frame(
-                            width: min(min(geometry.size.width * 0.90, geometry.size.height * 0.43), 390),
-                            height: min(min(geometry.size.width * 0.90, geometry.size.height * 0.43), 390)
-                        )
-                        .shadow(color: Color.cyan.opacity(0.22), radius: 18)
-                        .shadow(color: Color.blue.opacity(0.16), radius: 30)
+                        .frame(width: planetSize, height: planetSize)
+                        .shadow(color: Color.cyan.opacity(0.34), radius: 22)
+                        .shadow(color: Color.blue.opacity(0.26), radius: 38)
                         .accessibilityLabel("Planeta de OmniStation Dock")
 
                     VStack(spacing: 3) {
@@ -86,7 +87,7 @@ struct WelcomeView: View {
 
                     Spacer()
 
-                    Text("TU UNIVERSO DE JUEGOS,\nEN UN SOLO LUGAR.")
+                    Text(L10n.tr("TU UNIVERSO DE JUEGOS,\nEN UN SOLO LUGAR.", appLanguage))
                         .font(.system(size: 12, weight: .medium, design: .rounded))
                         .tracking(2.5)
                         .multilineTextAlignment(.center)
