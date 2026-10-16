@@ -46,6 +46,8 @@ struct HomeView: View {
     // Zona seleccionada por la cruceta: juegos, destacados o búsqueda.
     @State private var controllerSelectedArea = "games"
     @State private var controllerSelectedSettingIndex = 0
+    @State private var controllerSelectedLetterIndex = 0
+    @State private var controllerAlphabetSearchText = ""
     @FocusState private var controllerSearchFocused: Bool
 
     // Ajustes (se guardan en el dispositivo).
@@ -143,10 +145,16 @@ struct HomeView: View {
         name == "Todos" ? tr("Todos") : name
     }
 
+    private var gamepadConnected: Bool {
+        !controllers.controllers.isEmpty
+    }
+
+    private let controllerAlphabet = Array("ABCDEFGHIJKLMNOPQRSTUVWXYZ").map(String.init) + ["⌫", "✕"]
+
     private var filteredGames: [Game] {
         games.filter {
             (selectedPlatform == "Todos" || $0.platform == selectedPlatform) &&
-            (searchText.isEmpty || $0.name.localizedCaseInsensitiveContains(searchText))
+            (searchText.isEmpty || (gamepadConnected ? $0.name.range(of: searchText, options: [.anchored, .caseInsensitive, .diacriticInsensitive]) != nil : $0.name.localizedCaseInsensitiveContains(searchText)))
         }
     }
 
@@ -253,13 +261,22 @@ struct HomeView: View {
                 controllerSearchFocused = false
                 switch section {
                 case .inicio: controllerSelectedArea = "games"
-                case .busqueda: controllerSelectedArea = "games"
+                case .busqueda: controllerSelectedArea = gamepadConnected ? "search" : "games"
                 case .favoritos: controllerSelectedArea = "games"
                 case .ajustes: controllerSelectedArea = "settings"; controllerSelectedSettingIndex = 0
                 }
             }
             .onChange(of: selectedPlatform) { _, _ in
                 controllerSelectedGameID = controllerGames.first?.id
+                if selectedSection == .inicio, selectedPlatform != "Todos", controllerSelectedArea == "featured" {
+                    controllerSelectedArea = "games"
+                }
+            }
+            .onChange(of: controllers.controllers.count) { _, count in
+                if selectedSection == .busqueda {
+                    controllerSelectedArea = count > 0 ? "search" : "games"
+                    controllerSearchFocused = false
+                }
             }
             .onChange(of: searchText) { _, _ in
                 if let selected = controllerSelectedGameID, !controllerGames.contains(where: { $0.id == selected }) {
@@ -278,7 +295,7 @@ struct HomeView: View {
                 controllers.navigationEnabled = controllerNavigation
                 controllers.onShoulder = { step in
                     // En Ajustes los hombros no cambian de plataforma: no hay filtros visibles.
-                    guard selectedSection != .ajustes else { return }
+                    guard selectedSection != .ajustes, selectedSection != .favoritos else { return }
                     cyclePlatform(step)
                 }
                 controllers.onTrigger = { step in cycleSection(step) }
@@ -471,6 +488,10 @@ struct HomeView: View {
             moveSettingsSelection(direction)
             return
         }
+        if selectedSection == .busqueda, controllerSelectedArea == "alphabet" {
+            moveAlphabetSelection(direction)
+            return
+        }
         if selectedSection == .inicio, controllerSelectedArea == "featured" {
             switch direction {
             case .down:
@@ -548,6 +569,38 @@ struct HomeView: View {
         feedback()
     }
 
+    private func moveAlphabetSelection(_ direction: ControllerMonitor.Direction) {
+        let count = controllerAlphabet.count
+        let columns = 7
+        let current = min(max(controllerSelectedLetterIndex, 0), count - 1)
+        var next = current
+        switch direction {
+        case .left: next = current % columns == 0 ? current : current - 1
+        case .right: next = current % columns == columns - 1 || current + 1 >= count ? current : current + 1
+        case .up: next = max(0, current - columns)
+        case .down: next = min(count - 1, current + columns)
+        }
+        controllerSelectedLetterIndex = next
+        feedback()
+    }
+
+    private func activateAlphabetSelection() {
+        guard controllerAlphabet.indices.contains(controllerSelectedLetterIndex) else { return }
+        let key = controllerAlphabet[controllerSelectedLetterIndex]
+        switch key {
+        case "⌫":
+            if !controllerAlphabetSearchText.isEmpty {
+                controllerAlphabetSearchText.removeLast()
+            }
+        case "✕":
+            controllerAlphabetSearchText = ""
+        default:
+            controllerAlphabetSearchText += key
+        }
+        searchText = controllerAlphabetSearchText
+        feedback()
+    }
+
     private func activateControllerSelection() {
         if selectedSection == .ajustes {
             activateSelectedSetting()
@@ -557,8 +610,17 @@ struct HomeView: View {
             open(featured[min(max(featuredIndex, 0), featured.count - 1)])
             return
         }
+        if selectedSection == .busqueda, controllerSelectedArea == "alphabet" {
+            activateAlphabetSelection()
+            return
+        }
         if selectedSection == .busqueda, controllerSelectedArea == "search" {
-            controllerSearchFocused = true
+            if gamepadConnected {
+                controllerSelectedArea = "alphabet"
+                controllerSelectedLetterIndex = 0
+            } else {
+                controllerSearchFocused = true
+            }
             return
         }
         guard let id = controllerSelectedGameID,
@@ -747,15 +809,41 @@ struct HomeView: View {
     // MARK: - Estructura común de pantallas con scroll
 
     private func screen<Content: View>(topGap: CGFloat = 8, @ViewBuilder _ content: () -> Content) -> some View {
-        ScrollView(showsIndicators: false) {
-            content()
-                .padding(.horizontal, 16)
-                .padding(.top, headerHeight + topGap)
-                .padding(.bottom, 44)
-                .reportFrame("content")
+        ScrollViewReader { proxy in
+            ScrollView(showsIndicators: false) {
+                content()
+                    .padding(.horizontal, 16)
+                    .padding(.top, headerHeight + topGap)
+                    .padding(.bottom, 44)
+                    .reportFrame("content")
+            }
+            .onChange(of: controllerSelectedGameID) { _, id in
+                guard let id else { return }
+                withAnimation(.easeInOut(duration: 0.2)) {
+                    proxy.scrollTo("game-\(id)", anchor: .center)
+                }
+            }
+            .onChange(of: controllerSelectedArea) { _, area in
+                let target: String?
+                switch area {
+                case "featured": target = "featured-panel"
+                case "search": target = "search-bar"
+                case "alphabet": target = "alphabet-bar"
+                case "settings": target = "setting-\(controllerSelectedSettingIndex)"
+                default: target = controllerSelectedGameID.map { "game-\($0)" }
+                }
+                if let target {
+                    withAnimation(.easeInOut(duration: 0.2)) { proxy.scrollTo(target, anchor: .center) }
+                }
+            }
+            .onChange(of: controllerSelectedSettingIndex) { _, index in
+                withAnimation(.easeInOut(duration: 0.2)) {
+                    proxy.scrollTo("setting-\(index)", anchor: .center)
+                }
+            }
+            .reportFrame("scroll")
+            .edgeFade(clear: fadeClearHeight, fade: headerHeight, bottom: Self.bottomFadeHeight)
         }
-        .reportFrame("scroll")
-        .edgeFade(clear: fadeClearHeight, fade: headerHeight, bottom: Self.bottomFadeHeight)
     }
 
     private func screenTitle(_ title: String, subtitle: String) -> some View {
@@ -777,8 +865,10 @@ struct HomeView: View {
 
                 if landscape {
                     HStack(alignment: .top, spacing: 16) {
-                        featuredPanel
-                            .frame(maxWidth: geometryWidthFraction(0.34))
+                        if selectedPlatform == "Todos" {
+                            featuredPanel
+                                .frame(maxWidth: geometryWidthFraction(0.34))
+                        }
                         VStack(alignment: .leading, spacing: 12) {
                             sectionHeading(tr("Juegos recientes"), detail: tr("%ld elementos", filteredGames.count))
                             gameGrid(filteredGames, columns: 3, compact: true)
@@ -786,7 +876,9 @@ struct HomeView: View {
                         .frame(maxWidth: .infinity, alignment: .leading)
                     }
                 } else {
-                    featuredPanel
+                    if selectedPlatform == "Todos" {
+                        featuredPanel
+                    }
                     sectionHeading(tr("Tu biblioteca"), detail: tr("%ld elementos", filteredGames.count))
                     gameGrid(filteredGames, columns: compactGrid ? 3 : 2, compact: compactGrid)
                 }
@@ -929,6 +1021,7 @@ struct HomeView: View {
     }
 
     private func platformFilters(compact: Bool) -> some View {
+        ScrollViewReader { proxy in
         ScrollView(.horizontal, showsIndicators: false) {
             HStack(spacing: 8) {
                 ForEach(platforms, id: \.name) { platform in
@@ -964,10 +1057,19 @@ struct HomeView: View {
                     .buttonStyle(ControllerFocusableButtonStyle())
                     .focusable()
                     .contentShape(Capsule())
+                    .id("platform-\(platform.name)")
                 }
             }
             .padding(.horizontal, 12)
             .padding(.vertical, 8)
+        }
+        .onChange(of: selectedPlatform) { _, value in
+            withAnimation(.easeInOut(duration: 0.22)) {
+                proxy.scrollTo("platform-\(value)", anchor: .center)
+            }
+        }
+        .onAppear {
+            proxy.scrollTo("platform-\(selectedPlatform)", anchor: .center)
         }
         // Fade the scroll edges instead of covering the first/last chips with overlays.
         .mask {
@@ -981,6 +1083,7 @@ struct HomeView: View {
                 startPoint: .leading,
                 endPoint: .trailing
             )
+        }
         }
     }
 
@@ -1013,6 +1116,7 @@ struct HomeView: View {
                     onOpen: { open(game) },
                     onRemove: remove
                 )
+                .id("game-\(game.id)")
             }
         }
     }
@@ -1023,11 +1127,61 @@ struct HomeView: View {
         screen {
             VStack(alignment: .leading, spacing: 18) {
                 screenTitle(tr("Búsqueda"), subtitle: tr("Encuentra un juego o filtra por plataforma."))
-                searchBar
+                if gamepadConnected {
+                    controllerAlphabetBar
+                } else {
+                    searchBar
+                }
                 platformFilters(compact: landscape)
                 sectionHeading(tr("Resultados"), detail: tr("%ld encontrados", filteredGames.count))
                 gameGrid(filteredGames, columns: landscape ? 4 : (compactGrid ? 3 : 2), compact: landscape || compactGrid)
                 if filteredGames.isEmpty { emptyResults }
+            }
+        }
+    }
+
+    private var controllerAlphabetBar: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack(spacing: 10) {
+                Image(systemName: "magnifyingglass").foregroundStyle(.cyan)
+                Text(controllerAlphabetSearchText.isEmpty ? tr("Selecciona letras con el mando") : controllerAlphabetSearchText)
+                    .font(.system(size: 14, weight: .medium))
+                    .foregroundStyle(controllerAlphabetSearchText.isEmpty ? .white.opacity(0.55) : .white)
+                    .lineLimit(1)
+                Spacer()
+                Text(tr("A/X: elegir"))
+                    .font(.system(size: 10, weight: .semibold))
+                    .foregroundStyle(.cyan.opacity(0.9))
+            }
+            LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 6), count: 7), spacing: 6) {
+                ForEach(Array(controllerAlphabet.enumerated()), id: \.offset) { index, letter in
+                    Button {
+                        controllerSelectedLetterIndex = index
+                        controllerSelectedArea = "alphabet"
+                        activateAlphabetSelection()
+                    } label: {
+                        Text(letter)
+                            .font(.system(size: 13, weight: .bold, design: .rounded))
+                            .foregroundStyle(index == controllerSelectedLetterIndex && controllerSelectedArea == "alphabet" ? Color.black : Color.white)
+                            .frame(maxWidth: .infinity, minHeight: 34)
+                            .background(
+                                index == controllerSelectedLetterIndex && controllerSelectedArea == "alphabet" ? Color.cyan : Color.white.opacity(0.07),
+                                in: RoundedRectangle(cornerRadius: 8, style: .continuous)
+                            )
+                    }
+                    .buttonStyle(.plain)
+                    .id("alphabet-\(index)")
+                }
+            }
+        }
+        .padding(12)
+        .glassCard()
+        .id("alphabet-bar")
+        .overlay {
+            if controllerSelectedArea == "alphabet" {
+                RoundedRectangle(cornerRadius: 18, style: .continuous)
+                    .stroke(Color.cyan.opacity(0.98), lineWidth: 2)
+                    .allowsHitTesting(false)
             }
         }
     }
@@ -1286,6 +1440,7 @@ struct HomeView: View {
         }
         .buttonStyle(ControllerFocusableButtonStyle())
         .focusable()
+        .id("setting-\(controllerSettingTitles.firstIndex(of: title) ?? -1)")
         .overlay {
             if selectedSection == .ajustes,
                controllerSelectedArea == "settings",
@@ -1343,6 +1498,7 @@ struct HomeView: View {
         .padding(.horizontal, 14)
         .padding(.vertical, 13)
         .glassCard()
+        .id("search-bar")
         .overlay {
             if selectedSection == .busqueda && controllerSelectedArea == "search" {
                 RoundedRectangle(cornerRadius: 18, style: .continuous)
