@@ -43,9 +43,9 @@ struct HomeView: View {
     @State private var featuredIndex = 0
     // Selección explícita para la cruceta: no dependemos del focus automático de SwiftUI.
     @State private var controllerSelectedGameID: String?
-    @State private var controllerSelectedSettingTitle: String?
-    @State private var controllerSettingTitles: [String] = []
-    @State private var controllerSettingActions: [String: () -> Void] = [:]
+    // Zona seleccionada por la cruceta: juegos, destacados o búsqueda.
+    @State private var controllerSelectedArea = "games"
+    @FocusState private var controllerSearchFocused: Bool
 
     // Ajustes (se guardan en el dispositivo).
     @AppStorage("favoriteGames") private var favoritesRaw = ""
@@ -249,6 +249,13 @@ struct HomeView: View {
             .onChange(of: selectedSection) { _, section in
                 if section == .inicio { refreshLibrary() }
                 controllerSelectedGameID = controllerGames.first?.id
+                controllerSearchFocused = false
+                switch section {
+                case .inicio: controllerSelectedArea = featured.isEmpty ? "games" : "featured"
+                case .busqueda: controllerSelectedArea = "search"
+                case .favoritos: controllerSelectedArea = "games"
+                case .ajustes: controllerSelectedArea = "games"
+                }
             }
             .onChange(of: selectedPlatform) { _, _ in
                 controllerSelectedGameID = controllerGames.first?.id
@@ -459,22 +466,30 @@ struct HomeView: View {
     }
 
     private func moveControllerSelection(_ direction: ControllerMonitor.Direction) {
-        if selectedSection == .ajustes {
-            let items = controllerSettingTitles
-            guard !items.isEmpty else { return }
-            let current = items.firstIndex(of: controllerSelectedSettingTitle ?? "") ?? 0
-            let columns = UIScreen.main.bounds.width > UIScreen.main.bounds.height ? 3 : 2
-            let next: Int
-            switch direction {
-            case .left: next = max(0, current - 1)
-            case .right: next = min(items.count - 1, current + 1)
-            case .up: next = max(0, current - columns)
-            case .down: next = min(items.count - 1, current + columns)
+        // La cruceta navega por el contenido; los filtros y las secciones siguen reservados a L/R.
+        if selectedSection == .inicio {
+            if controllerSelectedArea == "featured" {
+                if direction == .down || direction == .right { controllerSelectedArea = "games"; feedback() }
+                return
             }
-            controllerSelectedSettingTitle = items[next]
-            feedback()
-            return
+            if direction == .up, !featured.isEmpty {
+                controllerSelectedArea = "featured"
+                feedback()
+                return
+            }
+        } else if selectedSection == .busqueda {
+            if controllerSelectedArea == "search" {
+                if direction == .down { controllerSelectedArea = "games"; controllerSearchFocused = false; feedback() }
+                return
+            }
+            if direction == .up {
+                controllerSelectedArea = "search"
+                controllerSearchFocused = false
+                feedback()
+                return
+            }
         }
+
         let items = controllerGames
         guard !items.isEmpty else { return }
         let current = items.firstIndex { $0.id == controllerSelectedGameID } ?? 0
@@ -489,15 +504,18 @@ struct HomeView: View {
         case .up: next = max(0, current - columns)
         case .down: next = min(items.count - 1, current + columns)
         }
+        controllerSelectedArea = "games"
         controllerSelectedGameID = items[next].id
         feedback()
     }
 
     private func activateControllerSelection() {
-        if selectedSection == .ajustes {
-            guard let title = controllerSelectedSettingTitle,
-                  let action = controllerSettingActions[title] else { return }
-            action()
+        if selectedSection == .inicio, controllerSelectedArea == "featured", !featured.isEmpty {
+            open(featured[min(max(featuredIndex, 0), featured.count - 1)])
+            return
+        }
+        if selectedSection == .busqueda, controllerSelectedArea == "search" {
+            controllerSearchFocused = true
             return
         }
         guard let id = controllerSelectedGameID,
@@ -764,6 +782,14 @@ struct HomeView: View {
             .glassRim(in: RoundedRectangle(cornerRadius: 22, style: .continuous))
             .overlay(alignment: .bottomTrailing) { featuredDots }
             .shadow(color: .blue.opacity(0.28), radius: 20, y: 5)
+            .overlay {
+                if selectedSection == .inicio && controllerSelectedArea == "featured" {
+                    RoundedRectangle(cornerRadius: 22, style: .continuous)
+                        .stroke(Color.cyan.opacity(0.98), lineWidth: 2.5)
+                        .shadow(color: Color.cyan.opacity(0.72), radius: 10)
+                        .allowsHitTesting(false)
+                }
+            }
         }
     }
 
@@ -1166,28 +1192,9 @@ struct HomeView: View {
             .padding(13)
             .frame(maxWidth: .infinity, minHeight: 132, alignment: .topLeading)
             .glassCard(interactive: true)
-                .overlay {
-                    if selectedSection == .ajustes && controllerSelectedSettingTitle == title {
-                        RoundedRectangle(cornerRadius: 18, style: .continuous)
-                            .stroke(Color.cyan.opacity(0.98), lineWidth: 2.5)
-                            .shadow(color: Color.cyan.opacity(0.72), radius: 10)
-                            .padding(-2)
-                            .allowsHitTesting(false)
-                    }
-                }
         }
         .buttonStyle(ControllerFocusableButtonStyle())
-        .focusable()
-        .onAppear {
-            if !controllerSettingTitles.contains(title) { controllerSettingTitles.append(title) }
-            controllerSettingActions[title] = action
-            if controllerSelectedSettingTitle == nil { controllerSelectedSettingTitle = title }
-        }
-        .onDisappear {
-            controllerSettingTitles.removeAll { $0 == title }
-            controllerSettingActions.removeValue(forKey: title)
-            if controllerSelectedSettingTitle == title { controllerSelectedSettingTitle = controllerSettingTitles.first }
-        }
+                    .focusable()
     }
 
     private func settingToggleCard(_ title: String, subtitle: String, symbol: String, tint: Color, isOn: Binding<Bool>) -> some View {
@@ -1220,6 +1227,7 @@ struct HomeView: View {
             Image(systemName: "magnifyingglass").foregroundStyle(.cyan)
             TextField(tr("Buscar juegos y plataformas…"), text: $searchText)
                 .font(.system(size: 14))
+                .focused($controllerSearchFocused)
                 .autocorrectionDisabled()
                 .textInputAutocapitalization(.never)
             if !searchText.isEmpty {
@@ -1233,6 +1241,14 @@ struct HomeView: View {
         .padding(.horizontal, 14)
         .padding(.vertical, 13)
         .glassCard()
+        .overlay {
+            if selectedSection == .busqueda && controllerSelectedArea == "search" {
+                RoundedRectangle(cornerRadius: 18, style: .continuous)
+                    .stroke(Color.cyan.opacity(0.98), lineWidth: 2.5)
+                    .shadow(color: Color.cyan.opacity(0.72), radius: 10)
+                    .allowsHitTesting(false)
+            }
+        }
     }
 
     private var emptyResults: some View {
