@@ -345,6 +345,7 @@ struct HomeView: View {
                     .font(.system(size: 13, weight: .bold))
                     .foregroundStyle(Color.cyan)
                     .buttonStyle(.plain)
+                    .focusable()
                 }
             }
             .padding(.horizontal, 16)
@@ -566,6 +567,7 @@ struct HomeView: View {
                             .shadow(color: selectedSection == section ? Color.cyan.opacity(0.42) : .clear, radius: 12, y: 0)
                     }
                     .buttonStyle(.plain)
+                    .focusable()
                     .accessibilityLabel(tr(section.rawValue))
                 }
             }
@@ -727,6 +729,7 @@ struct HomeView: View {
                     .background(LinearGradient(colors: [.blue, .cyan.opacity(0.78)], startPoint: .leading, endPoint: .trailing), in: Capsule())
                 }
                 .buttonStyle(.plain)
+                    .focusable()
                 .padding(.top, 3)
             }
             .padding(18)
@@ -786,6 +789,7 @@ struct HomeView: View {
                         .shadow(color: isSelected ? Color.cyan.opacity(0.30) : Color.clear, radius: 10)
                     }
                     .buttonStyle(.plain)
+                    .focusable()
                     .contentShape(Capsule())
                 }
             }
@@ -1059,6 +1063,7 @@ struct HomeView: View {
             .glassCard(interactive: true)
         }
         .buttonStyle(.plain)
+                    .focusable()
     }
 
     private func settingToggleCard(_ title: String, subtitle: String, symbol: String, tint: Color, isOn: Binding<Bool>) -> some View {
@@ -1098,6 +1103,7 @@ struct HomeView: View {
                     Image(systemName: "xmark.circle.fill").foregroundStyle(.white.opacity(0.5))
                 }
                 .buttonStyle(.plain)
+                    .focusable()
             }
         }
         .padding(.horizontal, 14)
@@ -1180,6 +1186,7 @@ private struct GameTile: View {
                                 .overlay(Circle().strokeBorder(Color.white.opacity(0.22), lineWidth: 0.5))
                         }
                         .buttonStyle(.plain)
+                    .focusable()
                         .accessibilityLabel(favoriteLabel)
                     }
                     Spacer()

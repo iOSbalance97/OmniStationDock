@@ -412,11 +412,16 @@ final class ControllerMonitor: ObservableObject {
     }
 
     @Published private(set) var controllers: [Info] = []
-    var navigationEnabled = false
-    /// Recibe -1 (L1) o +1 (R1).
+    var navigationEnabled = true
+    /// L1/R1: -1/+1 para cambiar de plataforma.
     var onShoulder: ((Int) -> Void)?
+    /// L2/R2: -1/+1 para cambiar de sección principal.
+    var onTrigger: ((Int) -> Void)?
+    /// O/B: cancelar o volver atrás.
+    var onCancel: (() -> Void)?
 
     private var tokens: [NSObjectProtocol] = []
+    private var triggerPressed: [ObjectIdentifier: (left: Bool, right: Bool)] = [:]
 
     init() {
         refresh()
@@ -438,7 +443,7 @@ final class ControllerMonitor: ObservableObject {
         controllers = list.enumerated().map { index, controller in
             let level = controller.battery.map { Int(($0.batteryLevel * 100).rounded()) }
             return Info(
-                id: "\(index)-\(controller.vendorName ?? "")",
+                id: "\\(index)-\\(controller.vendorName ?? "")",
                 name: controller.vendorName ?? "Mando",
                 category: controller.productCategory,
                 battery: level,
@@ -458,6 +463,30 @@ final class ControllerMonitor: ObservableObject {
             guard pressed, self?.navigationEnabled == true else { return }
             self?.onShoulder?(1)
         }
+
+        // L2/R2 are analog triggers; fire once when crossing the press threshold.
+        let key = ObjectIdentifier(controller)
+        triggerPressed[key] = (false, false)
+        pad.leftTrigger.valueChangedHandler = { [weak self] _, value, _ in
+            guard let self, self.navigationEnabled else { return }
+            let pressed = value > 0.65
+            let wasPressed = self.triggerPressed[key]?.left ?? false
+            if pressed && !wasPressed { self.onTrigger?(-1) }
+            self.triggerPressed[key] = (pressed, self.triggerPressed[key]?.right ?? false)
+        }
+        pad.rightTrigger.valueChangedHandler = { [weak self] _, value, _ in
+            guard let self, self.navigationEnabled else { return }
+            let pressed = value > 0.65
+            let wasPressed = self.triggerPressed[key]?.right ?? false
+            if pressed && !wasPressed { self.onTrigger?(1) }
+            self.triggerPressed[key] = (self.triggerPressed[key]?.left ?? false, pressed)
+        }
+        pad.buttonB.pressedChangedHandler = { [weak self] _, _, pressed in
+            guard pressed, self?.navigationEnabled == true else { return }
+            self?.onCancel?()
+        }
+        // A/X is deliberately left to SwiftUI's native focus engine so it activates
+        // the currently focused control rather than a hard-coded screen action.
     }
 }
 
