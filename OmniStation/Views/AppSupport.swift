@@ -443,7 +443,7 @@ final class ControllerMonitor: ObservableObject {
         controllers = list.enumerated().map { index, controller in
             let level = controller.battery.map { Int(($0.batteryLevel * 100).rounded()) }
             return Info(
-                id: "\\(index)-\\(controller.vendorName ?? "")",
+                id: "\(index)-\(controller.vendorName ?? "")",
                 name: controller.vendorName ?? "Mando",
                 category: controller.productCategory,
                 battery: level,
