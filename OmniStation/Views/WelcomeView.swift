@@ -3,12 +3,7 @@ import SwiftUI
 struct WelcomeView: View {
     @State private var isVisible = false
     @State private var showHome = false
-
-    init() {
-        // Si el ajuste «Bienvenida animada» está desactivado, se entra directo a la pantalla principal.
-        let showWelcome = UserDefaults.standard.object(forKey: "showWelcome") as? Bool ?? true
-        _showHome = State(initialValue: !showWelcome)
-    }
+    @AppStorage("dock.animatedWelcome") private var animatedWelcome = true
 
     var body: some View {
         ZStack {
@@ -21,10 +16,15 @@ struct WelcomeView: View {
         .preferredColorScheme(.dark)
         .task {
             guard !showHome else { return }
-            withAnimation(.easeOut(duration: 0.9)) { isVisible = true }
-            try? await Task.sleep(nanoseconds: 2_500_000_000)
+            if animatedWelcome {
+                withAnimation(.easeOut(duration: 0.9)) { isVisible = true }
+                try? await Task.sleep(nanoseconds: 2_500_000_000)
+            } else {
+                isVisible = true
+                try? await Task.sleep(nanoseconds: 250_000_000)
+            }
             guard !Task.isCancelled else { return }
-            withAnimation(.easeInOut(duration: 0.45)) { showHome = true }
+            withAnimation(.easeInOut(duration: animatedWelcome ? 0.45 : 0.1)) { showHome = true }
         }
     }
 
@@ -56,14 +56,11 @@ struct WelcomeView: View {
                         .resizable()
                         .scaledToFit()
                         .frame(
-                            width: min(min(geometry.size.width * 0.62, geometry.size.height * 0.32), 285),
-                            height: min(min(geometry.size.width * 0.62, geometry.size.height * 0.32), 285)
+                            width: min(min(geometry.size.width * 0.90, geometry.size.height * 0.43), 390),
+                            height: min(min(geometry.size.width * 0.90, geometry.size.height * 0.43), 390)
                         )
-                        // Screen blending suppresses the dark square baked into the artwork,
-                        // letting the planet sit visually over the cosmic background.
-                        .blendMode(.screen)
-                        .shadow(color: Color.cyan.opacity(0.34), radius: 22)
-                        .shadow(color: Color.blue.opacity(0.26), radius: 38)
+                        .shadow(color: Color.cyan.opacity(0.22), radius: 18)
+                        .shadow(color: Color.blue.opacity(0.16), radius: 30)
                         .accessibilityLabel("Planeta de OmniStation Dock")
 
                     VStack(spacing: 3) {
