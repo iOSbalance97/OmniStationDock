@@ -261,7 +261,7 @@ struct HomeView: View {
                 controllerSearchFocused = false
                 switch section {
                 case .inicio: controllerSelectedArea = "games"
-                case .busqueda: controllerSelectedArea = gamepadConnected ? "alphabet" : "games"
+                case .busqueda: controllerSelectedArea = gamepadConnected ? "search" : "games"
                 case .favoritos: controllerSelectedArea = "games"
                 case .ajustes: controllerSelectedArea = "settings"; controllerSelectedSettingIndex = 0
                 }
@@ -274,7 +274,7 @@ struct HomeView: View {
             }
             .onChange(of: controllers.controllers.count) { _, count in
                 if selectedSection == .busqueda {
-                    controllerSelectedArea = count > 0 ? "alphabet" : "games"
+                    controllerSelectedArea = count > 0 ? "search" : "games"
                     controllerSearchFocused = false
                 }
             }
@@ -511,12 +511,19 @@ struct HomeView: View {
         // Navegación geométrica: solo se cambia de zona al llegar al borde real
         // de la cuadrícula, nunca por pulsar arriba desde cualquier fila.
         if selectedSection == .busqueda, controllerSelectedArea == "search" {
-            if direction == .down {
+            switch direction {
+            case .up:
+                controllerSelectedArea = "alphabet"
+                controllerSelectedLetterIndex = 0
+                controllerSearchFocused = false
+            case .down:
                 controllerSelectedArea = "games"
                 controllerSelectedGameID = controllerGames.first?.id
                 controllerSearchFocused = false
-                feedback()
+            case .left, .right:
+                break
             }
+            feedback()
             return
         }
 
@@ -662,13 +669,8 @@ struct HomeView: View {
         // En Búsqueda, O/B retrocede dentro de la acción actual; no cambia de sección.
         if selectedSection == .busqueda {
             if controllerSelectedArea == "alphabet" {
-                if !controllerAlphabetSearchText.isEmpty {
-                    controllerAlphabetSearchText.removeLast()
-                    searchText = controllerAlphabetSearchText
-                } else {
-                    controllerSelectedArea = "games"
-                    controllerSelectedGameID = controllerGames.first?.id
-                }
+                controllerSelectedArea = "search"
+                controllerSearchFocused = false
                 feedback()
                 return
             }
@@ -844,7 +846,10 @@ struct HomeView: View {
     private func screen<Content: View>(topGap: CGFloat = 8, @ViewBuilder _ content: @escaping () -> Content) -> some View {
         ScrollViewReader { proxy in
             ScrollView(showsIndicators: false) {
-                content()
+                VStack(spacing: 0) {
+                    Color.clear.frame(height: 1).id("scroll-top")
+                    content()
+                }
                     .padding(.horizontal, 16)
                     .padding(.top, headerHeight + topGap)
                     .padding(.bottom, 44)
@@ -856,9 +861,16 @@ struct HomeView: View {
                 let index = items.firstIndex(where: { $0.id == id }) ?? 0
                 let landscape = UIScreen.main.bounds.width > UIScreen.main.bounds.height
                 let columns = landscape ? (selectedSection == .inicio ? 3 : 4) : (compactGrid ? 3 : 2)
-                let anchor: UnitPoint = index < columns ? .top : .center
-                withAnimation(.easeInOut(duration: 0.2)) {
-                    proxy.scrollTo("game-\(id)", anchor: anchor)
+                if index < columns {
+                    // La primera fila debe volver al inicio real del scroll, sin dejar
+                    // el contenido atrapado en una posición intermedia.
+                    withAnimation(.easeOut(duration: 0.22)) {
+                        proxy.scrollTo("scroll-top", anchor: .top)
+                    }
+                } else {
+                    withAnimation(.easeInOut(duration: 0.2)) {
+                        proxy.scrollTo("game-\(id)", anchor: .center)
+                    }
                 }
             }
             .onChange(of: controllerSelectedArea) { _, area in
@@ -1102,18 +1114,12 @@ struct HomeView: View {
             .padding(.vertical, 8)
         }
         .onChange(of: selectedPlatform) { _, value in
-            // Espera al siguiente ciclo para que SwiftUI actualice el chip seleccionado
-            // antes de pedir al ScrollViewReader que lo centre.
-            DispatchQueue.main.async {
-                withAnimation(.easeInOut(duration: 0.28)) {
-                    proxy.scrollTo("platform-\(value)", anchor: .center)
-                }
+            withAnimation(.easeInOut(duration: 0.28)) {
+                proxy.scrollTo("platform-\(value)", anchor: .center)
             }
         }
         .onAppear {
-            DispatchQueue.main.async {
-                proxy.scrollTo("platform-\(selectedPlatform)", anchor: .center)
-            }
+            proxy.scrollTo("platform-\(selectedPlatform)", anchor: .center)
         }
         // Fade the scroll edges instead of covering the first/last chips with overlays.
         .mask {
@@ -1171,7 +1177,7 @@ struct HomeView: View {
         screen {
             VStack(alignment: .leading, spacing: 18) {
                 screenTitle(tr("Búsqueda"), subtitle: tr("Encuentra un juego o filtra por plataforma."))
-                if gamepadConnected {
+                if gamepadConnected && controllerSelectedArea == "alphabet" {
                     controllerAlphabetBar
                 } else {
                     searchBar
