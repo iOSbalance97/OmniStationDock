@@ -254,7 +254,8 @@ struct AddShortcutSheet: View {
                 }
             }
         }
-        .buttonStyle(.plain)
+        .buttonStyle(ControllerFocusableButtonStyle())
+        .focusable()
     }
 
     private func save() {

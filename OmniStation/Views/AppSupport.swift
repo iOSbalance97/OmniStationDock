@@ -401,7 +401,7 @@ final class HDMIMonitor: ObservableObject {
     }
 }
 
-/// Detecta mandos GameController y expone sus controles a la interfaz.
+/// Lista los mandos conectados y, si se activa, usa L1/R1 para cambiar de pestaña.
 final class ControllerMonitor: ObservableObject {
     struct Info: Identifiable, Equatable {
         let id: String
@@ -411,87 +411,91 @@ final class ControllerMonitor: ObservableObject {
         let charging: Bool
     }
 
-    enum Direction { case up, down, left, right }
     @Published private(set) var controllers: [Info] = []
-    var navigationEnabled = true
-
-    /// L1/R1: cambiar plataforma. -1 anterior, +1 siguiente.
-    var onPlatformShoulder: ((Int) -> Void)?
-    /// L2/R2: cambiar sección. -1 anterior, +1 siguiente.
-    var onSectionTrigger: ((Int) -> Void)?
-    /// Cruceta/joystick digital para navegación entre elementos.
-    var onDirection: ((Direction) -> Void)?
-    /// Botón principal (X/A) y secundario (O/B).
-    var onAccept: (() -> Void)?
+    var navigationEnabled = false
+    /// L1/R1: cambiar plataforma.
+    var onShoulder: ((Int) -> Void)?
+    /// L2/R2: cambiar sección principal.
+    var onTrigger: ((Int) -> Void)?
+    /// B/círculo: volver atrás.
     var onCancel: (() -> Void)?
 
     private var tokens: [NSObjectProtocol] = []
-    private var boundControllers = Set<ObjectIdentifier>()
 
     init() {
         refresh()
         let center = NotificationCenter.default
-        for name in [Notification.Name.GCControllerDidConnect, .GCControllerDidDisconnect] {
+        let names: [Notification.Name] = [.GCControllerDidConnect, .GCControllerDidDisconnect]
+        for name in names {
             tokens.append(center.addObserver(forName: name, object: nil, queue: .main) { [weak self] _ in
                 self?.refresh()
             })
         }
     }
 
-    deinit { tokens.forEach { NotificationCenter.default.removeObserver($0) } }
+    deinit {
+        tokens.forEach { NotificationCenter.default.removeObserver($0) }
+    }
 
     func refresh() {
         let list = GCController.controllers()
         controllers = list.enumerated().map { index, controller in
             let level = controller.battery.map { Int(($0.batteryLevel * 100).rounded()) }
-            return Info(id: "\\(index)-\\(controller.vendorName ?? \"\")",
-                        name: controller.vendorName ?? "Mando",
-                        category: controller.productCategory,
-                        battery: level,
-                        charging: controller.battery?.batteryState == .charging)
+            return Info(
+                id: "\(index)-\(controller.vendorName ?? "")",
+                name: controller.vendorName ?? "Mando",
+                category: controller.productCategory,
+                battery: level,
+                charging: controller.battery?.batteryState == .charging
+            )
         }
-        for controller in list { bind(controller) }
+        list.forEach(bind)
     }
 
     private func bind(_ controller: GCController) {
-        let identifier = ObjectIdentifier(controller)
-        guard boundControllers.insert(identifier).inserted,
-              let pad = controller.extendedGamepad else { return }
-
+        guard let pad = controller.extendedGamepad else { return }
         pad.leftShoulder.pressedChangedHandler = { [weak self] _, _, pressed in
             guard pressed, self?.navigationEnabled == true else { return }
-            self?.onPlatformShoulder?(-1)
+            self?.onShoulder?(-1)
         }
         pad.rightShoulder.pressedChangedHandler = { [weak self] _, _, pressed in
             guard pressed, self?.navigationEnabled == true else { return }
-            self?.onPlatformShoulder?(1)
+            self?.onShoulder?(1)
         }
         pad.leftTrigger.pressedChangedHandler = { [weak self] _, _, pressed in
             guard pressed, self?.navigationEnabled == true else { return }
-            self?.onSectionTrigger?(-1)
+            self?.onTrigger?(-1)
         }
         pad.rightTrigger.pressedChangedHandler = { [weak self] _, _, pressed in
             guard pressed, self?.navigationEnabled == true else { return }
-            self?.onSectionTrigger?(1)
-        }
-        pad.dpad.up.pressedChangedHandler = { [weak self] _, _, pressed in
-            if pressed, self?.navigationEnabled == true { self?.onDirection?(.up) }
-        }
-        pad.dpad.down.pressedChangedHandler = { [weak self] _, _, pressed in
-            if pressed, self?.navigationEnabled == true { self?.onDirection?(.down) }
-        }
-        pad.dpad.left.pressedChangedHandler = { [weak self] _, _, pressed in
-            if pressed, self?.navigationEnabled == true { self?.onDirection?(.left) }
-        }
-        pad.dpad.right.pressedChangedHandler = { [weak self] _, _, pressed in
-            if pressed, self?.navigationEnabled == true { self?.onDirection?(.right) }
-        }
-        pad.buttonA.pressedChangedHandler = { [weak self] _, _, pressed in
-            if pressed, self?.navigationEnabled == true { self?.onAccept?() }
+            self?.onTrigger?(1)
         }
         pad.buttonB.pressedChangedHandler = { [weak self] _, _, pressed in
-            if pressed, self?.navigationEnabled == true { self?.onCancel?() }
+            guard pressed, self?.navigationEnabled == true else { return }
+            DispatchQueue.main.async { self?.onCancel?() }
         }
+    }
+}
+
+
+/// Estilo común para que el foco del mando sea visible en botones de toda la app.
+struct ControllerFocusableButtonStyle: ButtonStyle {
+    @Environment(\.isFocused) private var isFocused
+
+    func makeBody(configuration: Configuration) -> some View {
+        configuration.label
+            .overlay {
+                if isFocused {
+                    RoundedRectangle(cornerRadius: 16, style: .continuous)
+                        .stroke(Color.cyan.opacity(0.98), lineWidth: 2.5)
+                        .shadow(color: Color.cyan.opacity(0.72), radius: 9)
+                        .padding(-3)
+                        .allowsHitTesting(false)
+                }
+            }
+            .scaleEffect(configuration.isPressed ? 0.97 : (isFocused ? 1.015 : 1.0))
+            .animation(.easeOut(duration: 0.12), value: isFocused)
+            .animation(.easeOut(duration: 0.1), value: configuration.isPressed)
     }
 }
 
