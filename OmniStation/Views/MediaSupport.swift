@@ -4,11 +4,51 @@ import AVFoundation
 import AudioToolbox
 import Security
 
-// MARK: - Fondo personalizado: estático (imagen) y animado (vídeo)
+// MARK: - Archivos incluidos en la app
+
+enum BundleFiles {
+    /// Todos los archivos de la app (en cualquier carpeta), leídos una sola vez.
+    static let all: [URL] = {
+        guard let root = Bundle.main.resourceURL,
+              let enumerator = FileManager.default.enumerator(
+                at: root,
+                includingPropertiesForKeys: nil,
+                options: [.skipsHiddenFiles, .skipsPackageDescendants]
+              ) else { return [] }
+        var result: [URL] = []
+        for case let url as URL in enumerator {
+            result.append(url)
+        }
+        return result
+    }()
+
+    /// Primer archivo que se llame como uno de `names` (por orden), sin distinguir mayúsculas.
+    static func find(_ names: [String], extensions: [String]) -> URL? {
+        for name in names {
+            for url in all {
+                let base: String = url.deletingPathExtension().lastPathComponent.lowercased()
+                if base == name && extensions.contains(url.pathExtension.lowercased()) {
+                    return url
+                }
+            }
+        }
+        return nil
+    }
+}
+
+// MARK: - Fondo: animado predeterminado, original estático, imagen propia o vídeo propio
 
 enum BackgroundStore {
-    /// "default", "static" o "video".
+    /// "default" (animado incluido), "original" (estático de siempre), "static" (imagen propia)
+    /// o "video" (vídeo propio).
     static let modeKey = "backgroundMode"
+    static let videoExtensions: [String] = ["mp4", "mov", "m4v"]
+
+    /// Vídeo de fondo incluido en la app (Resources/Background/DefaultBackground.mp4).
+    static let defaultVideoURL: URL? = BundleFiles.find(
+        ["defaultbackground", "default_background", "fondo_animado", "fondoanimado", "background"],
+        extensions: videoExtensions
+    )
     private static let videoNameKey = "backgroundVideoFile"
 
     private static var imageURL: URL {
@@ -128,6 +168,18 @@ enum SoundKind: String, CaseIterable, Identifiable {
     /// Nombre del archivo incluido en la app (Resources/Sounds), sin extensión.
     var bundleName: String { "sound_\(rawValue)" }
 
+    /// Nombres que se aceptan para cada sonido (sin extensión y sin distinguir mayúsculas).
+    var aliases: [String] {
+        switch self {
+        case .navigate:
+            return ["sound_navigate", "sound_navigation", "navigate", "navigation", "sound_move", "move"]
+        case .select:
+            return ["sound_select", "sound_selection", "select", "selection", "sound_seleccion", "seleccion", "sound_confirm", "confirm"]
+        case .ambient:
+            return ["sound_ambient", "ambient", "sound_music", "music", "bgm"]
+        }
+    }
+
     var volumeKey: String {
         switch self {
         case .navigate: return "volumeNavigate"
@@ -145,13 +197,42 @@ enum SoundKind: String, CaseIterable, Identifiable {
     }
 }
 
+/// Estado de un sonido, para enseñarlo en Ajustes → Sonidos.
+enum SoundStatus {
+    case imported(String)
+    case bundled(String)
+    case unreadable(String)
+    case unsupported(String)
+    case missing
+}
+
 /// Reproduce los sonidos: los importados por el usuario mandan sobre los incluidos en la app.
 final class SoundManager {
     static let shared = SoundManager()
-    static let extensions: [String] = ["wav", "mp3", "m4a", "caf", "aac", "aif", "aiff"]
+    /// Formatos que reproduce iOS (AVAudioPlayer).
+    static let extensions: [String] = ["wav", "mp3", "m4a", "caf", "aac", "aif", "aiff", "flac", "m4r", "mp4"]
+    /// Formatos que suelen usarse pero iOS no reproduce.
+    private static let unsupportedExtensions: [String] = ["ogg", "oga", "opus", "wma", "mid", "midi"]
 
     private var players: [SoundKind: AVAudioPlayer] = [:]
+    private var unreadable: [SoundKind: String] = [:]
     private var sessionReady = false
+
+    /// Todos los archivos de audio que van dentro de la app (en cualquier carpeta).
+    private lazy var bundleFiles: [URL] = {
+        guard let root = Bundle.main.resourceURL,
+              let enumerator = FileManager.default.enumerator(
+                at: root,
+                includingPropertiesForKeys: nil,
+                options: [.skipsHiddenFiles, .skipsPackageDescendants]
+              ) else { return [] }
+        let wanted: [String] = Self.extensions + Self.unsupportedExtensions
+        var result: [URL] = []
+        for case let url as URL in enumerator where wanted.contains(url.pathExtension.lowercased()) {
+            result.append(url)
+        }
+        return result
+    }()
 
     /// Modo «ambiente»: se mezcla con la música de otras apps y respeta el modo silencio.
     func prepareSession() {
@@ -166,6 +247,20 @@ final class SoundManager {
         AppFolders.folder("Sounds")
     }
 
+    /// Busca entre `files` el que se llame como uno de los nombres del sonido (por orden de preferencia).
+    private func match(_ kind: SoundKind, in files: [URL], extensions: [String]) -> URL? {
+        for alias in kind.aliases {
+            for url in files {
+                let name: String = url.deletingPathExtension().lastPathComponent.lowercased()
+                let ext: String = url.pathExtension.lowercased()
+                if name == alias && extensions.contains(ext) {
+                    return url
+                }
+            }
+        }
+        return nil
+    }
+
     func customURL(for kind: SoundKind) -> URL? {
         for ext in Self.extensions {
             let url: URL = customFolder.appendingPathComponent("\(kind.rawValue).\(ext)")
@@ -175,10 +270,7 @@ final class SoundManager {
     }
 
     func bundledURL(for kind: SoundKind) -> URL? {
-        for ext in Self.extensions {
-            if let url = Bundle.main.url(forResource: kind.bundleName, withExtension: ext) { return url }
-        }
-        return nil
+        match(kind, in: bundleFiles, extensions: Self.extensions)
     }
 
     func hasCustom(_ kind: SoundKind) -> Bool {
@@ -189,10 +281,25 @@ final class SoundManager {
         customURL(for: kind) != nil || bundledURL(for: kind) != nil
     }
 
+    /// Qué archivo usa cada sonido, o por qué no suena.
+    func status(_ kind: SoundKind) -> SoundStatus {
+        if let failed = unreadable[kind] { return .unreadable(failed) }
+        if let url = customURL(for: kind) { return .imported(url.lastPathComponent) }
+        if let url = bundledURL(for: kind) { return .bundled(url.lastPathComponent) }
+        if let url = match(kind, in: bundleFiles, extensions: Self.unsupportedExtensions) {
+            return .unsupported(url.lastPathComponent)
+        }
+        return .missing
+    }
+
     private func player(for kind: SoundKind) -> AVAudioPlayer? {
         if let existing = players[kind] { return existing }
-        guard let url = customURL(for: kind) ?? bundledURL(for: kind),
-              let player = try? AVAudioPlayer(contentsOf: url) else { return nil }
+        guard let url = customURL(for: kind) ?? bundledURL(for: kind) else { return nil }
+        guard let player = try? AVAudioPlayer(contentsOf: url) else {
+            unreadable[kind] = url.lastPathComponent
+            return nil
+        }
+        unreadable[kind] = nil
         if kind == .ambient { player.numberOfLoops = -1 }
         player.prepareToPlay()
         players[kind] = player
@@ -237,6 +344,7 @@ final class SoundManager {
             return false
         }
         players[kind] = nil
+        unreadable[kind] = nil
         return true
     }
 
@@ -246,6 +354,7 @@ final class SoundManager {
             try? FileManager.default.removeItem(at: customFolder.appendingPathComponent("\(kind.rawValue).\(ext)"))
         }
         players[kind] = nil
+        unreadable[kind] = nil
     }
 }
 
@@ -339,10 +448,35 @@ struct RAGameProgress {
     let achievements: [RAAchievement]
 }
 
+struct RAGameMatch: Identifiable {
+    let id: Int
+    let title: String
+    let console: String
+    let iconURL: URL?
+    let achievements: Int
+    let score: Double
+}
+
 enum RAError: Error {
     case missingCredentials
     case unauthorized
     case badResponse
+    case offline
+    case unsupportedPlatform
+}
+
+/// Listas de juegos por consola ya descargadas (para no pedirlas otra vez).
+actor RAListCache {
+    static let shared = RAListCache()
+    private var lists: [Int: [RAGameMatch]] = [:]
+
+    func list(_ consoleID: Int) -> [RAGameMatch]? {
+        lists[consoleID]
+    }
+
+    func store(_ list: [RAGameMatch], for consoleID: Int) {
+        lists[consoleID] = list
+    }
 }
 
 enum RetroAchievements {
@@ -371,6 +505,161 @@ enum RetroAchievements {
     static func signOut() {
         UserDefaults.standard.removeObject(forKey: userKey)
         KeychainStore.delete(keyAccount)
+        clearSession()
+    }
+
+    // Sesión recordada: el último perfil que respondió bien, para enseñarlo al momento.
+    private static let sessionUserKey = "raSessionUser"
+    private static let sessionPointsKey = "raSessionPoints"
+    private static let sessionAvatarKey = "raSessionAvatar"
+
+    static var isLoggedIn: Bool {
+        isConfigured && !(UserDefaults.standard.string(forKey: sessionUserKey) ?? "").isEmpty
+    }
+
+    static func saveSession(_ profile: RAProfile) {
+        let defaults = UserDefaults.standard
+        defaults.set(profile.user, forKey: sessionUserKey)
+        defaults.set(profile.totalPoints, forKey: sessionPointsKey)
+        defaults.set(profile.avatarURL?.absoluteString ?? "", forKey: sessionAvatarKey)
+    }
+
+    static func clearSession() {
+        let defaults = UserDefaults.standard
+        defaults.removeObject(forKey: sessionUserKey)
+        defaults.removeObject(forKey: sessionPointsKey)
+        defaults.removeObject(forKey: sessionAvatarKey)
+    }
+
+    static var cachedProfile: RAProfile? {
+        let defaults = UserDefaults.standard
+        guard isConfigured, let user = defaults.string(forKey: sessionUserKey), !user.isEmpty else { return nil }
+        let avatar: String = defaults.string(forKey: sessionAvatarKey) ?? ""
+        return RAProfile(
+            user: user,
+            totalPoints: defaults.integer(forKey: sessionPointsKey),
+            truePoints: 0,
+            motto: "",
+            richPresence: "",
+            avatarURL: avatar.isEmpty ? nil : URL(string: avatar)
+        )
+    }
+
+    /// Inicia sesión: comprueba usuario y clave con el servidor y, si van bien, los guarda.
+    static func login(username: String, apiKey: String) async throws -> RAProfile {
+        save(username: username, apiKey: apiKey)
+        do {
+            let result: RAProfile = try await profile()
+            saveSession(result)
+            return result
+        } catch {
+            clearSession()
+            throw error
+        }
+    }
+
+    /// IDs de consola de RetroAchievements para cada plataforma de la app.
+    static func consoleID(for platform: String) -> Int? {
+        switch platform {
+        case "Mega Drive": return 1
+        case "N64": return 2
+        case "SNES": return 3
+        case "Game Boy": return 4
+        case "GBA": return 5
+        case "Game Boy Color": return 6
+        case "NES": return 7
+        case "Master System": return 11
+        case "PS1": return 12
+        case "Game Gear": return 15
+        case "GameCube": return 16
+        case "NDS": return 18
+        case "Wii": return 19
+        case "PS2": return 21
+        case "Saturn": return 39
+        case "Dreamcast": return 40
+        case "PSP": return 41
+        case "3DS": return 62
+        default: return nil
+        }
+    }
+
+    /// Texto simplificado para comparar títulos: sin tildes, regiones ni signos.
+    static func normalized(_ title: String) -> String {
+        var value: String = title.folding(options: [.diacriticInsensitive, .caseInsensitive], locale: Locale(identifier: "en_US"))
+        value = value.replacingOccurrences(of: "\\([^)]*\\)|\\[[^\\]]*\\]", with: " ", options: .regularExpression)
+        value = value.replacingOccurrences(of: "[^a-z0-9]+", with: " ", options: .regularExpression)
+        value = " " + value + " "
+        // RetroAchievements usa los títulos en inglés: equivalencias habituales del español.
+        for (spanish, english) in spanishTitles {
+            value = value.replacingOccurrences(of: " " + spanish + " ", with: " " + english + " ")
+        }
+        return value.trimmingCharacters(in: .whitespaces)
+    }
+
+    private static let spanishTitles: [(String, String)] = [
+        ("rojo fuego", "firered"), ("verde hoja", "leafgreen"), ("oro heartgold", "heartgold"),
+        ("plata soulsilver", "soulsilver"), ("esmeralda", "emerald"), ("rubi", "ruby"),
+        ("zafiro", "sapphire"), ("oro", "gold"), ("plata", "silver"), ("cristal", "crystal"),
+        ("diamante", "diamond"), ("perla", "pearl"), ("platino", "platinum"), ("negro", "black"),
+        ("blanco", "white"), ("amarillo", "yellow"), ("azul", "blue"), ("rojo", "red"), ("verde", "green")
+    ]
+
+    private static let ignoredWords: Set<String> = ["the", "a", "an", "of", "and", "de", "la", "el", "los", "las", "y", "version"]
+
+    private static func words(_ text: String) -> Set<String> {
+        Set(text.split(separator: " ").map(String.init).filter { !ignoredWords.contains($0) })
+    }
+
+    /// Parecido entre dos títulos, de 0 a 1.
+    static func similarity(_ first: String, _ second: String) -> Double {
+        let a: String = normalized(first)
+        let b: String = normalized(second)
+        guard !a.isEmpty, !b.isEmpty else { return 0 }
+        if a == b { return 1 }
+        let wordsA: Set<String> = words(a)
+        let wordsB: Set<String> = words(b)
+        let union: Int = wordsA.union(wordsB).count
+        guard union > 0 else { return 0 }
+        var score: Double = Double(wordsA.intersection(wordsB).count) / Double(union)
+        if a.contains(b) || b.contains(a) { score += 0.15 }
+        return min(score, 0.99)
+    }
+
+    /// Todos los juegos con logros de una consola.
+    static func gameList(consoleID: Int) async throws -> [RAGameMatch] {
+        if let cached = await RAListCache.shared.list(consoleID) { return cached }
+        guard let list = try await request("API_GetGameList.php", ["i": String(consoleID), "f": "1"]) as? [[String: Any]] else {
+            throw RAError.badResponse
+        }
+        var result: [RAGameMatch] = []
+        for entry in list {
+            result.append(RAGameMatch(
+                id: int(entry["ID"]),
+                title: text(entry["Title"]),
+                console: text(entry["ConsoleName"]),
+                iconURL: mediaURL(text(entry["ImageIcon"])),
+                achievements: int(entry["NumAchievements"]),
+                score: 0
+            ))
+        }
+        await RAListCache.shared.store(result, for: consoleID)
+        return result
+    }
+
+    /// Juegos de RetroAchievements que más se parecen al nombre, de mejor a peor.
+    static func searchGames(title: String, platform: String) async throws -> [RAGameMatch] {
+        guard let consoleID = consoleID(for: platform) else { throw RAError.unsupportedPlatform }
+        let list: [RAGameMatch] = try await gameList(consoleID: consoleID)
+        var scored: [RAGameMatch] = []
+        for game in list {
+            var score: Double = similarity(title, game.title)
+            // Hacks, homebrew y similares van detrás.
+            if game.title.contains("~") { score -= 0.3 }
+            guard score > 0.2 else { continue }
+            scored.append(RAGameMatch(id: game.id, title: game.title, console: game.console, iconURL: game.iconURL, achievements: game.achievements, score: score))
+        }
+        scored.sort { $0.score > $1.score }
+        return Array(scored.prefix(8))
     }
 
     /// Las imágenes vienen como rutas ("/Badge/123.png") del servidor de medios.
@@ -411,7 +700,14 @@ enum RetroAchievements {
         }
         components?.queryItems = items
         guard let url = components?.url else { throw RAError.badResponse }
-        let (data, response) = try await URLSession.shared.data(from: url)
+        let result: (Data, URLResponse)
+        do {
+            result = try await URLSession.shared.data(from: url)
+        } catch {
+            throw RAError.offline
+        }
+        let data: Data = result.0
+        let response: URLResponse = result.1
         let status: Int = (response as? HTTPURLResponse)?.statusCode ?? 0
         if status == 401 || status == 403 { throw RAError.unauthorized }
         guard (200..<300).contains(status) else { throw RAError.badResponse }

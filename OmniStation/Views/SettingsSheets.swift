@@ -325,7 +325,7 @@ struct AddShortcutSheet: View {
     private var placeholder: String {
         switch mode {
         case 1: return "com.empresa.juego"
-        case 2: return "Juego.app"
+        case 2: return "Juego.app / livecontainer://…"
         default: return "app://juego"
         }
     }
@@ -333,7 +333,7 @@ struct AddShortcutSheet: View {
     private var modeHelp: String {
         switch mode {
         case 1: return tr("Escribe el Bundle ID de la app. Se abrirá con StikDebug (sirve para cualquier app instalada, también ports).")
-        case 2: return tr("Escribe el nombre de la app dentro de LiveContainer (el de su enlace de lanzamiento).")
+        case 2: return tr("Pega el enlace de lanzamiento de LiveContainer (mantén pulsada la app en LiveContainer → Copiar enlace de lanzamiento) o escribe el nombre de su carpeta, por ejemplo Juego.app.")
         default: return tr("Debe incluir el esquema de la app, por ejemplo app://…")
         }
     }
@@ -348,6 +348,10 @@ struct AddShortcutSheet: View {
             let value: String = text.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? text
             return "stikjit://launch-app?bundle-id=" + value
         case 2:
+            // Enlace completo pegado desde LiveContainer: se guarda tal cual.
+            if text.lowercased().hasPrefix("livecontainer://") {
+                return URL(string: text) == nil ? nil : text
+            }
             let value: String = text.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? text
             return DebugSupport.liveContainerLaunchPrefix + value
         default:

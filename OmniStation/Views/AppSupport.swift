@@ -269,6 +269,86 @@ enum L10n {
         "Volumen e importación": "Volume and import",
         "Volver a escanear": "Scan again",
         "Ya existe una plataforma con ese nombre.": "A platform with that name already exists.",
+        "%@: formato no compatible": "%@: unsupported format",
+        "%ld logros": "%ld achievements",
+        "Abriendo con JIT…": "Opening with JIT…",
+        "Abrir con JIT": "Open with JIT",
+        "Abrir página de la clave": "Open key page",
+        "Activa la VPN de StikDebug (LocalDevVPN) y abre tus juegos con JIT desde OmniStation.": "Turn on the StikDebug VPN (LocalDevVPN) and open your games with JIT from OmniStation.",
+        "Animado predeterminado": "Default animated",
+        "Animado predeterminado (no incluido)": "Default animated (not included)",
+        "Archivo de emparejamiento": "Pairing file",
+        "Archivo de emparejamiento importado.": "Pairing file imported.",
+        "Archivo de emparejamiento quitado.": "Pairing file removed.",
+        "Archivo de emparejamiento válido": "Valid pairing file",
+        "Así la app sabe cómo activar el JIT de tus juegos. Puedes cambiarlo cuando quieras en Ajustes → Depuración.": "This tells the app how to enable JIT for your games. You can change it anytime in Settings → Debugging.",
+        "Bundle ID guardado": "Bundle ID saved",
+        "Bundle ID para JIT": "Bundle ID for JIT",
+        "Bundle ID quitado": "Bundle ID removed",
+        "Cambiar imagen propia": "Change custom image",
+        "Cambiar juego (ID %@)": "Change game (ID %@)",
+        "Cambiar vídeo propio": "Change custom video",
+        "Cerrar sesión": "Log out",
+        "Confirmar": "Confirm",
+        "Consigue tu archivo de emparejamiento (SideStore lo guarda como ALTPairingFile.mobiledevicepairing en su carpeta de Archivos, o créalo con jitterbugpair en un ordenador).": "Get your pairing file (SideStore keeps it as ALTPairingFile.mobiledevicepairing in its Files folder, or create it with jitterbugpair on a computer).",
+        "Cómo funciona": "How it works",
+        "De la app: %@": "From the app: %@",
+        "Detectado": "Detected",
+        "Elegir imagen propia": "Choose custom image",
+        "Elegir vídeo propio": "Choose custom video",
+        "Entra en retroachievements.org → Ajustes → apartado «Keys», copia la «Web API Key» y pégala aquí. La sesión queda guardada en este iPhone.": "Go to retroachievements.org → Settings → “Keys”, copy the “Web API Key” and paste it here. The session stays saved on this iPhone.",
+        "Es el número de la dirección de su página, por ejemplo retroachievements.org/game/1234.": "It is the number in its page address, for example retroachievements.org/game/1234.",
+        "Ese archivo no es un archivo de emparejamiento válido.": "That file is not a valid pairing file.",
+        "Exportado. Si lo guardaste en la carpeta de StikDebug, ya está listo.": "Exported. If you saved it in the StikDebug folder, it is ready.",
+        "Exportar a StikDebug": "Export to StikDebug",
+        "FALTA": "MISSING",
+        "Imagen propia quitada": "Custom image removed",
+        "Importado": "Imported",
+        "Importado: %@": "Imported: %@",
+        "Importar para SideStore/AltStore": "Import for SideStore/AltStore",
+        "Impórtalo aquí: la app comprueba que es válido. También puedes dejarlo en Archivos → En mi iPhone → OmniStation Dock y se importa solo.": "Import it here: the app checks that it is valid. You can also drop it in Files → On My iPhone → OmniStation Dock and it is imported automatically.",
+        "Inicia sesión en RetroAchievements en Ajustes → Juegos → Logros.": "Log in to RetroAchievements in Settings → Games → Achievements.",
+        "Iniciando sesión…": "Logging in…",
+        "Iniciar sesión": "Log in",
+        "Iniciar sesión en RetroAchievements": "Log in to RetroAchievements",
+        "JIT al abrir juegos": "JIT when opening games",
+        "La app está instalada directamente. El JIT lo activa StikDebug con tu archivo de emparejamiento, que puedes gestionar desde aquí.": "The app is installed directly. StikDebug enables JIT using your pairing file, which you can manage from here.",
+        "La app y tus juegos están dentro de LiveContainer. El JIT lo activa LiveContainer con StikDebug (elige StikDebug como activador de JIT en los ajustes de LiveContainer).": "The app and your games are inside LiveContainer. LiveContainer enables JIT with StikDebug (choose StikDebug as the JIT enabler in LiveContainer settings).",
+        "La clave web tiene 32 caracteres. ¿Has puesto tu contraseña?": "The web key has 32 characters. Did you enter your password?",
+        "La sesión de RetroAchievements no es válida. Vuelve a iniciarla en Ajustes.": "The RetroAchievements session is not valid. Log in again in Settings.",
+        "Método de instalación": "Install method",
+        "Método de instalación: %@": "Install method: %@",
+        "No es tu contraseña": "It is not your password",
+        "No se encontró automáticamente: escribe su ID.": "Not found automatically: enter its ID.",
+        "No se pudo exportar el archivo.": "The file could not be exported.",
+        "No se pudo leer %@": "Could not read %@",
+        "O escribe su ID": "Or enter its ID",
+        "Original estático": "Original static",
+        "Para abrirlo con JIT, añade su Bundle ID en las opciones del juego": "To open it with JIT, add its Bundle ID in the game options",
+        "Para los juegos sin ajuste propio": "For games without their own setting",
+        "Pega el enlace de lanzamiento de LiveContainer (mantén pulsada la app en LiveContainer → Copiar enlace de lanzamiento) o escribe el nombre de su carpeta, por ejemplo Juego.app.": "Paste the LiveContainer launch link (long-press the app in LiveContainer → Copy launch URL) or type its folder name, for example Game.app.",
+        "Pulsa «Exportar a StikDebug» y guárdalo en Archivos → En mi iPhone → StikDebug. StikDebug lo usa automáticamente.": "Tap “Export to StikDebug” and save it in Files → On My iPhone → StikDebug. StikDebug uses it automatically.",
+        "Quitar imagen propia": "Remove custom image",
+        "Quitar vídeo propio": "Remove custom video",
+        "Recuerda: StikDebug necesita tu archivo de emparejamiento": "Remember: StikDebug needs your pairing file",
+        "Reemplazar": "Replace",
+        "RetroAchievements no tiene logros para esta plataforma.": "RetroAchievements has no achievements for this platform.",
+        "Se abrirá con JIT": "Will open with JIT",
+        "Se abrirá sin JIT": "Will open without JIT",
+        "Sesión guardada en este iPhone": "Session saved on this iPhone",
+        "Sesión iniciada como %@": "Logged in as %@",
+        "Sesión: %@": "Session: %@",
+        "Sin archivo de emparejamiento": "No pairing file",
+        "Sin conexión a internet.": "No internet connection.",
+        "Sin conexión: se muestra la sesión guardada.": "Offline: showing the saved session.",
+        "Sin elegir": "Not chosen",
+        "StikDebug instalado": "StikDebug installed",
+        "StikDebug no detectado": "StikDebug not detected",
+        "Usuario o clave web incorrectos. Recuerda: es la Web API Key, no tu contraseña.": "Wrong username or web key. Remember: it is the Web API Key, not your password.",
+        "Vídeo propio": "Custom video",
+        "Vídeo propio quitado": "Custom video removed",
+        "¿Cuál es este juego en RetroAchievements?": "Which game is this on RetroAchievements?",
+        "¿Cómo has instalado OmniStation Dock?": "How did you install OmniStation Dock?",
         "Listo": "Done"
     ]
 }
@@ -425,8 +505,12 @@ final class ControllerMonitor: ObservableObject {
         case up, down, left, right
     }
 
-    private var lastDirectionAt: TimeInterval = 0
-    private var lastDirection: Direction?
+    /// Dirección que se mantiene pulsada (cruceta o stick) y su temporizador de repetición.
+    private var heldDirection: Direction?
+    private var repeatTimer: Timer?
+    /// Espera antes de empezar a repetir y ritmo de la repetición (moderado).
+    private static let repeatDelay: TimeInterval = 0.42
+    private static let repeatInterval: TimeInterval = 0.16
 
     private var tokens: [NSObjectProtocol] = []
 
@@ -460,6 +544,49 @@ final class ControllerMonitor: ObservableObject {
         list.forEach(bind)
     }
 
+    /// Dirección marcada: manda la cruceta; si está suelta, el stick izquierdo.
+    private static func direction(of pad: GCExtendedGamepad) -> Direction? {
+        if let dpad = direction(x: pad.dpad.xAxis.value, y: pad.dpad.yAxis.value) {
+            return dpad
+        }
+        return direction(x: pad.leftThumbstick.xAxis.value, y: pad.leftThumbstick.yAxis.value)
+    }
+
+    private static func direction(x: Float, y: Float) -> Direction? {
+        if abs(x) > abs(y), abs(x) > 0.5 {
+            return x < 0 ? .left : .right
+        }
+        if abs(y) > 0.5 {
+            return y < 0 ? .down : .up
+        }
+        return nil
+    }
+
+    /// Un paso al pulsar; tras una pequeña espera, repite mientras siga pulsada.
+    private func updateHeld(_ direction: Direction?) {
+        guard direction != heldDirection else { return }
+        heldDirection = direction
+        repeatTimer?.invalidate()
+        repeatTimer = nil
+        guard let direction, navigationEnabled else { return }
+        onDirection?(direction)
+        let delay = Timer(timeInterval: Self.repeatDelay, repeats: false) { [weak self] _ in
+            self?.startRepeating(direction)
+        }
+        RunLoop.main.add(delay, forMode: .common)
+        repeatTimer = delay
+    }
+
+    private func startRepeating(_ direction: Direction) {
+        guard heldDirection == direction else { return }
+        let timer = Timer(timeInterval: Self.repeatInterval, repeats: true) { [weak self] _ in
+            guard let self, self.heldDirection == direction, self.navigationEnabled else { return }
+            self.onDirection?(direction)
+        }
+        RunLoop.main.add(timer, forMode: .common)
+        repeatTimer = timer
+    }
+
     private func bind(_ controller: GCController) {
         guard let pad = controller.extendedGamepad else { return }
         pad.leftShoulder.pressedChangedHandler = { [weak self] _, _, pressed in
@@ -478,28 +605,17 @@ final class ControllerMonitor: ObservableObject {
             guard pressed, self?.navigationEnabled == true else { return }
             self?.onTrigger?(1)
         }
-        // La cruceta debe registrarse explícitamente: focusable() por sí solo no
-        // convierte los eventos de GCController en navegación SwiftUI en iOS.
-        pad.dpad.valueChangedHandler = { [weak self] _, x, y in
-            guard let self, self.navigationEnabled else { return }
-            let direction: Direction?
-            if abs(x) > abs(y), abs(x) > 0.5 {
-                direction = x < 0 ? .left : .right
-            } else if abs(y) > 0.5 {
-                direction = y < 0 ? .down : .up
-            } else {
-                direction = nil
-            }
-            guard let direction else {
-                self.lastDirection = nil
-                return
-            }
-            let now = ProcessInfo.processInfo.systemUptime
-            // Un paso al pulsar y repetición moderada si se mantiene la dirección.
-            guard direction != self.lastDirection || now - self.lastDirectionAt > 0.32 else { return }
-            self.lastDirection = direction
-            self.lastDirectionAt = now
-            DispatchQueue.main.async { self.onDirection?(direction) }
+        // La cruceta y el stick izquierdo se leen juntos: una pulsación mueve un paso y,
+        // si se mantiene, sigue moviendo a ritmo moderado.
+        pad.dpad.valueChangedHandler = { [weak self, weak pad] _, _, _ in
+            guard let self, let pad else { return }
+            let direction: Direction? = Self.direction(of: pad)
+            DispatchQueue.main.async { self.updateHeld(direction) }
+        }
+        pad.leftThumbstick.valueChangedHandler = { [weak self, weak pad] _, _, _ in
+            guard let self, let pad else { return }
+            let direction: Direction? = Self.direction(of: pad)
+            DispatchQueue.main.async { self.updateHeld(direction) }
         }
         pad.buttonA.pressedChangedHandler = { [weak self] _, _, pressed in
             guard pressed, self?.navigationEnabled == true else { return }
@@ -695,6 +811,21 @@ final class BatteryMonitor: ObservableObject {
 /// así deslizar no repinta toda la interfaz con todas sus tarjetas.
 final class ScrollProgress: ObservableObject {
     @Published private(set) var offset: CGFloat = 0
+    /// Pantalla que manda. Al cambiar de pestaña la pantalla anterior sigue un momento en
+    /// pantalla (la transición) y no debe poder esconder el título de la nueva.
+    private(set) var owner: String = "Inicio"
+
+    /// Pasa el control a otra pantalla, que empieza arriba del todo.
+    func activate(_ newOwner: String) {
+        owner = newOwner
+        if offset != 0 { offset = 0 }
+    }
+
+    /// Desplazamiento que informa una pantalla concreta (se ignora si no es la activa).
+    func set(_ value: CGFloat, from source: String) {
+        guard source == owner else { return }
+        set(value)
+    }
 
     func set(_ value: CGFloat) {
         // Más allá de 80 puntos el título ya está oculto: no hace falta seguir avisando.
@@ -742,6 +873,8 @@ enum ScrollSupport {
 /// Lee el desplazamiento del ScrollView en iOS 18 (más fiable que medir marcos).
 struct ScrollOffsetReader: ViewModifier {
     let progress: ScrollProgress
+    /// Pantalla a la que pertenece este scroll.
+    let owner: String
 
     @ViewBuilder
     func body(content: Content) -> some View {
@@ -749,7 +882,7 @@ struct ScrollOffsetReader: ViewModifier {
             content.onScrollGeometryChange(for: CGFloat.self) { geometry in
                 geometry.contentOffset.y + geometry.contentInsets.top
             } action: { _, newValue in
-                progress.set(newValue)
+                progress.set(newValue, from: owner)
             }
         } else {
             content

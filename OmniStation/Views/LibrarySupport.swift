@@ -207,6 +207,10 @@ struct GameMeta: Codable, Equatable {
     var platform: String?
     var raGameID: Int?
     var buttonMap: [String: String]?
+    /// nil = lo que diga el ajuste general «JIT al abrir juegos».
+    var useJIT: Bool?
+    /// Bundle ID del juego para pedir el JIT a StikDebug (SideStore/AltStore).
+    var bundleID: String?
 }
 
 enum GameMetaStore {

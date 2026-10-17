@@ -21,6 +21,7 @@ private enum DockSection: String, CaseIterable {
 private enum HomeSheet: Identifiable {
     case controllers, platformOrder, addShortcut
     case renameGame, achievements, buttonMap, retroAccount, libraryList, platformManager, sounds
+    case installMethod, pairing, bundleID
     var id: Int { hashValue }
 }
 
@@ -89,6 +90,8 @@ struct HomeView: View {
     @AppStorage("volumeSelect") private var volumeSelect = 0.7
     @AppStorage("volumeAmbient") private var volumeAmbient = 0.3
     @AppStorage("backgroundMode") private var backgroundMode = "default"
+    @AppStorage(InstallMethod.storageKey) private var installMethodRaw = ""
+    @AppStorage(JITLauncher.defaultKey) private var jitByDefault = false
 
     // Dispositivos
     @StateObject private var controllers = ControllerMonitor()
@@ -341,6 +344,16 @@ struct HomeView: View {
         }
     }
 
+    /// Con la rueda de opciones abierta, tocar en cualquier otro sitio la cierra.
+    @ViewBuilder
+    private func optionsDismissLayer(_ dock: Bool) -> some View {
+        if dock && optionsExpanded {
+            Color.black.opacity(0.001)
+                .ignoresSafeArea()
+                .onTapGesture { collapseOptions() }
+        }
+    }
+
     @ViewBuilder
     private func dockBottomOverlay(_ dock: Bool) -> some View {
         if dock {
@@ -350,6 +363,7 @@ struct HomeView: View {
 
     private func withOverlays<V: View>(_ view: V, dock: Bool) -> some View {
         view
+            .overlay { optionsDismissLayer(dock) }
             .overlay(alignment: .bottom) { dockBottomOverlay(dock) }
             .overlay(alignment: .bottom) { toastOverlay }
             .onPreferenceChange(FramesKey.self) { value in handleFrames(value) }
@@ -382,13 +396,58 @@ struct HomeView: View {
         case .buttonMap:
             buttonMapSheet()
         case .retroAccount:
-            RetroAccountSheet(lang: appLanguage, pad: sheetPad)
+            RetroAccountSheet(lang: appLanguage, pad: sheetPad) { user in
+                showToast(tr("Sesión iniciada como %@", user))
+            }
         case .libraryList:
             libraryListSheet()
         case .platformManager:
             PlatformManagerSheet(lang: appLanguage, pad: sheetPad)
         case .sounds:
             SoundsSheet(lang: appLanguage, pad: sheetPad)
+        case .installMethod:
+            installMethodSheet()
+        case .pairing:
+            PairingFileSheet(lang: appLanguage, pad: sheetPad) { text in
+                showToast(text)
+            }
+        case .bundleID:
+            bundleIDSheet()
+        }
+    }
+
+    private func installMethodSheet() -> some View {
+        let firstTime: Bool = installMethodRaw.isEmpty
+        let current: InstallMethod? = InstallMethod(rawValue: installMethodRaw)
+        return InstallMethodSheet(lang: appLanguage, pad: sheetPad, firstTime: firstTime, current: current) { method in
+            chooseInstallMethod(method, firstTime: firstTime)
+        }
+    }
+
+    private func chooseInstallMethod(_ method: InstallMethod, firstTime: Bool) {
+        installMethodRaw = method.rawValue
+        showToast(tr("Método de instalación: %@", installMethodTitle(method)))
+        // Con SideStore/AltStore, la primera vez se ofrece importar el archivo de emparejamiento.
+        guard firstTime, method == .sideStore, !PairingFile.exists else { return }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.7) {
+            if sheet == nil { sheet = .pairing }
+        }
+    }
+
+    private func installMethodTitle(_ method: InstallMethod?) -> String {
+        switch method {
+        case .liveContainer: return "LiveContainer"
+        case .sideStore: return "SideStore / AltStore"
+        case .none: return tr("Sin elegir")
+        }
+    }
+
+    private func bundleIDSheet() -> some View {
+        let id: String = editingGameID ?? ""
+        let initial: String = editingMeta.bundleID ?? JITLauncher.bundleID(fromLink: editingGame?.launchURL) ?? ""
+        return RenameGameSheet(lang: appLanguage, pad: sheetPad, initialName: initial, title: "Bundle ID para JIT", placeholder: "com.ejemplo.juego", bundleMode: true) { value in
+            updateMeta(id) { meta in meta.bundleID = value.isEmpty ? nil : value }
+            showToast(value.isEmpty ? tr("Bundle ID quitado") : tr("Bundle ID guardado"))
         }
     }
 
@@ -407,7 +466,7 @@ struct HomeView: View {
 
     private func achievementsSheet() -> some View {
         let id: String = editingGameID ?? ""
-        return GameAchievementsSheet(lang: appLanguage, pad: sheetPad, gameName: editingGame?.name ?? "", initialGameID: editingMeta.raGameID) { gameID in
+        return GameAchievementsSheet(lang: appLanguage, pad: sheetPad, gameName: editingGame?.name ?? "", platform: editingGame?.platform ?? "", initialGameID: editingMeta.raGameID) { gameID in
             updateMeta(id) { meta in meta.raGameID = gameID }
         }
     }
@@ -457,7 +516,10 @@ struct HomeView: View {
 
     /// Medidas de pantalla: se guardan sin repintar; en iOS 17 también dan el desplazamiento.
     private func handleFrames(_ value: [String: CGRect]) {
-        let offset: CGFloat? = metrics.update(value)
+        // Cada pantalla publica su contenido con su nombre: solo cuenta el de la activa.
+        var frames: [String: CGRect] = value
+        frames["content"] = value["content-" + selectedSection.rawValue]
+        let offset: CGFloat? = metrics.update(frames)
         if !ScrollSupport.hasScrollGeometry, let offset {
             scrollProgress.set(offset)
         }
@@ -544,7 +606,7 @@ struct HomeView: View {
 
     private func handleSectionChange(_ section: DockSection) {
         // La pantalla nueva empieza arriba: el título debe verse entero.
-        scrollProgress.set(0)
+        scrollProgress.activate(section.rawValue)
         optionsExpanded = false
         if section == .inicio { refreshLibrary() }
         if section == .ajustes { refreshJITStatus(announce: false) }
@@ -601,6 +663,15 @@ struct HomeView: View {
         }
         if hdmi.isConnected { handleHDMI(true) }
         SoundManager.shared.updateAmbient(volume: volumeAmbient)
+        askInstallMethodIfNeeded()
+    }
+
+    /// La primera vez se pregunta cómo se instaló la app (decide cómo se activa el JIT).
+    private func askInstallMethodIfNeeded() {
+        guard installMethodRaw.isEmpty else { return }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) {
+            if installMethodRaw.isEmpty && sheet == nil { sheet = .installMethod }
+        }
     }
 
     // MARK: - Botones del mando
@@ -693,28 +764,35 @@ struct HomeView: View {
 
     /// Vídeo de fondo en uso (si el modo animado está activo y el vídeo existe).
     private var activeVideo: URL? {
-        backgroundMode == "video" ? backgroundVideo : nil
+        switch backgroundMode {
+        case "video": return backgroundVideo
+        case "static", "original": return nil
+        default: return BackgroundStore.defaultVideoURL
+        }
     }
 
-    /// Imagen de fondo en uso (si no hay vídeo activo).
+    /// Imagen propia de fondo en uso. Sin vídeo ni imagen propia se ve el original estático.
     private var activeImage: UIImage? {
-        activeVideo == nil ? customBackground : nil
+        backgroundMode == "static" ? customBackground : nil
     }
 
     private func removeStaticBackground() {
         BackgroundStore.remove()
         customBackground = nil
         if backgroundMode == "static" { backgroundMode = "default" }
-        showToast(tr("Fondo restaurado"))
+        showToast(tr("Imagen propia quitada"))
     }
 
     private func removeVideoBackground() {
         BackgroundStore.removeVideo()
         backgroundVideo = nil
-        if backgroundMode == "video" {
-            backgroundMode = customBackground == nil ? "default" : "static"
-        }
-        showToast(tr("Fondo animado quitado"))
+        if backgroundMode == "video" { backgroundMode = "default" }
+        showToast(tr("Vídeo propio quitado"))
+    }
+
+    private func setBackgroundMode(_ mode: String) {
+        backgroundMode = mode
+        closePadMenu()
     }
 
     // MARK: - Avisos (toast)
@@ -821,42 +899,57 @@ struct HomeView: View {
 
     private typealias PadMenuContent = (title: String, message: String?, items: [PadMenuItem])
 
+    /// Marca la opción en uso con ✓.
+    private func checked(_ title: String, _ active: Bool) -> String {
+        active ? "✓ " + title : title
+    }
+
     private func staticBackgroundMenu(_ cancel: PadMenuItem) -> PadMenuContent {
         var items: [PadMenuItem] = []
-        items.append(PadMenuItem(title: tr("Elegir otra imagen")) {
+        items.append(PadMenuItem(title: checked(tr("Original estático"), backgroundMode == "original")) {
+            setBackgroundMode("original")
+        })
+        if customBackground != nil {
+            items.append(PadMenuItem(title: checked(tr("Imagen propia"), backgroundMode == "static")) {
+                setBackgroundMode("static")
+            })
+        }
+        items.append(PadMenuItem(title: customBackground == nil ? tr("Elegir imagen propia") : tr("Cambiar imagen propia")) {
             closePadMenu()
             pickPhoto(.staticBackground)
         })
-        if activeImage == nil, customBackground != nil {
-            items.append(PadMenuItem(title: tr("Usar esta imagen")) {
-                backgroundMode = "static"
+        if customBackground != nil {
+            items.append(PadMenuItem(title: tr("Quitar imagen propia"), kind: .destructive) {
                 closePadMenu()
+                removeStaticBackground()
             })
         }
-        items.append(PadMenuItem(title: tr("Quitar imagen"), kind: .destructive) {
-            closePadMenu()
-            removeStaticBackground()
-        })
         items.append(cancel)
         return (tr("Fondo estático"), nil, items)
     }
 
     private func videoBackgroundMenu(_ cancel: PadMenuItem) -> PadMenuContent {
+        let hasDefault: Bool = BackgroundStore.defaultVideoURL != nil
+        let defaultTitle: String = hasDefault ? tr("Animado predeterminado") : tr("Animado predeterminado (no incluido)")
         var items: [PadMenuItem] = []
-        items.append(PadMenuItem(title: tr("Elegir otro vídeo")) {
+        items.append(PadMenuItem(title: checked(defaultTitle, backgroundMode == "default")) {
+            setBackgroundMode("default")
+        })
+        if backgroundVideo != nil {
+            items.append(PadMenuItem(title: checked(tr("Vídeo propio"), backgroundMode == "video")) {
+                setBackgroundMode("video")
+            })
+        }
+        items.append(PadMenuItem(title: backgroundVideo == nil ? tr("Elegir vídeo propio") : tr("Cambiar vídeo propio")) {
             closePadMenu()
             pickPhoto(.videoBackground)
         })
-        if activeVideo == nil, backgroundVideo != nil {
-            items.append(PadMenuItem(title: tr("Usar este vídeo")) {
-                backgroundMode = "video"
+        if backgroundVideo != nil {
+            items.append(PadMenuItem(title: tr("Quitar vídeo propio"), kind: .destructive) {
                 closePadMenu()
+                removeVideoBackground()
             })
         }
-        items.append(PadMenuItem(title: tr("Quitar vídeo"), kind: .destructive) {
-            closePadMenu()
-            removeVideoBackground()
-        })
         items.append(cancel)
         return (tr("Fondo animado"), nil, items)
     }
@@ -905,6 +998,17 @@ struct HomeView: View {
         items.append(PadMenuItem(title: isFavorite ? tr("Quitar de favoritos") : tr("Añadir a favoritos")) {
             toggleFavorite(id)
             closePadMenu()
+        })
+        let jitOn: Bool = wantsJIT(game)
+        let jitTitle: String = jitOn ? "✓ " + tr("Abrir con JIT") : tr("Abrir con JIT")
+        items.append(PadMenuItem(title: jitTitle) {
+            updateMeta(id) { meta in meta.useJIT = !jitOn }
+            closePadMenu()
+            showToast(jitOn ? tr("Se abrirá sin JIT") : tr("Se abrirá con JIT"))
+        })
+        items.append(PadMenuItem(title: tr("Bundle ID para JIT")) {
+            closePadMenu()
+            sheet = .bundleID
         })
         if game.isCustom {
             items.append(PadMenuItem(title: tr("Quitar de la biblioteca"), kind: .destructive) {
@@ -1362,9 +1466,15 @@ struct HomeView: View {
         self.open(game)
     }
 
-    /// △ / Y: despliega (o recoge) la rueda de opciones del juego seleccionado.
+    /// △ / Y: en el carrusel del Dock despliega (o recoge) la rueda de opciones; en las
+    /// cuadrículas (Búsqueda y modo normal) abre directamente las opciones del juego marcado.
     private func handleOptionsButton() {
-        guard dockActive, selectedSection == .inicio || selectedSection == .favoritos, !controllerGames.isEmpty else { return }
+        let carousel: Bool = dockActive && (selectedSection == .inicio || selectedSection == .favoritos)
+        guard carousel else {
+            openOptionsForSelectedGame()
+            return
+        }
+        guard !controllerGames.isEmpty else { return }
         if optionsExpanded {
             collapseOptions()
         } else {
@@ -1374,6 +1484,13 @@ struct HomeView: View {
             withAnimation(.spring(response: 0.3, dampingFraction: 0.85)) { optionsExpanded = true }
         }
         feedback()
+    }
+
+    private func openOptionsForSelectedGame() {
+        guard selectedSection != .ajustes, controllerSelectedArea == "games",
+              let id = controllerSelectedGameID,
+              controllerGames.contains(where: { $0.id == id }) else { return }
+        openGameOptions(id)
     }
 
     private func collapseOptions() {
@@ -1409,6 +1526,10 @@ struct HomeView: View {
         feedback()
         playCounts[game.id, default: 0] += 1
         UserDefaults.standard.set(playCounts, forKey: "playCounts")
+        if wantsJIT(game) {
+            openWithJIT(game)
+            return
+        }
         guard let text = game.launchURL, let url = URL(string: text) else {
             showToast(tr("Este juego aún no tiene acceso directo"))
             return
@@ -1418,6 +1539,36 @@ struct HomeView: View {
                 DispatchQueue.main.async { showToast(tr("No se pudo abrir el enlace")) }
             }
         }
+    }
+
+    /// ¿Este juego se abre con JIT? Su propio ajuste manda; si no tiene, el ajuste general.
+    private func wantsJIT(_ game: Game) -> Bool {
+        gameMeta[game.id]?.useJIT ?? jitByDefault
+    }
+
+    /// Enlace para abrir el juego con JIT:
+    /// - Juego de LiveContainer: su enlace con jit=true (LiveContainer se lo pide a StikDebug).
+    /// - Resto: StikDebug abre la app por su Bundle ID con el JIT activado.
+    private func jitLaunchURL(_ game: Game) -> URL? {
+        if let url = JITLauncher.liveContainerJITURL(game.launchURL) { return url }
+        let saved: String? = gameMeta[game.id]?.bundleID
+        guard let bundle = saved ?? JITLauncher.bundleID(fromLink: game.launchURL) else { return nil }
+        return JITLauncher.stikDebugJITURL(bundleID: bundle)
+    }
+
+    private func openWithJIT(_ game: Game) {
+        guard let url = jitLaunchURL(game) else {
+            showToast(tr("Para abrirlo con JIT, añade su Bundle ID en las opciones del juego"))
+            return
+        }
+        let viaLiveContainer: Bool = JITLauncher.isLiveContainerLink(game.launchURL)
+        if !viaLiveContainer && installMethodRaw == InstallMethod.sideStore.rawValue && !PairingFile.exists {
+            showToast(tr("Recuerda: StikDebug necesita tu archivo de emparejamiento"))
+        } else {
+            showToast(tr("Abriendo con JIT…"))
+        }
+        let failure: String = viaLiveContainer ? tr("No se pudo abrir LiveContainer. ¿Está instalado?") : tr("No se pudo abrir StikDebug. ¿Está instalado?")
+        openExternal(url, failure: failure)
     }
 
     private func toggleFavorite(_ id: String) {
@@ -1570,6 +1721,7 @@ struct HomeView: View {
     }
 
     private func scrollBody<Content: View>(topGap: CGFloat, _ content: @escaping () -> Content) -> some View {
+        let owner: String = selectedSection.rawValue
         let topPadding: CGFloat = metrics.headerHeight + topGap
         let bottomPadding: CGFloat = dockActive ? 92 : 44
         return ScrollView(showsIndicators: false) {
@@ -1580,12 +1732,12 @@ struct HomeView: View {
                     .padding(.horizontal, 16)
                     .padding(.top, topPadding)
                     .padding(.bottom, bottomPadding)
-                    .reportFrame("content")
+                    .reportFrame("content-" + owner)
                 // Punto de anclaje en el borde inferior: para llegar exactamente al final.
                 Color.clear.frame(height: 1).id("screen-bottom")
             }
         }
-        .modifier(ScrollOffsetReader(progress: scrollProgress))
+        .modifier(ScrollOffsetReader(progress: scrollProgress, owner: owner))
     }
 
     /// Cuando el mando cambia la selección, la pantalla se desplaza para enseñarla.
@@ -1605,7 +1757,7 @@ struct HomeView: View {
         withAnimation(.easeInOut(duration: 0.2)) {
             switch controllerSelectedArea {
             case "featured", "search":
-                proxy.scrollTo("screen-top", anchor: .top)
+                scrollToTop(proxy)
             case "alphabet":
                 scrollToLetter(proxy)
             case "settings":
@@ -1621,7 +1773,7 @@ struct HomeView: View {
         if isLandscapeNow {
             proxy.scrollTo("alphabet-\(controllerSelectedLetterIndex)", anchor: .center)
         } else {
-            proxy.scrollTo("screen-top", anchor: .top)
+            scrollToTop(proxy)
         }
     }
 
@@ -1631,7 +1783,7 @@ struct HomeView: View {
         let columns: Int = isLandscapeNow ? 3 : 2
         let index: Int = controllerSelectedSettingIndex
         if index < columns {
-            proxy.scrollTo("screen-top", anchor: .top)
+            scrollToTop(proxy)
         } else if isLastSettingRow(index, columns: columns) {
             proxy.scrollTo("screen-bottom", anchor: .bottom)
         } else {
@@ -1656,12 +1808,42 @@ struct HomeView: View {
         guard let index = items.firstIndex(where: { $0.id == id }) else { return }
         let columns: Int = gameColumns
         let lastRow: Int = (items.count - 1) / columns
-        if gameFitsFromTop(id) {
-            proxy.scrollTo("screen-top", anchor: .top)
-        } else if index / columns == lastRow {
+        let row: Int = index / columns
+        // La primera fila siempre sube del todo (antes se centraba y tapaba título y plataformas).
+        if row == 0 || gameFitsFromTop(id) {
+            scrollToTop(proxy)
+        } else if row == lastRow {
             proxy.scrollTo("screen-bottom", anchor: .bottom)
         } else {
             proxy.scrollTo(id, anchor: .center)
+        }
+    }
+
+    /// Sube hasta arriba del todo. Se repite un instante después porque, con listas largas,
+    /// la primera vez la posición de las filas aún es aproximada.
+    private func scrollToTop(_ proxy: ScrollViewProxy) {
+        proxy.scrollTo("screen-top", anchor: .top)
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.28) {
+            guard selectionWantsTop else { return }
+            withAnimation(.easeOut(duration: 0.15)) {
+                proxy.scrollTo("screen-top", anchor: .top)
+            }
+        }
+    }
+
+    /// ¿La selección actual del mando debe ver la pantalla desde arriba?
+    private var selectionWantsTop: Bool {
+        switch controllerSelectedArea {
+        case "featured", "search":
+            return true
+        case "alphabet":
+            return !isLandscapeNow
+        case "settings":
+            return controllerSelectedSettingIndex < (isLandscapeNow ? 3 : 2)
+        default:
+            guard let id = controllerSelectedGameID,
+                  let index = controllerGames.firstIndex(where: { $0.id == id }) else { return false }
+            return index < gameColumns
         }
     }
 
@@ -1924,7 +2106,8 @@ struct HomeView: View {
             }
             .scrollTargetLayout()
             .padding(.horizontal, 12)
-            .padding(.vertical, dock ? 4 : 8)
+            // Espacio para el brillo de la plataforma marcada (si no, se corta arriba y abajo).
+            .padding(.vertical, dock ? 11 : 15)
         }
         .modifier(PlatformBarFollow(
             scrollID: $platformScrollID,
@@ -1945,6 +2128,8 @@ struct HomeView: View {
                 endPoint: .trailing
             )
         }
+        // Se recupera el espacio extra: la barra ocupa lo mismo que antes.
+        .padding(.vertical, -7)
     }
 
     private func platformChip(_ name: String, symbol: String, compact: Bool, dock: Bool, display: Bool, highlight: String?) -> some View {
@@ -1973,7 +2158,7 @@ struct HomeView: View {
                     Capsule().strokeBorder(Color.cyan.opacity(0.7), lineWidth: 1)
                 }
             }
-            .shadow(color: isSelected ? Color.cyan.opacity(0.30) : Color.clear, radius: 10)
+            .shadow(color: isSelected ? Color.cyan.opacity(0.30) : Color.clear, radius: 8)
         }
         .buttonStyle(ControllerFocusableButtonStyle())
     }
@@ -2100,11 +2285,17 @@ struct HomeView: View {
                     .font(AppFont.text(10, .semibold))
                     .foregroundStyle(.cyan.opacity(0.9))
             }
-            LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 6), count: 7), spacing: 6) {
-                ForEach(Array(controllerAlphabet.enumerated()), id: \.offset) { index, letter in
-                    alphabetKey(letter, index: index)
+            // Mismo teclado QWERTY (10 columnas) que recorre el mando.
+            PadKeyboardView(
+                keys: controllerAlphabet,
+                selectedIndex: controllerSelectedArea == "alphabet" ? controllerSelectedLetterIndex : nil,
+                idPrefix: "alphabet-",
+                onKey: { index in
+                    controllerSelectedLetterIndex = index
+                    controllerSelectedArea = "alphabet"
+                    activateAlphabetSelection()
                 }
-            }
+            )
         }
         .padding(12)
         .glassCard()
@@ -2119,25 +2310,6 @@ struct HomeView: View {
 
     private var searchRingVisible: Bool {
         gamepadConnected && selectedSection == .busqueda && controllerSelectedArea == "search"
-    }
-
-    private func alphabetKey(_ letter: String, index: Int) -> some View {
-        let isSelected: Bool = index == controllerSelectedLetterIndex && controllerSelectedArea == "alphabet"
-        let shape = RoundedRectangle(cornerRadius: 8, style: .continuous)
-        return Button {
-            controllerSelectedLetterIndex = index
-            controllerSelectedArea = "alphabet"
-            activateAlphabetSelection()
-        } label: {
-            Text(letter)
-                .font(AppFont.text(13, .bold))
-                .foregroundStyle(isSelected ? Color.black : Color.white)
-                .frame(maxWidth: .infinity, minHeight: 34)
-                .background(isSelected ? Color.cyan : Color.white.opacity(0.07), in: shape)
-                .contentShape(shape)
-        }
-        .buttonStyle(.plain)
-        .id("alphabet-\(index)")
     }
 
     // MARK: - Favoritos
@@ -2230,18 +2402,18 @@ struct HomeView: View {
     }
 
     private var appearanceSettings: SettingGroup {
-        let imageActive: Bool = activeImage != nil
-        let videoActive: Bool = activeVideo != nil
-        let imageControl: SettingControl = imageActive ? SettingControl.badge("ON", Color.cyan) : SettingControl.plain
+        let staticActive: Bool = backgroundMode == "original" || backgroundMode == "static"
+        let videoActive: Bool = !staticActive
+        let imageControl: SettingControl = staticActive ? SettingControl.badge("ON", Color.cyan) : SettingControl.plain
         let videoControl: SettingControl = videoActive ? SettingControl.badge("ON", Color.cyan) : SettingControl.plain
-        let staticSubtitle: String = customBackground == nil ? tr("Elegir imagen") : (imageActive ? tr("En uso") : tr("Guardada"))
-        let videoSubtitle: String = backgroundVideo == nil ? tr("Elegir vídeo") : (videoActive ? tr("En uso") : tr("Guardado"))
+        let staticSubtitle: String = backgroundMode == "static" ? tr("Imagen propia") : tr("Original estático")
+        let videoSubtitle: String = backgroundMode == "video" ? tr("Vídeo propio") : tr("Predeterminado")
         var items: [SettingItem] = []
-        items.append(SettingItem(id: "staticBackground", title: tr("Fondo estático"), subtitle: staticSubtitle, symbol: "photo.on.rectangle", tint: SettingTint.blue, control: imageControl, action: {
-            if customBackground == nil { pickPhoto(.staticBackground) } else { dialog = .staticBackground }
-        }))
         items.append(SettingItem(id: "videoBackground", title: tr("Fondo animado"), subtitle: videoSubtitle, symbol: "play.rectangle.fill", tint: SettingTint.violet, control: videoControl, action: {
-            if backgroundVideo == nil { pickPhoto(.videoBackground) } else { dialog = .videoBackground }
+            dialog = .videoBackground
+        }))
+        items.append(SettingItem(id: "staticBackground", title: tr("Fondo estático"), subtitle: staticSubtitle, symbol: "photo.on.rectangle", tint: SettingTint.blue, control: imageControl, action: {
+            dialog = .staticBackground
         }))
         items.append(SettingItem(id: "sounds", title: tr("Sonidos"), subtitle: tr("Volumen e importación"), symbol: "speaker.wave.3.fill", tint: SettingTint.aqua, control: .symbol("chevron.right"), action: {
             sheet = .sounds
@@ -2251,6 +2423,9 @@ struct HomeView: View {
         }))
         items.append(SettingItem(id: "platformOrder", title: tr("Reorganizar plataformas"), subtitle: tr("Orden de los filtros"), symbol: "arrow.up.arrow.down", tint: SettingTint.periwinkle, control: .symbol("chevron.right"), action: {
             sheet = .platformOrder
+        }))
+        items.append(SettingItem(id: "platforms", title: tr("Añadir plataforma"), subtitle: tr("Crea tus propias plataformas"), symbol: "plus.square.on.square", tint: SettingTint.aqua, control: .symbol("plus"), action: {
+            sheet = .platformManager
         }))
         items.append(toggleSetting("grid", tr("Cuadrícula completa"), tr("Más juegos por pantalla"), "square.grid.3x3.fill", Color.cyan, $compactGrid))
         items.append(toggleSetting("welcome", tr("Bienvenida animada"), tr("Pantalla de inicio al abrir"), "sparkles", SettingTint.periwinkle, $showWelcome))
@@ -2262,8 +2437,8 @@ struct HomeView: View {
         let iosCount: Int = libraryGames.filter { $0.source == "ios" }.count
         let favoriteCount: Int = favoriteNames.count
         let libraryCount: Int = libraryGames.count
-        let raConfigured: Bool = RetroAchievements.isConfigured
-        let raSubtitle: String = raConfigured ? RetroAchievements.username : tr("Conecta RetroAchievements")
+        let raConfigured: Bool = RetroAchievements.isLoggedIn
+        let raSubtitle: String = raConfigured ? tr("Sesión: %@", RetroAchievements.username) : tr("Iniciar sesión")
         let raControl: SettingControl = raConfigured ? SettingControl.badge("ON", Color.green) : SettingControl.symbol("chevron.right")
         let folderControl: SettingControl = folderSettingControl(linked: linked)
         var items: [SettingItem] = []
@@ -2276,9 +2451,6 @@ struct HomeView: View {
         items.append(SettingItem(id: "shortcut", title: tr("Acceso directo (URL)"), subtitle: tr("Abre un juego, app o emulador"), symbol: "link.badge.plus", tint: SettingTint.blue, control: .symbol("plus"), action: {
             shortcutMode = 0
             sheet = .addShortcut
-        }))
-        items.append(SettingItem(id: "platforms", title: tr("Añadir plataforma"), subtitle: tr("Crea tus propias plataformas"), symbol: "plus.square.on.square", tint: SettingTint.aqua, control: .symbol("plus"), action: {
-            sheet = .platformManager
         }))
         items.append(SettingItem(id: "achievements", title: tr("Logros"), subtitle: raSubtitle, symbol: "trophy.fill", tint: Color.yellow, control: raControl, action: {
             sheet = .retroAccount
@@ -2300,9 +2472,17 @@ struct HomeView: View {
     }
 
     private var debugSettings: SettingGroup {
+        let method: InstallMethod? = InstallMethod(rawValue: installMethodRaw)
         let jitControl: SettingControl = jitEnabled ? .badge("ON", Color.green) : .badge("OFF", Color.gray)
         let stikFailure: String = tr("No se pudo abrir StikDebug. ¿Está instalado?")
         var items: [SettingItem] = []
+        items.append(SettingItem(id: "installMethod", title: tr("Método de instalación"), subtitle: installMethodTitle(method), symbol: method?.symbol ?? "questionmark.app.fill", tint: SettingTint.violet, control: .symbol("chevron.right"), action: {
+            sheet = .installMethod
+        }))
+        items.append(toggleSetting("jitDefault", tr("JIT al abrir juegos"), tr("Para los juegos sin ajuste propio"), "bolt.circle.fill", SettingTint.violet, $jitByDefault))
+        if method == .sideStore {
+            items.append(pairingSettingItem())
+        }
         items.append(SettingItem(id: "jitStatus", title: tr("Estado JIT"), subtitle: jitEnabled ? tr("Activo en esta app") : tr("No activo en esta app"), symbol: "cpu", tint: SettingTint.violet, control: jitControl, action: {
             refreshJITStatus(announce: true)
         }))
@@ -2317,6 +2497,15 @@ struct HomeView: View {
             showToast(tr("Bundle ID copiado"))
         }))
         return SettingGroup(id: "debug", title: tr("Depuración"), items: items)
+    }
+
+    private func pairingSettingItem() -> SettingItem {
+        let ready: Bool = PairingFile.exists
+        let control: SettingControl = ready ? .badge("OK", Color.green) : .badge(tr("FALTA"), Color.orange)
+        let subtitle: String = ready ? tr("Importado") : tr("Importar para SideStore/AltStore")
+        return SettingItem(id: "pairing", title: tr("Archivo de emparejamiento"), subtitle: subtitle, symbol: "key.fill", tint: SettingTint.violet, control: control, action: {
+            sheet = .pairing
+        })
     }
 
     private var liveContainerSettings: SettingGroup {
@@ -2607,7 +2796,8 @@ struct HomeView: View {
     }
 
     private func dockCarousel(_ list: [Game], isHome: Bool, cardWidth: CGFloat) -> some View {
-        DockCarousel(
+        let carouselKey: String = isHome ? "inicio|" + selectedPlatform : "favoritos"
+        return DockCarousel(
             games: list,
             selectedID: Binding<String?>(
                 get: { dockSelectedID(in: list) },
@@ -2619,8 +2809,13 @@ struct HomeView: View {
             coverVersion: coverVersion,
             playHint: tr("Presiona ✕ para jugar"),
             emptyText: isHome ? tr("Sin juegos en esta plataforma") : tr("Aún no hay favoritos"),
-            onOpen: { game in self.open(game) }
+            favoriteLabel: tr("Añadir a favoritos"),
+            onOpen: { game in self.open(game) },
+            onToggleFavorite: { game in toggleFavorite(game.id) },
+            onSwipe: { feedback(.navigate) }
         )
+        // Un carrusel nuevo por pestaña y plataforma: siempre empieza centrado.
+        .id(carouselKey)
     }
 
     /// Juego marcado en el carrusel: el seleccionado si está en la lista, si no el primero.
@@ -2650,14 +2845,30 @@ struct HomeView: View {
         .padding(.horizontal, dockFullWidth ? 34 : 22)
         .padding(.vertical, 6)
         .frame(maxWidth: .infinity)
-        .background(
-            LinearGradient(
-                colors: [Color.black.opacity(0), Color.black.opacity(0.55)],
-                startPoint: .top,
-                endPoint: .bottom
-            )
-            .ignoresSafeArea(edges: .bottom)
+        .background { dockBarBackground }
+    }
+
+    /// Sombra de la barra inferior: sube desde abajo y se desvanece por los dos lados
+    /// (antes terminaba en seco a izquierda y derecha).
+    private var dockBarBackground: some View {
+        LinearGradient(
+            colors: [Color.black.opacity(0), Color.black.opacity(0.6)],
+            startPoint: .top,
+            endPoint: .bottom
         )
+        .mask {
+            LinearGradient(
+                stops: [
+                    .init(color: .clear, location: 0),
+                    .init(color: .black, location: 0.12),
+                    .init(color: .black, location: 0.88),
+                    .init(color: .clear, location: 1)
+                ],
+                startPoint: .leading,
+                endPoint: .trailing
+            )
+        }
+        .ignoresSafeArea(edges: [.bottom, .horizontal])
     }
 
     private func dockHint(_ key: String, _ label: String) -> some View {

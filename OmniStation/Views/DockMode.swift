@@ -56,7 +56,12 @@ struct DockCarousel: View {
     var coverVersion: Int = 0
     var playHint: String
     var emptyText: String
+    var favoriteLabel: String = ""
     var onOpen: (Game) -> Void
+    /// Estrella de cada tarjeta: añade o quita de favoritos.
+    var onToggleFavorite: (Game) -> Void = { _ in }
+    /// Al cambiar de tarjeta deslizando con el dedo (para que suene igual que con el mando).
+    var onSwipe: () -> Void = {}
 
     /// Tamaño de las tarjetas laterales respecto a la seleccionada.
     static let sideScale: CGFloat = 0.72
@@ -100,7 +105,11 @@ struct DockCarousel: View {
         .scrollTargetBehavior(.viewAligned)
         .scrollPosition(id: $scrollID, anchor: .center)
         .onChange(of: scrollID) { _, id in
-            if let id, id != selectedID { selectedID = id }
+            // Si cambia por el dedo (no por el mando), suena la navegación.
+            if let id, id != selectedID {
+                selectedID = id
+                onSwipe()
+            }
         }
         .onChange(of: selectedID) { _, id in
             if let id, id != scrollID {
@@ -108,10 +117,25 @@ struct DockCarousel: View {
             }
         }
         .onChange(of: games.map(\.id)) { _, _ in
-            scrollID = selectedID ?? games.first?.id
+            centerSelection()
+        }
+        .onChange(of: width) { _, _ in
+            centerSelection()
         }
         .onAppear {
-            scrollID = selectedID ?? games.first?.id
+            centerSelection()
+        }
+    }
+
+    /// Coloca la tarjeta seleccionada en el centro. Se repite cuando la lista ya está dibujada:
+    /// la primera vez, justo al aparecer, el carrusel aún puede no tener su tamaño.
+    private func centerSelection() {
+        let target: String? = selectedID ?? games.first?.id
+        // Primero se suelta la posición y, en el siguiente instante, se fija la nueva:
+        // si se hiciera todo a la vez, SwiftUI no notaría el cambio y no movería nada.
+        scrollID = nil
+        DispatchQueue.main.async {
+            scrollID = target
         }
     }
 
@@ -186,6 +210,24 @@ struct DockCarousel: View {
         return CoverStore.shared.image(for: id)
     }
 
+    private func favoriteButton(_ game: Game) -> some View {
+        let isFavorite: Bool = favorites.contains(game.id)
+        let side: CGFloat = 30
+        return Button {
+            onToggleFavorite(game)
+        } label: {
+            Image(systemName: isFavorite ? "star.fill" : "star")
+                .font(.system(size: 13, weight: .bold))
+                .foregroundStyle(isFavorite ? Color.yellow : Color.white.opacity(0.85))
+                .frame(width: side, height: side)
+                .background(Color.black.opacity(0.38), in: Circle())
+                .overlay(Circle().strokeBorder(Color.white.opacity(0.22), lineWidth: 0.5))
+                .contentShape(Circle())
+        }
+        .buttonStyle(ControllerFocusableButtonStyle())
+        .accessibilityLabel(favoriteLabel)
+    }
+
     private func coverBadges(_ game: Game) -> some View {
         VStack {
             HStack {
@@ -196,11 +238,7 @@ struct DockCarousel: View {
                     .background(Color.black.opacity(0.38), in: Capsule())
                     .overlay(Capsule().strokeBorder(Color.white.opacity(0.22), lineWidth: 0.5))
                 Spacer()
-                if favorites.contains(game.id) {
-                    Image(systemName: "star.fill")
-                        .font(.system(size: 12, weight: .bold))
-                        .foregroundStyle(Color.yellow)
-                }
+                favoriteButton(game)
             }
             Spacer()
         }

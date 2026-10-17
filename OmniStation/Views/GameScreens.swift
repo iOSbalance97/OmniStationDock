@@ -102,6 +102,8 @@ enum PadKeys {
     static let search: [String] = base + ["Z", "X", "C", "V", "B", "N", "M", "␣", "⌫", "✕"]
     /// Escribir nombres: con mayúsculas/minúsculas.
     static let text: [String] = base + ["⇧", "Z", "X", "C", "V", "B", "N", "M", "␣", "⌫"]
+    /// Bundle ID (JIT): minúsculas, punto, guion y guion bajo.
+    static let bundle: [String] = Array("1234567890qwertyuiopasdfghjkl.zxcvbnm-_").map(String.init) + ["⌫"]
     /// Números (ID de RetroAchievements).
     static let digits: [String] = ["1", "2", "3", "4", "5", "6", "7", "8", "9", "⌫", "0", "✓"]
 
@@ -141,13 +143,44 @@ struct PadKeyboardView: View {
     var columns: Int = PadKeys.columns
     var selectedIndex: Int?
     var lowercase: Bool = false
+    /// Si se indica, cada tecla lleva el id "<prefijo><índice>" (para que la pantalla la siga).
+    var idPrefix: String? = nil
     var onKey: (Int) -> Void
 
+    /// Filas fijas (no perezosas): todas las teclas existen siempre y cuadran con el mando.
+    private var rows: [[Int]] {
+        stride(from: 0, to: keys.count, by: columns).map { first in
+            Array(first..<min(first + columns, keys.count))
+        }
+    }
+
     var body: some View {
-        LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 5), count: columns), spacing: 5) {
-            ForEach(keys.indices, id: \.self) { index in
-                keyButton(index)
+        VStack(spacing: 5) {
+            ForEach(rows.indices, id: \.self) { rowIndex in
+                keyRow(rows[rowIndex])
             }
+        }
+    }
+
+    private func keyRow(_ row: [Int]) -> some View {
+        let empty: Int = max(0, columns - row.count)
+        return HStack(spacing: 5) {
+            ForEach(row, id: \.self) { index in
+                identified(keyButton(index), index)
+            }
+            ForEach(0..<empty, id: \.self) { _ in
+                Color.clear
+                    .frame(maxWidth: .infinity, minHeight: 1)
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func identified<V: View>(_ view: V, _ index: Int) -> some View {
+        if let idPrefix {
+            view.id(idPrefix + String(index))
+        } else {
+            view
         }
     }
 
@@ -160,9 +193,13 @@ struct PadKeyboardView: View {
             onKey(index)
         } label: {
             Text(label)
-                .font(AppFont.text(13, .bold))
+                .font(AppFont.text(14, .bold))
+                // Orbitron es ancha: la letra encoge si la tecla es estrecha, nunca se corta.
+                .lineLimit(1)
+                .minimumScaleFactor(0.45)
+                .padding(.horizontal, 2)
                 .foregroundStyle(isSelected ? Color.black : Color.white)
-                .frame(maxWidth: .infinity, minHeight: 32)
+                .frame(maxWidth: .infinity, minHeight: 34)
                 .background(isSelected ? Color.cyan : Color.white.opacity(0.08), in: shape)
                 .contentShape(shape)
         }
@@ -176,6 +213,10 @@ struct RenameGameSheet: View {
     let lang: String
     @ObservedObject var pad: SheetPad
     let initialName: String
+    var title: String = "Cambiar nombre"
+    var placeholder: String = "Nombre del juego"
+    /// Para escribir un Bundle ID: teclado en minúsculas, sin mayúscula automática y se puede dejar vacío.
+    var bundleMode: Bool = false
     var onSave: (String) -> Void
     @Environment(\.dismiss) private var dismiss
 
@@ -186,44 +227,49 @@ struct RenameGameSheet: View {
 
     private func tr(_ key: String) -> String { L10n.tr(key, lang) }
 
-    private var keys: [String] { PadKeys.text }
+    private var keys: [String] { bundleMode ? PadKeys.bundle : PadKeys.text }
     private var cancelIndex: Int { keys.count }
     private var saveIndex: Int { keys.count + 1 }
     private var cleanName: String { name.trimmingCharacters(in: .whitespacesAndNewlines) }
+    private var canSave: Bool {
+        if bundleMode { return cleanName.isEmpty || JITLauncher.isValidBundleID(cleanName) }
+        return !cleanName.isEmpty
+    }
 
     var body: some View {
         NavigationStack {
             ScrollView {
                 VStack(spacing: 14) {
-                    TextField(tr("Nombre del juego"), text: $name)
+                    TextField(tr(placeholder), text: $name)
                         .font(AppFont.text(17, .semibold))
-                        .textInputAutocapitalization(.words)
+                        .textInputAutocapitalization(bundleMode ? .never : .words)
+                        .autocorrectionDisabled(bundleMode)
                         .padding(14)
                         .glassCard(cornerRadius: 14)
                     PadKeyboardView(
                         keys: keys,
                         selectedIndex: pad.gamepadConnected && selected < keys.count ? selected : nil,
-                        lowercase: !shift,
+                        lowercase: bundleMode || !shift,
                         onKey: { index in press(index) }
                     )
                     HStack(spacing: 10) {
                         SheetActionButton(title: tr("Cancelar"), tint: Color.white.opacity(0.85), selected: pad.gamepadConnected && selected == cancelIndex) {
                             dismiss()
                         }
-                        SheetActionButton(title: tr("Guardar"), selected: pad.gamepadConnected && selected == saveIndex, enabled: !cleanName.isEmpty) {
+                        SheetActionButton(title: tr("Guardar"), selected: pad.gamepadConnected && selected == saveIndex, enabled: canSave) {
                             save()
                         }
                     }
                 }
                 .padding(16)
             }
-            .navigationTitle(tr("Cambiar nombre"))
+            .navigationTitle(tr(title))
             .navigationBarTitleDisplayMode(.inline)
         }
         .padSheetStyle(large: true)
         .onAppear {
             name = initialName
-            shift = initialName.isEmpty
+            shift = !bundleMode && initialName.isEmpty
             pad.handler = { action in
                 handle(action)
                 return true
@@ -235,11 +281,11 @@ struct RenameGameSheet: View {
     private func press(_ index: Int) {
         guard keys.indices.contains(index) else { return }
         selected = index
-        PadKeys.apply(keys[index], to: &name, shift: &shift, autoCapitalize: true)
+        PadKeys.apply(keys[index], to: &name, shift: &shift, autoCapitalize: !bundleMode)
     }
 
     private func save() {
-        guard !cleanName.isEmpty else { return }
+        guard canSave else { return }
         onSave(cleanName)
         dismiss()
     }
@@ -285,6 +331,7 @@ struct GameAchievementsSheet: View {
     let lang: String
     @ObservedObject var pad: SheetPad
     let gameName: String
+    let platform: String
     let initialGameID: Int?
     var onSaveGameID: (Int?) -> Void
     @Environment(\.dismiss) private var dismiss
@@ -295,9 +342,16 @@ struct GameAchievementsSheet: View {
     @State private var progress: RAGameProgress?
     @State private var loading = false
     @State private var errorText: String?
-    // Lista: 0 = botón del ID del juego, 1... = logros. Teclado numérico: índice de tecla.
-    @State private var selected = 0
+    // Búsqueda del juego en RetroAchievements.
+    @State private var matches: [RAGameMatch] = []
+    @State private var searching = false
+    @State private var searchMessage: String?
+    // Con el mando, al elegir juego: 0 = resultados, 1 = teclado numérico.
+    @State private var entryZone = 0
+    @State private var matchIndex = 0
     @State private var keyIndex = 0
+    // Con el mando, en la lista: 0 = botón «Cambiar juego», 1... = logros.
+    @State private var selected = 0
 
     private func tr(_ key: String, _ args: CVarArg...) -> String {
         let base = L10n.tr(key, lang)
@@ -317,7 +371,10 @@ struct GameAchievementsSheet: View {
                     .padding(16)
                 }
                 .onChange(of: selected) { _, value in
-                    withAnimation(.easeInOut(duration: 0.2)) { proxy.scrollTo(value, anchor: .center) }
+                    withAnimation(.easeInOut(duration: 0.2)) { proxy.scrollTo("row-\(value)", anchor: .center) }
+                }
+                .onChange(of: matchIndex) { _, value in
+                    withAnimation(.easeInOut(duration: 0.2)) { proxy.scrollTo("match-\(value)", anchor: .center) }
                 }
             }
             .navigationTitle(tr("Logros"))
@@ -331,6 +388,9 @@ struct GameAchievementsSheet: View {
                 handle(action)
                 return true
             }
+            if configured && initialGameID == nil {
+                Task { await search() }
+            }
         }
         .onDisappear { pad.handler = nil }
         .task(id: gameID) {
@@ -341,12 +401,13 @@ struct GameAchievementsSheet: View {
     @ViewBuilder
     private var content: some View {
         if !configured {
-            SheetInfoCard(symbol: "trophy", text: tr("Conecta tu cuenta de RetroAchievements en Ajustes → Logros."))
+            SheetInfoCard(symbol: "trophy", text: tr("Inicia sesión en RetroAchievements en Ajustes → Juegos → Logros."))
         } else if showingEntry {
+            searchSection
             idEntry
         } else {
-            idButton
-                .id(0)
+            changeButton
+                .id("row-0")
             if loading {
                 ProgressView()
                     .tint(Color.cyan)
@@ -360,31 +421,99 @@ struct GameAchievementsSheet: View {
         }
     }
 
-    private var idButton: some View {
-        let label: String = gameID.map { tr("ID de RetroAchievements: %@", String($0)) } ?? ""
-        return SheetActionButton(title: label, selected: pad.gamepadConnected && selected == 0) {
-            startEditing()
+    // MARK: Elegir el juego
+
+    private var searchSection: some View {
+        VStack(spacing: 8) {
+            SheetCaption(text: tr("¿Cuál es este juego en RetroAchievements?"))
+            Text(gameName + " · " + platform)
+                .font(AppFont.text(12, .medium))
+                .foregroundStyle(.white.opacity(0.6))
+                .frame(maxWidth: .infinity, alignment: .leading)
+            if searching {
+                ProgressView()
+                    .tint(Color.cyan)
+                    .padding(16)
+            } else if let searchMessage {
+                Text(searchMessage)
+                    .font(AppFont.text(12, .medium))
+                    .foregroundStyle(Color.orange)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+            }
+            ForEach(matches.indices, id: \.self) { index in
+                matchRow(index)
+                    .id("match-\(index)")
+            }
         }
+    }
+
+    private func matchRow(_ index: Int) -> some View {
+        let match: RAGameMatch = matches[index]
+        let isSelected: Bool = pad.gamepadConnected && entryZone == 0 && matchIndex == index
+        let shape = RoundedRectangle(cornerRadius: 16, style: .continuous)
+        return Button {
+            choose(match)
+        } label: {
+            HStack(spacing: 12) {
+                AsyncImage(url: match.iconURL) { image in
+                    image.resizable().scaledToFill()
+                } placeholder: {
+                    Color.white.opacity(0.08)
+                }
+                .frame(width: 44, height: 44)
+                .clipShape(RoundedRectangle(cornerRadius: 9, style: .continuous))
+                VStack(alignment: .leading, spacing: 3) {
+                    Text(match.title)
+                        .font(AppFont.text(13, .bold))
+                        .foregroundStyle(.white)
+                        .lineLimit(2)
+                        .multilineTextAlignment(.leading)
+                    Text(tr("%ld logros", match.achievements) + " · ID \(match.id)")
+                        .font(AppFont.text(10, .semibold))
+                        .foregroundStyle(Color.cyan)
+                }
+                Spacer(minLength: 0)
+                if index == 0 && match.score >= 0.9 {
+                    Image(systemName: "checkmark.seal.fill")
+                        .foregroundStyle(Color.green)
+                }
+            }
+            .padding(10)
+            .contentShape(shape)
+            .glassCard(cornerRadius: 16)
+            .padRing(isSelected, cornerRadius: 16)
+        }
+        .buttonStyle(ControllerFocusableButtonStyle())
     }
 
     private var idEntry: some View {
         VStack(spacing: 12) {
-            Text(tr("Escribe el ID del juego en RetroAchievements (es el número de la dirección de su página, por ejemplo retroachievements.org/game/1234)."))
-                .font(AppFont.text(12, .medium))
-                .foregroundStyle(.white.opacity(0.7))
-                .multilineTextAlignment(.center)
+            SheetCaption(text: tr("O escribe su ID"))
+            Text(tr("Es el número de la dirección de su página, por ejemplo retroachievements.org/game/1234."))
+                .font(AppFont.text(11, .medium))
+                .foregroundStyle(.white.opacity(0.6))
+                .frame(maxWidth: .infinity, alignment: .leading)
             Text(idText.isEmpty ? "—" : idText)
-                .font(AppFont.text(26, .bold))
+                .font(AppFont.text(24, .bold))
                 .frame(maxWidth: .infinity)
                 .padding(12)
                 .glassCard(cornerRadius: 14)
             PadKeyboardView(
                 keys: PadKeys.digits,
                 columns: 3,
-                selectedIndex: pad.gamepadConnected ? keyIndex : nil,
+                selectedIndex: pad.gamepadConnected && entryZone == 1 ? keyIndex : nil,
                 onKey: { index in pressDigit(index) }
             )
             .frame(maxWidth: 280)
+        }
+    }
+
+    // MARK: Lista de logros
+
+    private var changeButton: some View {
+        let label: String = gameID.map { tr("Cambiar juego (ID %@)", String($0)) } ?? ""
+        return SheetActionButton(title: label, selected: pad.gamepadConnected && selected == 0) {
+            startEditing()
         }
     }
 
@@ -427,7 +556,7 @@ struct GameAchievementsSheet: View {
             }
             ForEach(progress.achievements.indices, id: \.self) { index in
                 achievementRow(progress.achievements[index], selected: pad.gamepadConnected && selected == index + 1)
-                    .id(index + 1)
+                    .id("row-\(index + 1)")
             }
         }
     }
@@ -472,16 +601,47 @@ struct GameAchievementsSheet: View {
         return points + " · " + tr("Conseguido %@", item.dateEarned)
     }
 
+    // MARK: Acciones
+
+    private func errorMessage(_ error: Error) -> String {
+        guard let raError = error as? RAError else { return tr("No se pudo conectar con RetroAchievements.") }
+        switch raError {
+        case .unauthorized, .missingCredentials:
+            return tr("La sesión de RetroAchievements no es válida. Vuelve a iniciarla en Ajustes.")
+        case .offline:
+            return tr("Sin conexión a internet.")
+        case .unsupportedPlatform:
+            return tr("RetroAchievements no tiene logros para esta plataforma.")
+        case .badResponse:
+            return tr("No se pudo conectar con RetroAchievements.")
+        }
+    }
+
+    private func search() async {
+        searching = true
+        searchMessage = nil
+        do {
+            let found: [RAGameMatch] = try await RetroAchievements.searchGames(title: gameName, platform: platform)
+            matches = found
+            matchIndex = 0
+            entryZone = found.isEmpty ? 1 : 0
+            if found.isEmpty { searchMessage = tr("No se encontró automáticamente: escribe su ID.") }
+        } catch {
+            matches = []
+            entryZone = 1
+            searchMessage = errorMessage(error)
+        }
+        searching = false
+    }
+
     private func load() async {
         guard configured, let id = gameID else { return }
         loading = true
         errorText = nil
         do {
             progress = try await RetroAchievements.gameProgress(gameID: id)
-        } catch RAError.unauthorized {
-            errorText = tr("Usuario o clave web no válidos.")
         } catch {
-            errorText = tr("No se pudo conectar con RetroAchievements.")
+            errorText = errorMessage(error)
         }
         loading = false
     }
@@ -490,11 +650,22 @@ struct GameAchievementsSheet: View {
         idText = gameID.map { String($0) } ?? ""
         keyIndex = 0
         editingID = true
+        if matches.isEmpty {
+            Task { await search() }
+        } else {
+            entryZone = 0
+        }
+    }
+
+    private func choose(_ match: RAGameMatch) {
+        idText = String(match.id)
+        saveID()
     }
 
     private func pressDigit(_ index: Int) {
         guard PadKeys.digits.indices.contains(index) else { return }
         keyIndex = index
+        entryZone = 1
         let key: String = PadKeys.digits[index]
         if key == "✓" {
             saveID()
@@ -506,7 +677,7 @@ struct GameAchievementsSheet: View {
     }
 
     private func saveID() {
-        let value: Int? = Int(idText)
+        guard let value = Int(idText) else { return }
         gameID = value
         onSaveGameID(value)
         editingID = false
@@ -515,16 +686,7 @@ struct GameAchievementsSheet: View {
 
     private func handle(_ action: PadAction) {
         if showingEntry {
-            switch action {
-            case .cancel:
-                if gameID != nil { editingID = false } else { dismiss() }
-            case .accept:
-                pressDigit(keyIndex)
-            default:
-                if let next = PadGrid.move(keyIndex, count: PadKeys.digits.count, columns: 3, action) {
-                    keyIndex = next
-                }
-            }
+            handleEntry(action)
             return
         }
         let count: Int = progress?.achievements.count ?? 0
@@ -541,43 +703,84 @@ struct GameAchievementsSheet: View {
             break
         }
     }
+
+    private func handleEntry(_ action: PadAction) {
+        switch action {
+        case .cancel:
+            if gameID != nil { editingID = false } else { dismiss() }
+        case .accept:
+            if entryZone == 0, matches.indices.contains(matchIndex) {
+                choose(matches[matchIndex])
+            } else {
+                pressDigit(keyIndex)
+            }
+        default:
+            if entryZone == 0 {
+                if action == .up {
+                    matchIndex = max(0, matchIndex - 1)
+                } else if action == .down {
+                    if matchIndex >= matches.count - 1 {
+                        entryZone = 1
+                    } else {
+                        matchIndex += 1
+                    }
+                }
+            } else if let next = PadGrid.move(keyIndex, count: PadKeys.digits.count, columns: 3, action) {
+                keyIndex = next
+            } else if action == .up, !matches.isEmpty {
+                entryZone = 0
+                matchIndex = matches.count - 1
+            }
+        }
+    }
 }
 
-// MARK: - Cuenta de RetroAchievements
+// MARK: - Cuenta de RetroAchievements (inicio de sesión recordado)
 
 struct RetroAccountSheet: View {
     let lang: String
     @ObservedObject var pad: SheetPad
+    /// Avisa a la app cuando se inicia sesión (para enseñar el aviso fuera de la ventana).
+    var onLogin: (String) -> Void = { _ in }
     @Environment(\.dismiss) private var dismiss
 
     @State private var username = ""
     @State private var apiKey = ""
+    @State private var showKey = false
     @State private var profile: RAProfile?
     @State private var recent: [RARecent] = []
-    @State private var loading = false
+    @State private var loggingIn = false
+    @State private var justLoggedIn = false
     @State private var errorText: String?
-    // 0 = Conectar, 1 = Desconectar, 2 = Listo.
+    // Con el mando: botones de abajo (0, 1, 2).
     @State private var selected = 0
+
+    private static let keysPage = URL(string: "https://retroachievements.org/settings")
 
     private func tr(_ key: String, _ args: CVarArg...) -> String {
         let base = L10n.tr(key, lang)
         return args.isEmpty ? base : String(format: base, arguments: args)
     }
 
-    private var canConnect: Bool {
-        !username.trimmingCharacters(in: .whitespaces).isEmpty && !apiKey.trimmingCharacters(in: .whitespaces).isEmpty
-    }
+    private var cleanUser: String { username.trimmingCharacters(in: .whitespacesAndNewlines) }
+    private var cleanKey: String { apiKey.trimmingCharacters(in: .whitespacesAndNewlines) }
+    private var canLogin: Bool { !cleanUser.isEmpty && !cleanKey.isEmpty && !loggingIn }
+    /// Las claves web de RetroAchievements tienen 32 caracteres.
+    private var keyLooksWrong: Bool { !cleanKey.isEmpty && cleanKey.count != 32 }
 
     var body: some View {
         NavigationStack {
             ScrollView {
                 VStack(spacing: 14) {
-                    credentials
-                    buttons
-                    status
+                    if let profile {
+                        loggedInView(profile)
+                    } else {
+                        loginForm
+                    }
                 }
                 .padding(16)
             }
+            .overlay { loadingOverlay }
             .navigationTitle(tr("Logros"))
             .navigationBarTitleDisplayMode(.inline)
         }
@@ -585,19 +788,29 @@ struct RetroAccountSheet: View {
         .onAppear {
             username = RetroAchievements.username
             apiKey = RetroAchievements.apiKey
+            // Sesión recordada: se enseña al momento y se actualiza por detrás.
+            profile = RetroAchievements.cachedProfile
             pad.handler = { action in
                 handle(action)
                 return true
             }
-            if RetroAchievements.isConfigured {
-                Task { await load() }
+            if profile != nil {
+                Task { await refresh() }
             }
         }
         .onDisappear { pad.handler = nil }
     }
 
-    private var credentials: some View {
-        VStack(spacing: 10) {
+    // MARK: Formulario
+
+    private var loginForm: some View {
+        VStack(spacing: 12) {
+            Image(systemName: "trophy.circle.fill")
+                .font(.system(size: 46, weight: .light))
+                .foregroundStyle(Color.yellow)
+            Text(tr("Iniciar sesión en RetroAchievements"))
+                .font(AppFont.text(17, .bold))
+                .multilineTextAlignment(.center)
             SheetCaption(text: tr("Usuario"))
             TextField(tr("Tu usuario de RetroAchievements"), text: $username)
                 .font(AppFont.text(15))
@@ -606,43 +819,117 @@ struct RetroAccountSheet: View {
                 .padding(14)
                 .glassCard(cornerRadius: 14)
             SheetCaption(text: tr("Clave web (Web API Key)"))
-            SecureField(tr("Pega aquí tu clave web"), text: $apiKey)
-                .font(AppFont.text(15))
-                .textInputAutocapitalization(.never)
-                .autocorrectionDisabled()
-                .padding(14)
-                .glassCard(cornerRadius: 14)
-            Text(tr("La clave está en retroachievements.org, en los ajustes de tu perfil (apartado de claves). Se guarda en el llavero del iPhone."))
-                .font(AppFont.text(11))
-                .foregroundStyle(.white.opacity(0.5))
-                .frame(maxWidth: .infinity, alignment: .leading)
+            keyField
+            if keyLooksWrong {
+                Text(tr("La clave web tiene 32 caracteres. ¿Has puesto tu contraseña?"))
+                    .font(AppFont.text(11, .semibold))
+                    .foregroundStyle(Color.orange)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+            }
+            keyHelp
+            if let errorText {
+                SheetInfoCard(symbol: "exclamationmark.triangle", text: errorText)
+            }
+            HStack(spacing: 10) {
+                SheetActionButton(title: tr("Abrir página de la clave"), tint: Color.white.opacity(0.85), selected: pad.gamepadConnected && selected == 0) {
+                    openKeysPage()
+                }
+                SheetActionButton(title: tr("Iniciar sesión"), selected: pad.gamepadConnected && selected == 1, enabled: canLogin) {
+                    login()
+                }
+            }
         }
     }
 
-    private var buttons: some View {
-        HStack(spacing: 10) {
-            SheetActionButton(title: profile == nil ? tr("Conectar") : tr("Actualizar"), selected: pad.gamepadConnected && selected == 0, enabled: canConnect) {
-                connect()
+    private var keyField: some View {
+        HStack(spacing: 8) {
+            Group {
+                if showKey {
+                    TextField(tr("Pega aquí tu clave web"), text: $apiKey)
+                } else {
+                    SecureField(tr("Pega aquí tu clave web"), text: $apiKey)
+                }
             }
-            SheetActionButton(title: tr("Desconectar"), tint: Color.orange, selected: pad.gamepadConnected && selected == 1, enabled: RetroAchievements.isConfigured) {
-                disconnect()
+            .font(AppFont.text(15))
+            .textInputAutocapitalization(.never)
+            .autocorrectionDisabled()
+            Button {
+                showKey.toggle()
+            } label: {
+                Image(systemName: showKey ? "eye.slash" : "eye")
+                    .foregroundStyle(Color.cyan)
+                    .frame(width: 32, height: 32)
+                    .contentShape(Rectangle())
             }
-            SheetActionButton(title: tr("Listo"), tint: Color.white.opacity(0.85), selected: pad.gamepadConnected && selected == 2) {
-                dismiss()
-            }
+            .buttonStyle(ControllerFocusableButtonStyle())
         }
+        .padding(.horizontal, 14)
+        .padding(.vertical, 8)
+        .glassCard(cornerRadius: 14)
+    }
+
+    private var keyHelp: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Label(tr("No es tu contraseña"), systemImage: "key.fill")
+                .font(AppFont.text(12, .bold))
+                .foregroundStyle(Color.cyan)
+            Text(tr("Entra en retroachievements.org → Ajustes → apartado «Keys», copia la «Web API Key» y pégala aquí. La sesión queda guardada en este iPhone."))
+                .font(AppFont.text(11))
+                .foregroundStyle(.white.opacity(0.65))
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(12)
+        .glassCard(cornerRadius: 14)
     }
 
     @ViewBuilder
-    private var status: some View {
-        if loading {
-            ProgressView()
-                .tint(Color.cyan)
-                .padding(24)
-        } else if let errorText {
-            SheetInfoCard(symbol: "exclamationmark.triangle", text: errorText)
-        } else if let profile {
+    private var loadingOverlay: some View {
+        if loggingIn {
+            ZStack {
+                Color.black.opacity(0.45)
+                    .ignoresSafeArea()
+                VStack(spacing: 12) {
+                    ProgressView()
+                        .tint(Color.cyan)
+                        .scaleEffect(1.3)
+                    Text(tr("Iniciando sesión…"))
+                        .font(AppFont.text(14, .semibold))
+                }
+                .padding(26)
+                .glassCard(cornerRadius: 22)
+            }
+        }
+    }
+
+    // MARK: Sesión iniciada
+
+    private func loggedInView(_ profile: RAProfile) -> some View {
+        VStack(spacing: 14) {
+            if justLoggedIn {
+                Label(tr("Sesión iniciada como %@", profile.user), systemImage: "checkmark.circle.fill")
+                    .font(AppFont.text(14, .bold))
+                    .foregroundStyle(Color.green)
+                    .frame(maxWidth: .infinity)
+                    .padding(12)
+                    .glassCard(cornerRadius: 14)
+            }
             profileCard(profile)
+            HStack(spacing: 10) {
+                SheetActionButton(title: tr("Actualizar"), selected: pad.gamepadConnected && selected == 0) {
+                    Task { await refresh() }
+                }
+                SheetActionButton(title: tr("Cerrar sesión"), tint: Color.orange, selected: pad.gamepadConnected && selected == 1) {
+                    logout()
+                }
+                SheetActionButton(title: tr("Listo"), tint: Color.white.opacity(0.85), selected: pad.gamepadConnected && selected == 2) {
+                    dismiss()
+                }
+            }
+            if let errorText {
+                Text(errorText)
+                    .font(AppFont.text(11, .medium))
+                    .foregroundStyle(Color.orange)
+            }
             recentList
         }
     }
@@ -662,6 +949,9 @@ struct RetroAccountSheet: View {
                 Text(tr("%ld puntos", profile.totalPoints))
                     .font(AppFont.text(13, .semibold))
                     .foregroundStyle(Color.cyan)
+                Text(tr("Sesión guardada en este iPhone"))
+                    .font(AppFont.text(10, .medium))
+                    .foregroundStyle(.white.opacity(0.5))
                 if !profile.richPresence.isEmpty {
                     Text(profile.richPresence)
                         .font(AppFont.text(11))
@@ -720,51 +1010,88 @@ struct RetroAccountSheet: View {
         return points + " · " + item.date
     }
 
-    private func connect() {
-        guard canConnect else { return }
-        RetroAchievements.save(
-            username: username.trimmingCharacters(in: .whitespaces),
-            apiKey: apiKey.trimmingCharacters(in: .whitespaces)
-        )
-        Task { await load() }
+    // MARK: Acciones
+
+    private func loginErrorMessage(_ error: Error) -> String {
+        guard let raError = error as? RAError else { return tr("No se pudo conectar con RetroAchievements.") }
+        switch raError {
+        case .unauthorized, .missingCredentials:
+            return tr("Usuario o clave web incorrectos. Recuerda: es la Web API Key, no tu contraseña.")
+        case .offline:
+            return tr("Sin conexión a internet.")
+        default:
+            return tr("No se pudo conectar con RetroAchievements.")
+        }
     }
 
-    private func disconnect() {
+    private func openKeysPage() {
+        guard let url = Self.keysPage else { return }
+        UIApplication.shared.open(url)
+    }
+
+    private func login() {
+        guard canLogin else { return }
+        let user: String = cleanUser
+        let key: String = cleanKey
+        loggingIn = true
+        errorText = nil
+        Task {
+            do {
+                let result: RAProfile = try await RetroAchievements.login(username: user, apiKey: key)
+                profile = result
+                justLoggedIn = true
+                selected = 2
+                onLogin(result.user)
+                recent = (try? await RetroAchievements.recentAchievements()) ?? []
+            } catch {
+                errorText = loginErrorMessage(error)
+            }
+            loggingIn = false
+        }
+    }
+
+    private func refresh() async {
+        errorText = nil
+        do {
+            let result: RAProfile = try await RetroAchievements.profile()
+            RetroAchievements.saveSession(result)
+            profile = result
+            recent = (try? await RetroAchievements.recentAchievements()) ?? []
+        } catch RAError.unauthorized {
+            // La clave ya no vale: se cierra la sesión guardada.
+            RetroAchievements.clearSession()
+            profile = nil
+            errorText = tr("Usuario o clave web incorrectos. Recuerda: es la Web API Key, no tu contraseña.")
+        } catch {
+            errorText = tr("Sin conexión: se muestra la sesión guardada.")
+        }
+    }
+
+    private func logout() {
         RetroAchievements.signOut()
         username = ""
         apiKey = ""
         profile = nil
         recent = []
+        justLoggedIn = false
         errorText = nil
-    }
-
-    private func load() async {
-        loading = true
-        errorText = nil
-        do {
-            profile = try await RetroAchievements.profile()
-            recent = (try? await RetroAchievements.recentAchievements()) ?? []
-        } catch RAError.unauthorized {
-            profile = nil
-            errorText = tr("Usuario o clave web no válidos.")
-        } catch {
-            profile = nil
-            errorText = tr("No se pudo conectar con RetroAchievements.")
-        }
-        loading = false
+        selected = 1
     }
 
     private func handle(_ action: PadAction) {
+        let lastButton: Int = profile == nil ? 1 : 2
         switch action {
         case .left:
             selected = max(0, selected - 1)
         case .right:
-            selected = min(2, selected + 1)
+            selected = min(lastButton, selected + 1)
         case .accept:
-            if selected == 0 {
-                connect()
+            if profile == nil {
+                if selected == 0 { openKeysPage() } else { login() }
+            } else if selected == 0 {
+                Task { await refresh() }
             } else if selected == 1 {
-                disconnect()
+                logout()
             } else {
                 dismiss()
             }
@@ -1320,7 +1647,10 @@ struct SoundsSheet: View {
     @State private var refresh = 0
     @State private var message: String?
 
-    private func tr(_ key: String) -> String { L10n.tr(key, lang) }
+    private func tr(_ key: String, _ args: CVarArg...) -> String {
+        let base = L10n.tr(key, lang)
+        return args.isEmpty ? base : String(format: base, arguments: args)
+    }
 
     private var kinds: [SoundKind] { SoundKind.allCases }
 
@@ -1391,9 +1721,18 @@ struct SoundsSheet: View {
     }
 
     private func status(_ kind: SoundKind) -> String {
-        if SoundManager.shared.hasCustom(kind) { return tr("Sonido importado") }
-        if SoundManager.shared.hasSound(kind) { return tr("Sonido de la app") }
-        return kind == .ambient ? tr("Sin música: importa una") : tr("Clic del sistema")
+        switch SoundManager.shared.status(kind) {
+        case .imported(let file):
+            return tr("Importado: %@", file)
+        case .bundled(let file):
+            return tr("De la app: %@", file)
+        case .unreadable(let file):
+            return tr("No se pudo leer %@", file)
+        case .unsupported(let file):
+            return tr("%@: formato no compatible", file)
+        case .missing:
+            return kind == .ambient ? tr("Sin música: importa una") : tr("Clic del sistema")
+        }
     }
 
     private func soundRow(_ index: Int) -> some View {
