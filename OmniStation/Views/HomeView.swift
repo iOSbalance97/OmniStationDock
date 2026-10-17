@@ -231,129 +231,224 @@ struct HomeView: View {
 
     var body: some View {
         GeometryReader { geometry in
-            let landscape = geometry.size.width > geometry.size.height
-            let dock = landscape && (dockModeEnabled || hdmiForced)
-            ZStack(alignment: .top) {
-                background
-                Group {
-                    if dock, selectedSection == .inicio || selectedSection == .favoritos {
-                        dockHome()
-                    } else {
-                        switch selectedSection {
-                        case .inicio: homeContent(landscape: landscape)
-                        case .favoritos: favoritesContent(landscape: landscape)
-                        case .busqueda: searchContent(landscape: landscape)
-                        case .ajustes: settingsContent(landscape: landscape)
-                        }
-                    }
-                }
-                if dock {
-                    dockTopBar()
-                } else {
-                    topBar(compact: landscape)
-                }
-                padMenuOverlay
+            rootView(size: geometry.size)
+        }
+    }
+
+    // MARK: - Cuerpo por partes
+    // El cuerpo se construye en funciones separadas para que el compilador compruebe
+    // cada parte por su cuenta: con una sola expresión enorme se queda sin tiempo.
+
+    private func rootView(size: CGSize) -> some View {
+        let landscape: Bool = size.width > size.height
+        let dock: Bool = landscape && (dockModeEnabled || hdmiForced)
+        let layered = layeredContent(landscape: landscape, dock: dock)
+        let decorated = withOverlays(layered, dock: dock)
+        let presented = withPresentations(decorated)
+        let observed = withSettingObservers(presented)
+        return withNavigationObservers(observed)
+            .onAppear { handleAppear() }
+            .preferredColorScheme(.dark)
+    }
+
+    private func layeredContent(landscape: Bool, dock: Bool) -> some View {
+        ZStack(alignment: .top) {
+            background
+            screenContent(landscape: landscape, dock: dock)
+            topChrome(landscape: landscape, dock: dock)
+            padMenuOverlay
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+
+    @ViewBuilder
+    private func screenContent(landscape: Bool, dock: Bool) -> some View {
+        if dock && (selectedSection == .inicio || selectedSection == .favoritos) {
+            dockHome()
+        } else {
+            switch selectedSection {
+            case .inicio: homeContent(landscape: landscape)
+            case .favoritos: favoritesContent(landscape: landscape)
+            case .busqueda: searchContent(landscape: landscape)
+            case .ajustes: settingsContent(landscape: landscape)
             }
-            .frame(maxWidth: .infinity, maxHeight: .infinity)
-            .overlay(alignment: .bottom) {
-                if dock { dockBottomBar }
-            }
+        }
+    }
+
+    @ViewBuilder
+    private func topChrome(landscape: Bool, dock: Bool) -> some View {
+        if dock {
+            dockTopBar()
+        } else {
+            topBar(compact: landscape)
+        }
+    }
+
+    @ViewBuilder
+    private func dockBottomOverlay(_ dock: Bool) -> some View {
+        if dock {
+            dockBottomBar
+        }
+    }
+
+    private func withOverlays<V: View>(_ view: V, dock: Bool) -> some View {
+        view
+            .overlay(alignment: .bottom) { dockBottomOverlay(dock) }
             .overlay(alignment: .bottom) { toastOverlay }
             .onPreferenceChange(FramesKey.self) { frames = $0 }
+    }
+
+    private func withPresentations<V: View>(_ view: V) -> some View {
+        view
             .photosPicker(isPresented: $showPhotoPicker, selection: $photoItem, matching: .images)
             .fileImporter(isPresented: $showFolderImporter, allowedContentTypes: [.folder], allowsMultipleSelection: false) { result in
                 handleFolderPick(result)
             }
             .sheet(item: $sheet) { kind in
-                switch kind {
-                case .controllers:
-                    ControllersSheet(lang: appLanguage, monitor: controllers, navigationEnabled: $controllerNavigation, pad: sheetPad)
-                case .platformOrder:
-                    PlatformOrderSheet(lang: appLanguage, orderRaw: $platformOrderRaw, pad: sheetPad)
-                case .addShortcut:
-                    AddShortcutSheet(lang: appLanguage, pad: sheetPad) { addShortcut($0) }
-                }
+                sheetView(kind)
             }
-            .onChange(of: photoItem) { _, item in
-                guard let item else { return }
-                Task { await applyBackground(from: item) }
+    }
+
+    @ViewBuilder
+    private func sheetView(_ kind: HomeSheet) -> some View {
+        switch kind {
+        case .controllers:
+            ControllersSheet(lang: appLanguage, monitor: controllers, navigationEnabled: $controllerNavigation, pad: sheetPad)
+        case .platformOrder:
+            PlatformOrderSheet(lang: appLanguage, orderRaw: $platformOrderRaw, pad: sheetPad)
+        case .addShortcut:
+            AddShortcutSheet(lang: appLanguage, pad: sheetPad) { item in
+                addShortcut(item)
             }
+        }
+    }
+
+    private func withSettingObservers<V: View>(_ view: V) -> some View {
+        view
+            .onChange(of: photoItem) { _, item in handlePhotoItem(item) }
             .onChange(of: showSampleGames) { _, _ in refreshLibrary() }
             .onChange(of: dialog) { _, _ in menuIndex = 0 }
-            .onChange(of: dockActive) { _, _ in resetControllerFocus() }
             .onChange(of: showAbout) { _, _ in menuIndex = 0 }
-            .onChange(of: selectedSection) { _, section in
-                if section == .inicio { refreshLibrary() }
-                controllerSelectedGameID = controllerGames.first?.id
-                controllerSearchFocused = false
-                // En el Modo Dock, al cambiar de pestaña con el mando se queda en la barra de pestañas.
-                if !(dockActive && controllerSelectedArea == "dockNav") {
-                    switch section {
-                    case .inicio: controllerSelectedArea = "games"
-                    case .busqueda: controllerSelectedArea = gamepadConnected ? "search" : "games"
-                    case .favoritos: controllerSelectedArea = "games"
-                    case .ajustes: controllerSelectedArea = "settings"; controllerSelectedSettingIndex = 0
-                    }
-                }
-            }
-            .onChange(of: selectedPlatform) { _, _ in
-                controllerSelectedGameID = controllerGames.first?.id
-                if selectedSection == .inicio, selectedPlatform != "Todos", controllerSelectedArea == "featured" {
-                    controllerSelectedArea = "games"
-                }
-            }
-            .onChange(of: controllers.controllers.count) { _, count in
-                if selectedSection == .busqueda {
-                    controllerSelectedArea = count > 0 ? "search" : "games"
-                    controllerSearchFocused = false
-                }
-            }
-            .onChange(of: searchText) { _, _ in
-                if let selected = controllerSelectedGameID, !controllerGames.contains(where: { $0.id == selected }) {
-                    controllerSelectedGameID = controllerGames.first?.id
-                }
-            }
             .onChange(of: controllerNavigation) { _, value in controllers.navigationEnabled = value }
-            .onChange(of: keepLandscape) { _, value in
-                OrientationController.apply(landscape: value || hdmiForced)
-            }
+            .onChange(of: keepLandscape) { _, value in handleKeepLandscapeChange(value) }
             .onChange(of: hdmi.isConnected) { _, connected in handleHDMI(connected) }
-            .onChange(of: hdmiAutoLandscape) { _, enabled in
-                if enabled { handleHDMI(hdmi.isConnected) } else { releaseHDMILandscape() }
-            }
-            .onAppear {
-                controllers.navigationEnabled = controllerNavigation
-                controllers.onShoulder = { step in
-                    // Con una ventana abierta, la interfaz de detrás no se mueve.
-                    guard !modalActive else { return }
-                    // En Ajustes los hombros no cambian de plataforma: no hay filtros visibles.
-                    guard selectedSection != .ajustes, selectedSection != .favoritos else { return }
-                    cyclePlatform(step)
-                }
-                controllers.onTrigger = { step in
-                    guard !modalActive else { return }
-                    cycleSection(step)
-                }
-                controllers.onCancel = { handleControllerCancel() }
-                controllers.onDirection = { direction in
-                    if modalActive { routeModalDirection(direction) } else { moveControllerSelection(direction) }
-                }
-                controllers.onAccept = {
-                    if modalActive { routeModalAccept() } else { activateControllerSelection() }
-                }
-                controllers.onOptions = {
-                    guard !modalActive else { return }
-                    handleOptionsButton()
-                }
-                if keepLandscape {
-                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) {
-                        OrientationController.apply(landscape: true)
-                    }
-                }
-                if hdmi.isConnected { handleHDMI(true) }
-            }
-            .preferredColorScheme(.dark)
+            .onChange(of: hdmiAutoLandscape) { _, enabled in handleHDMIAutoChange(enabled) }
+    }
+
+    private func withNavigationObservers<V: View>(_ view: V) -> some View {
+        view
+            .onChange(of: dockActive) { _, _ in resetControllerFocus() }
+            .onChange(of: selectedSection) { _, section in handleSectionChange(section) }
+            .onChange(of: selectedPlatform) { _, _ in handlePlatformChange() }
+            .onChange(of: controllers.controllers.count) { _, count in handleControllerCountChange(count) }
+            .onChange(of: searchText) { _, _ in handleSearchTextChange() }
+    }
+
+    // MARK: - Reacciones a cambios
+
+    private func handlePhotoItem(_ item: PhotosPickerItem?) {
+        guard let item else { return }
+        Task { await applyBackground(from: item) }
+    }
+
+    private func handleKeepLandscapeChange(_ value: Bool) {
+        OrientationController.apply(landscape: value || hdmiForced)
+    }
+
+    private func handleHDMIAutoChange(_ enabled: Bool) {
+        if enabled {
+            handleHDMI(hdmi.isConnected)
+        } else {
+            releaseHDMILandscape()
         }
+    }
+
+    private func handleSectionChange(_ section: DockSection) {
+        if section == .inicio { refreshLibrary() }
+        controllerSelectedGameID = controllerGames.first?.id
+        controllerSearchFocused = false
+        // En el Modo Dock, al cambiar de pestaña con el mando se queda en la barra de pestañas.
+        let stayOnDockNav: Bool = dockActive && controllerSelectedArea == "dockNav"
+        guard !stayOnDockNav else { return }
+        switch section {
+        case .inicio: controllerSelectedArea = "games"
+        case .busqueda: controllerSelectedArea = gamepadConnected ? "search" : "games"
+        case .favoritos: controllerSelectedArea = "games"
+        case .ajustes:
+            controllerSelectedArea = "settings"
+            controllerSelectedSettingIndex = 0
+        }
+    }
+
+    private func handlePlatformChange() {
+        controllerSelectedGameID = controllerGames.first?.id
+        if selectedSection == .inicio, selectedPlatform != "Todos", controllerSelectedArea == "featured" {
+            controllerSelectedArea = "games"
+        }
+    }
+
+    private func handleControllerCountChange(_ count: Int) {
+        guard selectedSection == .busqueda else { return }
+        controllerSelectedArea = count > 0 ? "search" : "games"
+        controllerSearchFocused = false
+    }
+
+    private func handleSearchTextChange() {
+        if let selected = controllerSelectedGameID, !controllerGames.contains(where: { $0.id == selected }) {
+            controllerSelectedGameID = controllerGames.first?.id
+        }
+    }
+
+    private func handleAppear() {
+        controllers.navigationEnabled = controllerNavigation
+        controllers.onShoulder = { step in handleShoulder(step) }
+        controllers.onTrigger = { step in handleTrigger(step) }
+        controllers.onCancel = { handleControllerCancel() }
+        controllers.onDirection = { direction in handleDirection(direction) }
+        controllers.onAccept = { handleAccept() }
+        controllers.onOptions = { handleOptions() }
+        if keepLandscape {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) {
+                OrientationController.apply(landscape: true)
+            }
+        }
+        if hdmi.isConnected { handleHDMI(true) }
+    }
+
+    // MARK: - Botones del mando
+
+    private func handleShoulder(_ step: Int) {
+        // Con una ventana abierta, la interfaz de detrás no se mueve.
+        guard !modalActive else { return }
+        // En Ajustes y Favoritos los hombros no cambian de plataforma: no hay filtros visibles.
+        guard selectedSection != .ajustes, selectedSection != .favoritos else { return }
+        cyclePlatform(step)
+    }
+
+    private func handleTrigger(_ step: Int) {
+        guard !modalActive else { return }
+        cycleSection(step)
+    }
+
+    private func handleDirection(_ direction: ControllerMonitor.Direction) {
+        if modalActive {
+            routeModalDirection(direction)
+        } else {
+            moveControllerSelection(direction)
+        }
+    }
+
+    private func handleAccept() {
+        if modalActive {
+            routeModalAccept()
+        } else {
+            activateControllerSelection()
+        }
+    }
+
+    private func handleOptions() {
+        guard !modalActive else { return }
+        handleOptionsButton()
     }
 
     // MARK: - Fondo
