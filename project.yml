@@ -15,13 +15,15 @@ targets:
     settings:
       base:
         
-        MARKETING_VERSION: "0.1.7"
-        CURRENT_PROJECT_VERSION: "17"
+        MARKETING_VERSION: "0.1.8"
+        CURRENT_PROJECT_VERSION: "18"
         PRODUCT_BUNDLE_IDENTIFIER: com.omnistation.dock
         PRODUCT_NAME: OmniStationDock
         SWIFT_VERSION: "5.0"
         TARGETED_DEVICE_FAMILY: "1"
         GENERATE_INFOPLIST_FILE: YES
+        # Claves extra que no se pueden poner como INFOPLIST_KEY_ (Xcode las mezcla con las generadas).
+        INFOPLIST_FILE: Config/AppInfo.plist
         INFOPLIST_KEY_CFBundleDisplayName: OmniStation Dock
         INFOPLIST_KEY_UILaunchScreen_Generation: YES
         INFOPLIST_KEY_UISupportedInterfaceOrientations_iPhone: "UIInterfaceOrientationPortrait UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight"
