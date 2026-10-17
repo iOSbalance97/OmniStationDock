@@ -128,6 +128,11 @@ enum L10n {
         "Añadir": "Add",
         "Cancelar": "Cancel",
         "Cerrar": "Close",
+        "Si lo desactivas, el mando dejará de mover la interfaz.": "If you turn it off, the controller will stop moving the interface.",
+        "Con el mando: X agarra y suelta, ↑↓ mueve.": "Controller: X grabs and drops, ↑↓ moves.",
+        "Giro a horizontal cancelado": "Rotation to landscape cancelled",
+        "A/X: elegir": "A/X: choose",
+        "Selecciona letras con el mando": "Select letters with the controller",
         "Listo": "Done"
     ]
 }
@@ -552,6 +557,17 @@ extension View {
         background {
             GeometryReader { proxy in
                 Color.clear.preference(key: FramesKey.self, value: [id: proxy.frame(in: .global)])
+            }
+        }
+    }
+
+    /// Igual que `reportFrame`, pero solo mide si `condition` es verdadera.
+    func reportFrame(_ id: String, if condition: Bool) -> some View {
+        background {
+            if condition {
+                GeometryReader { proxy in
+                    Color.clear.preference(key: FramesKey.self, value: [id: proxy.frame(in: .global)])
+                }
             }
         }
     }
