@@ -133,6 +133,22 @@ enum L10n {
         "Giro a horizontal cancelado": "Rotation to landscape cancelled",
         "A/X: elegir": "A/X: choose",
         "Selecciona letras con el mando": "Select letters with the controller",
+        "Modo Dock": "Dock Mode",
+        "Carrusel al girar a horizontal": "Carousel when rotated to landscape",
+        "Dock con HDMI": "Dock on HDMI",
+        "Activa Dock y horizontal al conectar HDMI": "Turns on Dock and landscape when HDMI connects",
+        "Bloquear horizontal": "Lock landscape",
+        "Reloj 24 horas": "24-hour clock",
+        "Formato de la hora en Dock": "Time format in Dock",
+        "Pantalla HDMI detectada. Activando Modo Dock…": "HDMI display detected. Turning on Dock Mode…",
+        "Pestaña": "Tab",
+        "Opciones": "Options",
+        "Atrás": "Back",
+        "Presiona ✕ para jugar": "Press ✕ to play",
+        "Sin juegos en esta plataforma": "No games on this platform",
+        "Mando": "Controller",
+        "Rendimiento": "Performance",
+        "%@: próximamente": "%@: coming soon",
         "Listo": "Done"
     ]
 }
@@ -428,6 +444,8 @@ final class ControllerMonitor: ObservableObject {
     var onDirection: ((Direction) -> Void)?
     /// A/X: activar el elemento que tenga el foco.
     var onAccept: (() -> Void)?
+    /// Y/triángulo: opciones del juego (Modo Dock).
+    var onOptions: (() -> Void)?
 
     enum Direction {
         case up, down, left, right
@@ -516,6 +534,10 @@ final class ControllerMonitor: ObservableObject {
         pad.buttonB.pressedChangedHandler = { [weak self] _, _, pressed in
             guard pressed, self?.navigationEnabled == true else { return }
             DispatchQueue.main.async { self?.onCancel?() }
+        }
+        pad.buttonY.pressedChangedHandler = { [weak self] _, _, pressed in
+            guard pressed, self?.navigationEnabled == true else { return }
+            DispatchQueue.main.async { self?.onOptions?() }
         }
     }
 }
