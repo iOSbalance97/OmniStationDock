@@ -24,7 +24,7 @@ private enum HomeSheet: Identifiable {
 }
 
 private enum SettingsDialog {
-    case language, background, clearFavorites, clearLibrary
+    case language, background, clearFavorites, clearLibrary, gameOptions
 }
 
 private struct Toast: Identifiable {
@@ -52,6 +52,8 @@ struct HomeView: View {
     // Ventanas de selección: puente con el mando y fila marcada en los menús propios.
     @StateObject private var sheetPad = SheetPad()
     @State private var menuIndex = 0
+    // Modo Dock: botón marcado entre los 4 iconos de opciones del juego.
+    @State private var dockOptionIndex = 0
     // Plataforma a la que debe desplazarse la barra de filtros.
     @State private var platformScrollID: String?
 
@@ -70,6 +72,8 @@ struct HomeView: View {
     @AppStorage("showSampleGames") private var showSampleGames = true
     @AppStorage("libraryFolderBookmark") private var folderBookmark = Data()
     @AppStorage("libraryFolderName") private var folderName = ""
+    @AppStorage("dockModeEnabled") private var dockModeEnabled = true
+    @AppStorage("clock24h") private var clock24h = true
 
     // Dispositivos
     @StateObject private var controllers = ControllerMonitor()
@@ -155,6 +159,15 @@ struct HomeView: View {
         !controllers.controllers.isEmpty
     }
 
+    private var isLandscapeNow: Bool {
+        UIScreen.main.bounds.width > UIScreen.main.bounds.height
+    }
+
+    /// Modo Dock: carrusel en horizontal (con el ajuste activado) o forzado por una pantalla HDMI.
+    private var dockActive: Bool {
+        isLandscapeNow && (dockModeEnabled || hdmiForced)
+    }
+
     private let controllerAlphabet = Array("ABCDEFGHIJKLMNOPQRSTUVWXYZ").map(String.init) + ["⌫", "✕"]
 
     private var filteredGames: [Game] {
@@ -219,20 +232,32 @@ struct HomeView: View {
     var body: some View {
         GeometryReader { geometry in
             let landscape = geometry.size.width > geometry.size.height
+            let dock = landscape && (dockModeEnabled || hdmiForced)
             ZStack(alignment: .top) {
                 background
                 Group {
-                    switch selectedSection {
-                    case .inicio: homeContent(landscape: landscape)
-                    case .favoritos: favoritesContent(landscape: landscape)
-                    case .busqueda: searchContent(landscape: landscape)
-                    case .ajustes: settingsContent(landscape: landscape)
+                    if dock, selectedSection == .inicio || selectedSection == .favoritos {
+                        dockHome()
+                    } else {
+                        switch selectedSection {
+                        case .inicio: homeContent(landscape: landscape)
+                        case .favoritos: favoritesContent(landscape: landscape)
+                        case .busqueda: searchContent(landscape: landscape)
+                        case .ajustes: settingsContent(landscape: landscape)
+                        }
                     }
                 }
-                topBar(compact: landscape)
+                if dock {
+                    dockTopBar()
+                } else {
+                    topBar(compact: landscape)
+                }
                 padMenuOverlay
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .overlay(alignment: .bottom) {
+                if dock { dockBottomBar }
+            }
             .overlay(alignment: .bottom) { toastOverlay }
             .onPreferenceChange(FramesKey.self) { frames = $0 }
             .photosPicker(isPresented: $showPhotoPicker, selection: $photoItem, matching: .images)
@@ -255,16 +280,20 @@ struct HomeView: View {
             }
             .onChange(of: showSampleGames) { _, _ in refreshLibrary() }
             .onChange(of: dialog) { _, _ in menuIndex = 0 }
+            .onChange(of: dockActive) { _, _ in resetControllerFocus() }
             .onChange(of: showAbout) { _, _ in menuIndex = 0 }
             .onChange(of: selectedSection) { _, section in
                 if section == .inicio { refreshLibrary() }
                 controllerSelectedGameID = controllerGames.first?.id
                 controllerSearchFocused = false
-                switch section {
-                case .inicio: controllerSelectedArea = "games"
-                case .busqueda: controllerSelectedArea = gamepadConnected ? "search" : "games"
-                case .favoritos: controllerSelectedArea = "games"
-                case .ajustes: controllerSelectedArea = "settings"; controllerSelectedSettingIndex = 0
+                // En el Modo Dock, al cambiar de pestaña con el mando se queda en la barra de pestañas.
+                if !(dockActive && controllerSelectedArea == "dockNav") {
+                    switch section {
+                    case .inicio: controllerSelectedArea = "games"
+                    case .busqueda: controllerSelectedArea = gamepadConnected ? "search" : "games"
+                    case .favoritos: controllerSelectedArea = "games"
+                    case .ajustes: controllerSelectedArea = "settings"; controllerSelectedSettingIndex = 0
+                    }
                 }
             }
             .onChange(of: selectedPlatform) { _, _ in
@@ -311,6 +340,10 @@ struct HomeView: View {
                 }
                 controllers.onAccept = {
                     if modalActive { routeModalAccept() } else { activateControllerSelection() }
+                }
+                controllers.onOptions = {
+                    guard !modalActive else { return }
+                    handleOptionsButton()
                 }
                 if keepLandscape {
                     DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) {
@@ -409,7 +442,7 @@ struct HomeView: View {
             .padding(.vertical, 12)
             .liquidGlass(in: RoundedRectangle(cornerRadius: 22, style: .continuous))
             .padding(.horizontal, 20)
-            .padding(.bottom, 26)
+            .padding(.bottom, dockActive ? 66 : 26)
             .transition(.move(edge: .bottom).combined(with: .opacity))
         }
     }
@@ -477,6 +510,20 @@ struct HomeView: View {
                 PadMenuItem(title: tr("Quitar juegos"), kind: .destructive) { setLibrary([]); closePadMenu() },
                 cancel
             ])
+        case .gameOptions:
+            guard let game = games.first(where: { $0.id == controllerSelectedGameID }) else { return nil }
+            var items = [PadMenuItem(title: favoriteNames.contains(game.id) ? tr("Quitar de favoritos") : tr("Añadir a favoritos")) {
+                toggleFavorite(game.id)
+                closePadMenu()
+            }]
+            if game.isCustom {
+                items.append(PadMenuItem(title: tr("Quitar de la biblioteca"), kind: .destructive) {
+                    removeGame(game)
+                    closePadMenu()
+                })
+            }
+            items.append(cancel)
+            return (game.name, game.platform, items)
         }
     }
 
@@ -572,7 +619,7 @@ struct HomeView: View {
         if connected {
             guard hdmiAutoLandscape, !hdmiForced else { return }
             hdmiPending = true
-            showToast(tr("Pantalla HDMI detectada. Cambiando a horizontal…"), seconds: 3, actionTitle: tr("Cancelar")) {
+            showToast(tr("Pantalla HDMI detectada. Activando Modo Dock…"), seconds: 3, actionTitle: tr("Cancelar")) {
                 hdmiTask?.cancel()
                 hdmiPending = false
             }
@@ -607,6 +654,10 @@ struct HomeView: View {
     }
 
     private func moveControllerSelection(_ direction: ControllerMonitor.Direction) {
+        if dockActive, selectedSection == .inicio || selectedSection == .favoritos {
+            moveDockSelection(direction)
+            return
+        }
         if selectedSection == .ajustes {
             moveSettingsSelection(direction)
             return
@@ -725,6 +776,10 @@ struct HomeView: View {
     }
 
     private func activateControllerSelection() {
+        if dockActive, selectedSection == .inicio || selectedSection == .favoritos {
+            activateDockSelection()
+            return
+        }
         if selectedSection == .ajustes {
             activateSelectedSetting()
             return
@@ -788,6 +843,12 @@ struct HomeView: View {
             showToast(tr("Giro a horizontal cancelado"))
             return
         }
+        // 2b) Modo Dock: sale de las opciones, los filtros o las pestañas y vuelve al carrusel.
+        if dockActive, ["dockOptions", "dockChips", "dockNav"].contains(controllerSelectedArea) {
+            controllerSelectedArea = "games"
+            feedback()
+            return
+        }
         // 3) Teclado del mando: sale del teclado y deja marcada la barra de búsqueda.
         if selectedSection == .busqueda, controllerSelectedArea == "alphabet" {
             controllerSelectedArea = "search"
@@ -811,6 +872,111 @@ struct HomeView: View {
         if selectedSection != .inicio {
             feedback()
             withAnimation(.easeInOut(duration: 0.2)) { selectedSection = .inicio }
+        }
+    }
+
+    // MARK: - Modo Dock (carrusel en horizontal)
+
+    private func resetControllerFocus() {
+        switch selectedSection {
+        case .ajustes: controllerSelectedArea = "settings"
+        case .busqueda: controllerSelectedArea = gamepadConnected ? "search" : "games"
+        default: controllerSelectedArea = "games"
+        }
+        controllerSelectedGameID = controllerGames.first?.id
+    }
+
+    /// Cruceta en el Dock. Zonas: pestañas de arriba, filtros, carrusel y opciones del juego.
+    private func moveDockSelection(_ direction: ControllerMonitor.Direction) {
+        switch controllerSelectedArea {
+        case "dockOptions":
+            switch direction {
+            case .left: dockOptionIndex = max(0, dockOptionIndex - 1)
+            case .right: dockOptionIndex = min(3, dockOptionIndex + 1)
+            case .up, .down: controllerSelectedArea = "games"
+            }
+            feedback()
+        case "dockChips":
+            switch direction {
+            case .left: cyclePlatform(-1)
+            case .right: cyclePlatform(1)
+            case .down:
+                controllerSelectedArea = "games"
+                feedback()
+            case .up:
+                controllerSelectedArea = "dockNav"
+                feedback()
+            }
+        case "dockNav":
+            switch direction {
+            case .left: cycleSection(-1)
+            case .right: cycleSection(1)
+            case .down:
+                controllerSelectedArea = selectedSection == .inicio ? "dockChips" : "games"
+                feedback()
+            case .up: break
+            }
+        default:
+            let items = controllerGames
+            guard !items.isEmpty else {
+                if direction == .up {
+                    controllerSelectedArea = selectedSection == .inicio ? "dockChips" : "dockNav"
+                }
+                return
+            }
+            let current = items.firstIndex { $0.id == controllerSelectedGameID } ?? 0
+            switch direction {
+            case .left:
+                controllerSelectedArea = "games"
+                controllerSelectedGameID = items[max(0, current - 1)].id
+            case .right:
+                controllerSelectedArea = "games"
+                controllerSelectedGameID = items[min(items.count - 1, current + 1)].id
+            case .up:
+                controllerSelectedArea = selectedSection == .inicio ? "dockChips" : "dockNav"
+            case .down:
+                break
+            }
+            feedback()
+        }
+    }
+
+    private func activateDockSelection() {
+        switch controllerSelectedArea {
+        case "dockOptions":
+            activateDockOption(dockOptionIndex)
+        case "dockChips", "dockNav":
+            controllerSelectedArea = "games"
+            feedback()
+        default:
+            guard let id = controllerSelectedGameID,
+                  let game = controllerGames.first(where: { $0.id == id }) else { return }
+            open(game)
+        }
+    }
+
+    /// △ / Y: abre o cierra las opciones del juego seleccionado.
+    private func handleOptionsButton() {
+        guard dockActive, selectedSection == .inicio || selectedSection == .favoritos, !controllerGames.isEmpty else { return }
+        if controllerSelectedArea == "dockOptions" {
+            controllerSelectedArea = "games"
+        } else {
+            controllerSelectedArea = "dockOptions"
+            dockOptionIndex = 0
+        }
+        feedback()
+    }
+
+    private func activateDockOption(_ index: Int) {
+        guard let id = controllerSelectedGameID,
+              let game = controllerGames.first(where: { $0.id == id }) else { return }
+        switch index {
+        case 0: open(game)
+        case 1: showToast(tr("%@: próximamente", tr("Mando")))
+        case 2: showToast(tr("%@: próximamente", tr("Rendimiento")))
+        default:
+            feedback()
+            dialog = .gameOptions
         }
     }
 
@@ -970,7 +1136,7 @@ struct HomeView: View {
                     content()
                         .padding(.horizontal, 16)
                         .padding(.top, headerHeight + topGap)
-                        .padding(.bottom, 44)
+                        .padding(.bottom, dockActive ? 92 : 44)
                         .reportFrame("content")
                 }
             }
@@ -1195,7 +1361,7 @@ struct HomeView: View {
         .glassCard(cornerRadius: 22)
     }
 
-    private func platformFilters(compact: Bool) -> some View {
+    private func platformFilters(compact: Bool, dock: Bool = false) -> some View {
         ScrollView(.horizontal, showsIndicators: false) {
             HStack(spacing: 8) {
                 ForEach(platforms, id: \.name) { platform in
@@ -1214,7 +1380,7 @@ struct HomeView: View {
                         }
                         .foregroundStyle(isSelected ? Color.white : Color.white.opacity(0.78))
                         .padding(.horizontal, compact ? 15 : 17)
-                        .padding(.vertical, compact ? 11 : 13)
+                        .padding(.vertical, dock ? 8 : (compact ? 11 : 13))
                         .contentShape(Capsule())
                         .liquidGlass(
                             in: Capsule(),
@@ -1235,7 +1401,7 @@ struct HomeView: View {
             }
             .scrollTargetLayout()
             .padding(.horizontal, 12)
-            .padding(.vertical, 8)
+            .padding(.vertical, dock ? 4 : 8)
         }
         // La barra sigue a la plataforma elegida (con el mando o con el dedo).
         .scrollPosition(id: $platformScrollID, anchor: .center)
@@ -1384,7 +1550,7 @@ struct HomeView: View {
 
     // Orden de tarjetas de Ajustes: coincide con el orden visual de las tres cuadrículas.
     private var controllerSettingTitles: [String] {
-        [tr("Mandos"), tr("Vibración"), tr("Sonido al pulsar"), tr("Dock en horizontal"), tr("Horizontal con HDMI"), tr("Acerca de"),
+        [tr("Mandos"), tr("Vibración"), tr("Sonido al pulsar"), tr("Modo Dock"), tr("Dock con HDMI"), tr("Bloquear horizontal"), tr("Reloj 24 horas"), tr("Acerca de"),
          tr("Fondo personalizado"), tr("Idioma"), tr("Reorganizar plataformas"), tr("Cuadrícula completa"), tr("Bienvenida animada"), tr("Logo en cabecera"),
          tr("Escaneo de juegos"), tr("Vincular carpeta"), tr("Acceso directo (URL)"), tr("Juegos de ejemplo"), tr("Borrar favoritos"), tr("Quitar añadidos")]
     }
@@ -1410,21 +1576,23 @@ struct HomeView: View {
         case 0: sheet = .controllers
         case 1: hapticsEnabled.toggle()
         case 2: clickSound.toggle()
-        case 3: keepLandscape.toggle()
+        case 3: dockModeEnabled.toggle()
         case 4: hdmiAutoLandscape.toggle()
-        case 5: showAbout = true
-        case 6: if customBackground == nil { showPhotoPicker = true } else { dialog = .background }
-        case 7: dialog = .language
-        case 8: sheet = .platformOrder
-        case 9: compactGrid.toggle()
-        case 10: showWelcome.toggle()
-        case 11: showHeaderLogo.toggle()
-        case 12: scanLibrary()
-        case 13: showFolderImporter = true
-        case 14: sheet = .addShortcut
-        case 15: showSampleGames.toggle()
-        case 16: if !favoriteNames.isEmpty { dialog = .clearFavorites }
-        case 17: if !libraryGames.isEmpty { dialog = .clearLibrary }
+        case 5: keepLandscape.toggle()
+        case 6: clock24h.toggle()
+        case 7: showAbout = true
+        case 8: if customBackground == nil { showPhotoPicker = true } else { dialog = .background }
+        case 9: dialog = .language
+        case 10: sheet = .platformOrder
+        case 11: compactGrid.toggle()
+        case 12: showWelcome.toggle()
+        case 13: showHeaderLogo.toggle()
+        case 14: scanLibrary()
+        case 15: showFolderImporter = true
+        case 16: sheet = .addShortcut
+        case 17: showSampleGames.toggle()
+        case 18: if !favoriteNames.isEmpty { dialog = .clearFavorites }
+        case 19: if !libraryGames.isEmpty { dialog = .clearLibrary }
         default: break
         }
         feedback()
@@ -1446,8 +1614,10 @@ struct HomeView: View {
                     }
                     settingToggleCard(tr("Vibración"), subtitle: tr("Respuesta háptica al tocar"), symbol: "iphone.radiowaves.left.and.right", tint: Color(red: 0.0, green: 0.72, blue: 1.0), isOn: $hapticsEnabled)
                     settingToggleCard(tr("Sonido al pulsar"), subtitle: tr("Clic al tocar botones"), symbol: "speaker.wave.2.fill", tint: Color(red: 0.30, green: 0.60, blue: 1.0), isOn: $clickSound)
-                    settingToggleCard(tr("Dock en horizontal"), subtitle: tr("Mantener la app en horizontal"), symbol: "iphone.landscape", tint: Color(red: 0.18, green: 0.46, blue: 1.0), isOn: $keepLandscape)
-                    settingToggleCard(tr("Horizontal con HDMI"), subtitle: tr("Avisa y gira al conectar HDMI"), symbol: "tv.fill", tint: Color(red: 0.16, green: 0.82, blue: 1.0), isOn: $hdmiAutoLandscape)
+                    settingToggleCard(tr("Modo Dock"), subtitle: tr("Carrusel al girar a horizontal"), symbol: "tv.fill", tint: Color(red: 0.18, green: 0.46, blue: 1.0), isOn: $dockModeEnabled)
+                    settingToggleCard(tr("Dock con HDMI"), subtitle: tr("Activa Dock y horizontal al conectar HDMI"), symbol: "display", tint: Color(red: 0.16, green: 0.82, blue: 1.0), isOn: $hdmiAutoLandscape)
+                    settingToggleCard(tr("Bloquear horizontal"), subtitle: tr("Mantener la app en horizontal"), symbol: "iphone.landscape", tint: Color(red: 0.30, green: 0.60, blue: 1.0), isOn: $keepLandscape)
+                    settingToggleCard(tr("Reloj 24 horas"), subtitle: tr("Formato de la hora en Dock"), symbol: "clock.fill", tint: Color(red: 0.0, green: 0.72, blue: 1.0), isOn: $clock24h)
                     settingCard(tr("Acerca de"), subtitle: tr("Versión %@", appVersion), symbol: "info.circle.fill", tint: Color.cyan, action: {
                         feedback()
                         showAbout = true
@@ -1641,6 +1811,159 @@ struct HomeView: View {
             .padding(.horizontal, 8)
             .padding(.vertical, 4)
             .background(tint.opacity(0.14), in: Capsule())
+    }
+
+    // MARK: - Modo Dock: pantallas y barras
+
+    private static let dockOptionSymbols = ["flag.checkered", "gamecontroller.fill", "bolt.fill", "gearshape.fill"]
+
+    private func dockTopBar() -> some View {
+        ZStack {
+            HStack {
+                HStack(spacing: 5) {
+                    Text("OmniStation")
+                        .foregroundStyle(.white)
+                    Text("Dock")
+                        .foregroundStyle(Color(red: 0.08, green: 0.68, blue: 1.0))
+                }
+                .font(.system(size: 19, weight: .bold, design: .rounded))
+                .tracking(-0.4)
+                .lineLimit(1)
+                Spacer()
+                DockClock(use24h: clock24h)
+            }
+            HStack(spacing: 4) {
+                ForEach(DockSection.allCases, id: \.self) { section in
+                    dockNavItem(section)
+                }
+            }
+            .padRing(controllerSelectedArea == "dockNav", cornerRadius: 16)
+        }
+        .padding(.horizontal, 22)
+        .padding(.top, 8)
+        .padding(.bottom, 4)
+        .reportFrame("header")
+    }
+
+    private func dockNavItem(_ section: DockSection) -> some View {
+        let isSelected = selectedSection == section
+        return Button {
+            feedback()
+            withAnimation(.easeInOut(duration: 0.2)) { selectedSection = section }
+        } label: {
+            VStack(spacing: 3) {
+                Image(systemName: section.symbol)
+                    .font(.system(size: 19, weight: .semibold))
+                Text(tr(section.rawValue))
+                    .font(.system(size: 10, weight: .semibold))
+            }
+            .foregroundStyle(isSelected ? Color.cyan : Color.white.opacity(0.72))
+            .frame(width: 70, height: 42)
+            .shadow(color: isSelected ? Color.cyan.opacity(0.5) : Color.clear, radius: 8)
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel(tr(section.rawValue))
+    }
+
+    /// Inicio y Favoritos en el Modo Dock: filtros, título y carrusel de juegos.
+    private func dockHome() -> some View {
+        GeometryReader { geometry in
+            let isHome = selectedSection == .inicio
+            let list = isHome ? filteredGames : favoriteGames
+            // Cabecera + filtros + título + barra inferior + separaciones.
+            let reserved = headerHeight + (isHome ? 41 : 0) + 24 + 52 + 24
+            let carouselHeight = max(150, geometry.size.height - reserved)
+            let cardWidth = min(max(carouselHeight * 0.62, 100), 190)
+            VStack(spacing: 6) {
+                Color.clear.frame(height: headerHeight)
+                if isHome {
+                    platformFilters(compact: true, dock: true)
+                        .padRing(controllerSelectedArea == "dockChips", cornerRadius: 22)
+                }
+                sectionHeading(isHome ? tr("Tu biblioteca") : tr("Tus favoritos"), detail: tr("%ld elementos", list.count))
+                    .padding(.horizontal, 22)
+                DockCarousel(
+                    games: list,
+                    selectedID: Binding(
+                        get: { controllerSelectedGameID ?? list.first?.id },
+                        set: { controllerSelectedGameID = $0 }
+                    ),
+                    focused: gamepadConnected && controllerSelectedArea == "games",
+                    favorites: favoriteNames,
+                    cardWidth: cardWidth,
+                    playHint: tr("Presiona ✕ para jugar"),
+                    emptyText: isHome ? tr("Sin juegos en esta plataforma") : tr("Aún no hay favoritos"),
+                    onOpen: { open($0) }
+                )
+                .frame(height: carouselHeight)
+                Spacer(minLength: 0)
+            }
+        }
+    }
+
+    private var dockBottomBar: some View {
+        HStack(spacing: 14) {
+            HStack(spacing: 14) {
+                dockHint("L1/R1", tr("Plataforma"))
+                dockHint("L2/R2", tr("Pestaña"))
+                dockHint("✕", tr("Jugar"))
+                dockHint("△", tr("Opciones"))
+                dockHint("○", tr("Atrás"))
+            }
+            .lineLimit(1)
+            .minimumScaleFactor(0.7)
+            Spacer(minLength: 8)
+            if (selectedSection == .inicio || selectedSection == .favoritos), !controllerGames.isEmpty {
+                HStack(spacing: 10) {
+                    ForEach(0..<4, id: \.self) { index in
+                        dockOptionButton(index)
+                    }
+                }
+            }
+        }
+        .padding(.horizontal, 22)
+        .padding(.vertical, 6)
+        .frame(maxWidth: .infinity)
+        .background(
+            LinearGradient(
+                colors: [Color.black.opacity(0), Color.black.opacity(0.55)],
+                startPoint: .top,
+                endPoint: .bottom
+            )
+            .ignoresSafeArea(edges: .bottom)
+        )
+    }
+
+    private func dockHint(_ key: String, _ label: String) -> some View {
+        HStack(spacing: 6) {
+            Text(key)
+                .font(.system(size: 10, weight: .bold, design: .rounded))
+                .foregroundStyle(.white.opacity(0.9))
+                .padding(.horizontal, 6)
+                .padding(.vertical, 3)
+                .overlay(
+                    RoundedRectangle(cornerRadius: 6, style: .continuous)
+                        .strokeBorder(Color.white.opacity(0.45), lineWidth: 1)
+                )
+            Text(label)
+                .font(.system(size: 12, weight: .medium))
+                .foregroundStyle(.white.opacity(0.75))
+        }
+    }
+
+    private func dockOptionButton(_ index: Int) -> some View {
+        let focused = controllerSelectedArea == "dockOptions" && dockOptionIndex == index
+        return Button {
+            activateDockOption(index)
+        } label: {
+            Image(systemName: Self.dockOptionSymbols[index])
+                .font(.system(size: 17, weight: .semibold))
+                .foregroundStyle(focused ? Color.cyan : Color.cyan.opacity(0.8))
+                .frame(width: 38, height: 38)
+                .liquidGlass(in: Circle(), tint: focused ? Color.cyan : nil, interactive: true)
+                .padRing(focused, cornerRadius: 19)
+        }
+        .buttonStyle(.plain)
     }
 
     // MARK: - Piezas sueltas
