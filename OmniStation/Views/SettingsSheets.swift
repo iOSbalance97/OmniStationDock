@@ -1,4 +1,5 @@
 import SwiftUI
+import PhotosUI
 
 // MARK: - Mando dentro de las ventanas
 
@@ -282,91 +283,104 @@ struct PlatformOrderSheet: View {
     }
 }
 
-// MARK: - Añadir acceso directo (URL)
+// MARK: - Añadir acceso directo (URL, app iOS o LiveContainer)
 
 struct AddShortcutSheet: View {
     private enum Field { case name, url }
 
     let lang: String
     @ObservedObject var pad: SheetPad
-    /// Enlace con el que empieza el campo URL (por ejemplo, el de LiveContainer).
-    var initialURL: String = ""
-    var onSave: (LibraryGame) -> Void
+    /// Tipo de enlace con el que se abre: 0 URL, 1 app iOS (StikDebug), 2 LiveContainer.
+    var initialMode: Int = 0
+    var onSave: (LibraryGame, Data?) -> Void
     @Environment(\.dismiss) private var dismiss
 
     @State private var platform = "PS2"
     @State private var name = ""
-    @State private var urlText = ""
-    // Con el mando: plataformas (3 por fila), luego nombre, URL, Cancelar y Añadir.
+    @State private var linkText = ""
+    @State private var mode = 0
+    @State private var coverItem: PhotosPickerItem?
+    @State private var coverData: Data?
+    @State private var showCoverPicker = false
+    // Con el mando: plataformas (3 por fila), nombre, tipo, enlace, carátula, Cancelar y Añadir.
     @State private var selected = 0
     @FocusState private var field: Field?
 
     private func tr(_ key: String) -> String { L10n.tr(key, lang) }
 
-    private var chipCount: Int { Platforms.movableNames.count }
+    private var platformNames: [String] { Platforms.movableNames }
+    private var chipCount: Int { platformNames.count }
     private var nameRow: Int { chipCount }
-    private var urlRow: Int { chipCount + 1 }
-    private var cancelRow: Int { chipCount + 2 }
-    private var addRow: Int { chipCount + 3 }
+    private var modeRow: Int { chipCount + 1 }
+    private var urlRow: Int { chipCount + 2 }
+    private var coverRow: Int { chipCount + 3 }
+    private var cancelRow: Int { chipCount + 4 }
+    private var addRow: Int { chipCount + 5 }
 
     private var cleanName: String { name.trimmingCharacters(in: .whitespacesAndNewlines) }
-    private var cleanURL: String { urlText.trimmingCharacters(in: .whitespacesAndNewlines) }
+    private var cleanLink: String { linkText.trimmingCharacters(in: .whitespacesAndNewlines) }
 
-    private var urlIsValid: Bool {
-        guard let url = URL(string: cleanURL), let scheme = url.scheme else { return false }
-        return !scheme.isEmpty && cleanURL.contains("://")
+    private var modeTitles: [String] { [tr("URL"), tr("App iOS"), "LiveContainer"] }
+
+    private var placeholder: String {
+        switch mode {
+        case 1: return "com.empresa.juego"
+        case 2: return "Juego.app"
+        default: return "app://juego"
+        }
     }
 
-    private var canSave: Bool { !cleanName.isEmpty && urlIsValid }
+    private var modeHelp: String {
+        switch mode {
+        case 1: return tr("Escribe el Bundle ID de la app. Se abrirá con StikDebug (sirve para cualquier app instalada, también ports).")
+        case 2: return tr("Escribe el nombre de la app dentro de LiveContainer (el de su enlace de lanzamiento).")
+        default: return tr("Debe incluir el esquema de la app, por ejemplo app://…")
+        }
+    }
+
+    /// Enlace final que se guarda con el juego.
+    private var finalURL: String? {
+        let text: String = cleanLink
+        guard !text.isEmpty else { return nil }
+        switch mode {
+        case 1:
+            guard !text.contains(" ") else { return nil }
+            let value: String = text.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? text
+            return "stikjit://launch-app?bundle-id=" + value
+        case 2:
+            let value: String = text.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? text
+            return DebugSupport.liveContainerLaunchPrefix + value
+        default:
+            guard let url = URL(string: text), let scheme = url.scheme, !scheme.isEmpty, text.contains("://") else { return nil }
+            return text
+        }
+    }
+
+    private var canSave: Bool { !cleanName.isEmpty && finalURL != nil }
 
     var body: some View {
         NavigationStack {
-            ScrollView {
-                VStack(alignment: .leading, spacing: 16) {
-                    caption(tr("Plataforma"))
-                    platformGrid
-
-                    caption(tr("Nombre"))
-                    TextField(tr("Nombre del juego"), text: $name)
-                        .font(AppFont.text(15))
-                        .focused($field, equals: .name)
-                        .textInputAutocapitalization(.words)
-                        .padding(14)
-                        .glassCard(cornerRadius: 14)
-                        .padRing(pad.gamepadConnected && selected == nameRow, cornerRadius: 14)
-
-                    caption(tr("URL de acceso directo"))
-                    TextField("app://juego", text: $urlText)
-                        .font(AppFont.text(15))
-                        .focused($field, equals: .url)
-                        .keyboardType(.URL)
-                        .textInputAutocapitalization(.never)
-                        .autocorrectionDisabled()
-                        .padding(14)
-                        .glassCard(cornerRadius: 14)
-                        .padRing(pad.gamepadConnected && selected == urlRow, cornerRadius: 14)
-
-                    Text(tr("Debe incluir el esquema de la app, por ejemplo app://…"))
-                        .font(AppFont.text(11))
-                        .foregroundStyle(.white.opacity(0.5))
-
-                    HStack(spacing: 10) {
-                        bottomButton(tr("Cancelar"), row: cancelRow, enabled: true) { dismiss() }
-                        bottomButton(tr("Añadir"), row: addRow, enabled: canSave) { save() }
-                    }
-                    .padding(.top, 6)
+            ScrollViewReader { proxy in
+                ScrollView {
+                    formContent
+                        .padding(16)
                 }
-                .padding(16)
+                .onChange(of: selected) { _, value in
+                    withAnimation(.easeInOut(duration: 0.2)) { proxy.scrollTo(rowAnchor(value), anchor: .center) }
+                }
             }
             .scrollDismissesKeyboard(.interactively)
             .navigationTitle(tr("Añadir acceso directo"))
             .navigationBarTitleDisplayMode(.inline)
         }
-        .presentationDetents([.large])
-        .presentationBackground(.ultraThinMaterial)
-        .preferredColorScheme(.dark)
+        .padSheetStyle(large: true)
+        .photosPicker(isPresented: $showCoverPicker, selection: $coverItem, matching: .images)
+        .onChange(of: coverItem) { _, item in
+            loadCover(item)
+        }
         .onAppear {
-            if urlText.isEmpty { urlText = initialURL }
+            mode = initialMode
+            if initialMode == 1 { platform = "Juegos iOS" }
             pad.handler = { action in
                 handle(action)
                 return true
@@ -375,19 +389,143 @@ struct AddShortcutSheet: View {
         .onDisappear { pad.handler = nil }
     }
 
+    private var formContent: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            SheetCaption(text: tr("Plataforma"))
+            platformGrid
+                .id("chips")
+
+            SheetCaption(text: tr("Nombre"))
+            TextField(tr("Nombre del juego"), text: $name)
+                .font(AppFont.text(15))
+                .focused($field, equals: .name)
+                .textInputAutocapitalization(.words)
+                .padding(14)
+                .glassCard(cornerRadius: 14)
+                .padRing(pad.gamepadConnected && selected == nameRow, cornerRadius: 14)
+                .id("name")
+
+            SheetCaption(text: tr("Tipo de enlace"))
+            modePicker
+                .id("mode")
+
+            TextField(placeholder, text: $linkText)
+                .font(AppFont.text(15))
+                .focused($field, equals: .url)
+                .keyboardType(mode == 0 ? .URL : .asciiCapable)
+                .textInputAutocapitalization(.never)
+                .autocorrectionDisabled()
+                .padding(14)
+                .glassCard(cornerRadius: 14)
+                .padRing(pad.gamepadConnected && selected == urlRow, cornerRadius: 14)
+                .id("url")
+
+            Text(modeHelp)
+                .font(AppFont.text(11))
+                .foregroundStyle(.white.opacity(0.5))
+
+            SheetCaption(text: tr("Carátula"))
+            coverButton
+                .id("cover")
+
+            HStack(spacing: 10) {
+                SheetActionButton(title: tr("Cancelar"), tint: Color.white.opacity(0.85), selected: pad.gamepadConnected && selected == cancelRow) {
+                    dismiss()
+                }
+                SheetActionButton(title: tr("Añadir"), selected: pad.gamepadConnected && selected == addRow, enabled: canSave) {
+                    save()
+                }
+            }
+            .padding(.top, 6)
+            .id("buttons")
+        }
+    }
+
+    private func rowAnchor(_ row: Int) -> String {
+        if row < chipCount { return "chips" }
+        if row == nameRow { return "name" }
+        if row == modeRow { return "mode" }
+        if row == urlRow { return "url" }
+        if row == coverRow { return "cover" }
+        return "buttons"
+    }
+
     private var platformGrid: some View {
         LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 8), count: 3), spacing: 8) {
-            ForEach(Array(Platforms.movableNames.enumerated()), id: \.element) { index, item in
+            ForEach(Array(platformNames.enumerated()), id: \.element) { index, item in
                 platformChip(item, index: index)
             }
         }
     }
 
-    private func caption(_ text: String) -> some View {
-        Text(text.uppercased())
-            .font(AppFont.text(11, .bold))
-            .tracking(1.4)
-            .foregroundStyle(Color.cyan.opacity(0.85))
+    private var modePicker: some View {
+        HStack(spacing: 8) {
+            ForEach(modeTitles.indices, id: \.self) { index in
+                modeChip(index)
+            }
+        }
+        .padding(4)
+        .padRing(pad.gamepadConnected && selected == modeRow, cornerRadius: 22)
+    }
+
+    private func modeChip(_ index: Int) -> some View {
+        let chosen: Bool = mode == index
+        let tint: Color? = chosen ? Color(red: 0.05, green: 0.45, blue: 1.0) : nil
+        return Button {
+            setMode(index)
+        } label: {
+            Text(modeTitles[index])
+                .font(AppFont.text(12, .semibold))
+                .foregroundStyle(chosen ? Color.white : Color.white.opacity(0.78))
+                .lineLimit(1)
+                .minimumScaleFactor(0.7)
+                .padding(.vertical, 10)
+                .frame(maxWidth: .infinity)
+                .contentShape(Capsule())
+                .liquidGlass(in: Capsule(), tint: tint, interactive: true)
+        }
+        .buttonStyle(ControllerFocusableButtonStyle())
+    }
+
+    private var coverButton: some View {
+        let shape = RoundedRectangle(cornerRadius: 14, style: .continuous)
+        return Button {
+            showCoverPicker = true
+        } label: {
+            HStack(spacing: 12) {
+                coverPreview
+                Text(coverData == nil ? tr("Elegir carátula") : tr("Cambiar carátula"))
+                    .font(AppFont.text(14, .semibold))
+                    .foregroundStyle(Color.cyan)
+                Spacer()
+                Image(systemName: "photo.on.rectangle")
+                    .foregroundStyle(Color.cyan)
+            }
+            .padding(12)
+            .contentShape(shape)
+            .glassCard(cornerRadius: 14)
+            .padRing(pad.gamepadConnected && selected == coverRow, cornerRadius: 14)
+        }
+        .buttonStyle(ControllerFocusableButtonStyle())
+    }
+
+    @ViewBuilder
+    private var coverPreview: some View {
+        if let coverData, let image = UIImage(data: coverData) {
+            Image(uiImage: image)
+                .resizable()
+                .scaledToFill()
+                .frame(width: 44, height: 50)
+                .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+        } else {
+            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                .fill(Color.white.opacity(0.08))
+                .frame(width: 44, height: 50)
+                .overlay {
+                    Image(systemName: "photo")
+                        .foregroundStyle(.white.opacity(0.4))
+                }
+        }
     }
 
     private func platformChip(_ item: String, index: Int) -> some View {
@@ -400,10 +538,12 @@ struct AddShortcutSheet: View {
                 Image(systemName: Platforms.symbol(for: item))
                     .font(.system(size: 12, weight: .semibold))
                 Text(item)
-                    .font(AppFont.text(13, .semibold))
+                    .font(AppFont.text(12, .semibold))
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.6)
             }
             .foregroundStyle(isChosen ? Color.white : Color.white.opacity(0.78))
-            .padding(.horizontal, 12)
+            .padding(.horizontal, 10)
             .padding(.vertical, 10)
             .frame(maxWidth: .infinity)
             .contentShape(Capsule())
@@ -418,19 +558,18 @@ struct AddShortcutSheet: View {
         .buttonStyle(ControllerFocusableButtonStyle())
     }
 
-    private func bottomButton(_ title: String, row: Int, enabled: Bool, action: @escaping () -> Void) -> some View {
-        Button(action: action) {
-            Text(title)
-                .font(AppFont.text(15, .semibold))
-                .foregroundStyle(enabled ? Color.cyan : Color.white.opacity(0.35))
-                .frame(maxWidth: .infinity)
-                .padding(.vertical, 13)
-                .contentShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
-                .liquidGlass(in: RoundedRectangle(cornerRadius: 14, style: .continuous), interactive: true)
-                .padRing(pad.gamepadConnected && selected == row, cornerRadius: 14)
+    private func setMode(_ index: Int) {
+        mode = index
+        if index == 1, platform == "PS2" { platform = "Juegos iOS" }
+    }
+
+    private func loadCover(_ item: PhotosPickerItem?) {
+        guard let item else { return }
+        Task {
+            if let data = try? await item.loadTransferable(type: Data.self) {
+                coverData = data
+            }
         }
-        .buttonStyle(ControllerFocusableButtonStyle())
-        .disabled(!enabled)
     }
 
     private func handle(_ action: PadAction) {
@@ -438,17 +577,7 @@ struct AddShortcutSheet: View {
         case .cancel:
             if field != nil { field = nil } else { dismiss() }
         case .accept:
-            if selected < chipCount {
-                platform = Platforms.movableNames[selected]
-            } else if selected == nameRow {
-                field = .name
-            } else if selected == urlRow {
-                field = .url
-            } else if selected == cancelRow {
-                dismiss()
-            } else if canSave {
-                save()
-            }
+            accept()
         case .up, .down, .left, .right:
             // Al moverse se cierra el teclado del sistema.
             field = nil
@@ -456,49 +585,65 @@ struct AddShortcutSheet: View {
         }
     }
 
+    private func accept() {
+        if selected < chipCount {
+            platform = platformNames[selected]
+        } else if selected == nameRow {
+            field = .name
+        } else if selected == modeRow {
+            setMode((mode + 1) % modeTitles.count)
+        } else if selected == urlRow {
+            field = .url
+        } else if selected == coverRow {
+            showCoverPicker = true
+        } else if selected == cancelRow {
+            dismiss()
+        } else if canSave {
+            save()
+        }
+    }
+
     private func move(_ action: PadAction) {
         let columns = 3
         if selected < chipCount {
-            let column = selected % columns
-            switch action {
-            case .left: if column > 0 { selected -= 1 }
-            case .right: if column < columns - 1, selected + 1 < chipCount { selected += 1 }
-            case .up: if selected >= columns { selected -= columns }
-            case .down: selected = selected + columns < chipCount ? selected + columns : nameRow
-            default: break
+            if let next = PadGrid.move(selected, count: chipCount, columns: columns, action) {
+                selected = next
+            } else if action == .down {
+                selected = nameRow
             }
-        } else if selected == nameRow {
-            switch action {
-            case .up: selected = chipCount - 1
-            case .down: selected = urlRow
-            default: break
-            }
-        } else if selected == urlRow {
-            switch action {
-            case .up: selected = nameRow
-            case .down: selected = addRow
-            default: break
-            }
-        } else {
+            return
+        }
+        if selected == modeRow, action == .left || action == .right {
+            let step: Int = action == .left ? -1 : 1
+            setMode(max(0, min(modeTitles.count - 1, mode + step)))
+            return
+        }
+        if selected >= cancelRow {
             switch action {
             case .left: selected = cancelRow
             case .right: selected = addRow
-            case .up: selected = urlRow
+            case .up: selected = coverRow
             default: break
             }
+            return
+        }
+        switch action {
+        case .up: selected = selected == nameRow ? chipCount - 1 : selected - 1
+        case .down: selected = selected == coverRow ? addRow : selected + 1
+        default: break
         }
     }
 
     private func save() {
-        guard canSave else { return }
+        guard canSave, let url = finalURL else { return }
         let item = LibraryGame(
             id: "\(platform)/\(cleanName)",
             name: cleanName,
             platform: platform,
-            launchURL: cleanURL,
+            launchURL: url,
             source: "url"
         )
-        onSave(item)
+        onSave(item, coverData)
         dismiss()
     }
 }

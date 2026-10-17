@@ -174,57 +174,103 @@ enum L10n {
         "Juego de LiveContainer": "LiveContainer game",
         "Acceso directo a una app de LiveContainer": "Shortcut to a LiveContainer app",
         "✕: escribir": "✕: type",
+        "%ld de %ld logros": "%ld of %ld achievements",
+        "%ld puntos": "%ld points",
+        "Abre un juego, app o emulador": "Opens a game, app or emulator",
+        "Acceso directo": "Shortcut",
+        "Actualizar": "Refresh",
+        "App iOS": "iOS app",
+        "Asignar plataforma": "Assign platform",
+        "Añadir plataforma": "Add platform",
+        "Cambiar carpeta": "Change folder",
+        "Cambiar carátula": "Change cover",
+        "Cambiar nombre": "Rename",
+        "Carpeta desvinculada": "Folder unlinked",
+        "Carpeta externa": "External folder",
+        "Carátula": "Cover",
+        "Carátula actualizada": "Cover updated",
+        "Clave web (Web API Key)": "Web API Key",
+        "Clic del sistema": "System click",
+        "Conecta RetroAchievements": "Connect RetroAchievements",
+        "Conecta tu cuenta de RetroAchievements en Ajustes → Logros.": "Connect your RetroAchievements account in Settings → Achievements.",
+        "Conectar": "Connect",
+        "Conseguido %@": "Earned %@",
+        "Crea tus propias plataformas": "Create your own platforms",
+        "Desconectar": "Disconnect",
+        "Desplazamiento por menús": "Menu navigation",
+        "Desvincular carpeta": "Unlink folder",
+        "Dock a pantalla completa": "Full-width Dock",
+        "El mapa se guarda para este juego. iOS no deja que una app cambie los botones dentro de otra: úsalo como referencia o configúralo igual en el emulador.": "The mapping is saved for this game. iOS doesn't let one app change the buttons inside another: use it as a reference or set the same mapping in the emulator.",
+        "Elegir carátula": "Choose cover",
+        "Elegir imagen": "Choose image",
+        "Elegir otro vídeo": "Choose another video",
+        "Elegir vídeo": "Choose video",
+        "En uso": "In use",
+        "Escribe el Bundle ID de la app. Se abrirá con StikDebug (sirve para cualquier app instalada, también ports).": "Type the app's Bundle ID. It will open through StikDebug (works for any installed app, ports too).",
+        "Escribe el ID del juego en RetroAchievements (es el número de la dirección de su página, por ejemplo retroachievements.org/game/1234).": "Type the game's RetroAchievements ID (the number in its page address, for example retroachievements.org/game/1234).",
+        "Escribe el nombre de la app dentro de LiveContainer (el de su enlace de lanzamiento).": "Type the app name inside LiveContainer (the one in its launch link).",
+        "Este juego no tiene logros.": "This game has no achievements.",
+        "Fondo animado": "Animated background",
+        "Fondo animado actualizado": "Animated background updated",
+        "Fondo animado quitado": "Animated background removed",
+        "Fondo estático": "Static background",
+        "Formatos: wav, mp3, m4a, caf, aac o aif. Con el mando: ←→ volumen, X probar.": "Formats: wav, mp3, m4a, caf, aac or aif. Controller: ←→ volume, X preview.",
+        "Guardada": "Saved",
+        "Guardado": "Saved",
+        "Guardar": "Save",
+        "ID de RetroAchievements: %@": "RetroAchievements ID: %@",
+        "Icono": "Icon",
+        "Importar": "Import",
+        "Juegos añadidos": "Added games",
+        "Juegos iOS encontrados: %ld": "iOS games found: %ld",
+        "Juegos instalados en el iPhone": "Games installed on the iPhone",
+        "La clave está en retroachievements.org, en los ajustes de tu perfil (apartado de claves). Se guarda en el llavero del iPhone.": "The key is on retroachievements.org, in your profile settings (keys section). It's stored in the iPhone keychain.",
+        "Logros": "Achievements",
+        "Logros recientes": "Recent achievements",
+        "Mapear botones": "Map buttons",
+        "Música de ambiente": "Ambient music",
+        "No hay juegos añadidos.": "No added games.",
+        "No se encontraron juegos iOS conocidos": "No known iOS games found",
+        "No se pudo conectar con RetroAchievements.": "Couldn't connect to RetroAchievements.",
+        "No se pudo importar ese archivo": "That file couldn't be imported",
+        "No se pudo usar ese vídeo": "That video couldn't be used",
+        "Nombre de la plataforma": "Platform name",
+        "Nueva plataforma": "New platform",
+        "Opciones del juego": "Game options",
+        "Original": "Original",
+        "Pega aquí tu clave web": "Paste your web key here",
+        "Plataforma original": "Original platform",
+        "Plataformas": "Platforms",
+        "Probar": "Preview",
+        "Pulsa otra vez para confirmar": "Press again to confirm",
+        "Quitar": "Remove",
+        "Quitar carátula": "Remove cover",
+        "Quitar imagen": "Remove image",
+        "Quitar todos": "Remove all",
+        "Quitar vídeo": "Remove video",
+        "ROMs de todas las plataformas": "ROMs from every platform",
+        "Selección": "Selection",
+        "Sin logros en los últimos 30 días.": "No achievements in the last 30 days.",
+        "Sin música: importa una": "No music: import one",
+        "Sonido de la app": "App sound",
+        "Sonido importado": "Imported sound",
+        "Sonidos": "Sounds",
+        "Sonidos de navegación y selección": "Navigation and selection sounds",
+        "Tipo de enlace": "Link type",
+        "Tu usuario de RetroAchievements": "Your RetroAchievements username",
+        "Tus plataformas": "Your platforms",
+        "URL": "URL",
+        "Usa todo el ancho en horizontal": "Uses the full width in landscape",
+        "Usar esta imagen": "Use this image",
+        "Usar este vídeo": "Use this video",
+        "Usuario": "Username",
+        "Usuario o clave web no válidos.": "Invalid username or web key.",
+        "Ver y quitar uno a uno": "View and remove one by one",
+        "Volumen e importación": "Volume and import",
+        "Volver a escanear": "Scan again",
+        "Ya existe una plataforma con ese nombre.": "A platform with that name already exists.",
         "Listo": "Done"
     ]
-}
-
-// MARK: - Plataformas
-
-enum Platforms {
-    static let all: [(name: String, symbol: String)] = [
-        ("Todos", "square.grid.2x2.fill"),
-        ("PS2", "gamecontroller.fill"),
-        ("PSP", "gamecontroller"),
-        ("GameCube", "cube.fill"),
-        ("Wii", "gamecontroller"),
-        ("Switch", "rectangle.on.rectangle"),
-        ("3DS", "square.3.layers.3d"),
-        ("NDS", "rectangle.portrait"),
-        ("GBA", "gameboy")
-    ]
-
-    /// Todas menos «Todos» (las que se pueden reordenar).
-    static var movableNames: [String] { all.dropFirst().map(\.name) }
-
-    static func symbol(for name: String) -> String {
-        all.first { $0.name == name }?.symbol ?? "gamecontroller.fill"
-    }
-
-    static func tint(for name: String) -> Color {
-        switch name {
-        case "PS2": return Color(red: 0.05, green: 0.42, blue: 1.0)
-        case "PSP": return Color(red: 0.10, green: 0.30, blue: 0.78)
-        case "GameCube": return Color(red: 0.06, green: 0.58, blue: 0.95)
-        case "Wii": return Color(red: 0.00, green: 0.72, blue: 1.0)
-        case "Switch": return Color(red: 0.10, green: 0.46, blue: 1.0)
-        case "3DS": return Color(red: 0.16, green: 0.82, blue: 1.0)
-        case "NDS": return Color(red: 0.10, green: 0.46, blue: 1.0)
-        default: return Color(red: 0.00, green: 0.72, blue: 1.0)
-        }
-    }
-
-    /// Orden guardado (nombres separados por "|") completado con las plataformas que falten.
-    static func ordered(_ raw: String) -> [String] {
-        let known = movableNames
-        var result: [String] = []
-        for name in raw.split(separator: "|").map(String.init) where known.contains(name) && !result.contains(name) {
-            result.append(name)
-        }
-        for name in known where !result.contains(name) {
-            result.append(name)
-        }
-        return result
-    }
 }
 
 // MARK: - Juegos
@@ -298,103 +344,6 @@ enum LibraryFolder {
     static func resolve(_ data: Data) -> URL? {
         var stale = false
         return try? URL(resolvingBookmarkData: data, options: [], relativeTo: nil, bookmarkDataIsStale: &stale)
-    }
-}
-
-enum LibraryScanner {
-    /// Extensión de archivo -> plataforma más probable.
-    static let extensionMap: [String: String] = [
-        "gba": "GBA",
-        "nds": "NDS",
-        "3ds": "3DS", "cia": "3DS", "cci": "3DS", "cxi": "3DS",
-        "gcm": "GameCube", "gcz": "GameCube", "ciso": "GameCube", "rvz": "GameCube",
-        "wbfs": "Wii", "wad": "Wii",
-        "nsp": "Switch", "xci": "Switch", "nsz": "Switch",
-        "cso": "PSP", "pbp": "PSP",
-        "iso": "PS2", "chd": "PS2", "cue": "PS2"
-    ]
-
-    /// Si una carpeta del camino se llama como una plataforma, manda sobre la extensión.
-    private static func platformHint(from folders: [String]) -> String? {
-        for folder in folders.reversed() {
-            switch folder.lowercased() {
-            case "ps2", "playstation 2", "playstation2": return "PS2"
-            case "psp": return "PSP"
-            case "gamecube", "gc", "ngc": return "GameCube"
-            case "wii": return "Wii"
-            case "switch", "nsw": return "Switch"
-            case "3ds", "n3ds": return "3DS"
-            case "nds", "ds": return "NDS"
-            case "gba", "gameboy advance": return "GBA"
-            default: continue
-            }
-        }
-        return nil
-    }
-
-    static func scan(folder: URL, limit: Int = 20000) -> [LibraryGame] {
-        let fileManager = FileManager.default
-        guard let enumerator = fileManager.enumerator(
-            at: folder,
-            includingPropertiesForKeys: [.isRegularFileKey],
-            options: [.skipsHiddenFiles, .skipsPackageDescendants]
-        ) else { return [] }
-
-        let baseCount = folder.standardizedFileURL.pathComponents.count
-        var found: [String: LibraryGame] = [:]
-        var visited = 0
-
-        for case let url as URL in enumerator {
-            visited += 1
-            if visited > limit { break }
-            guard let basePlatform = extensionMap[url.pathExtension.lowercased()] else { continue }
-            let folders = Array(url.standardizedFileURL.pathComponents.dropFirst(baseCount).dropLast())
-            let platform = platformHint(from: folders) ?? basePlatform
-            let name = url.deletingPathExtension().lastPathComponent
-            let id = "\(platform)/\(name)"
-            if found[id] == nil {
-                found[id] = LibraryGame(id: id, name: name, platform: platform, launchURL: nil, source: "scan")
-            }
-        }
-        return found.values.sorted { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
-    }
-}
-
-// MARK: - Fondo personalizado
-
-enum BackgroundStore {
-    private static var fileURL: URL {
-        let directory = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
-        try? FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
-        return directory.appendingPathComponent("custom_background.jpg")
-    }
-
-    static func load() -> UIImage? {
-        UIImage(contentsOfFile: fileURL.path)
-    }
-
-    /// Reduce la imagen (máx. 2200 px) y la guarda como JPEG.
-    static func save(_ data: Data) -> Bool {
-        guard let image = UIImage(data: data) else { return false }
-        let longest = max(image.size.width, image.size.height)
-        let scale = min(1, 2200 / longest)
-        let size = CGSize(width: image.size.width * scale, height: image.size.height * scale)
-        let format = UIGraphicsImageRendererFormat.default()
-        format.scale = 1
-        let resized = UIGraphicsImageRenderer(size: size, format: format).image { _ in
-            image.draw(in: CGRect(origin: .zero, size: size))
-        }
-        guard let jpeg = resized.jpegData(compressionQuality: 0.85) else { return false }
-        do {
-            try jpeg.write(to: fileURL, options: .atomic)
-            return true
-        } catch {
-            return false
-        }
-    }
-
-    static func remove() {
-        try? FileManager.default.removeItem(at: fileURL)
     }
 }
 
@@ -600,11 +549,16 @@ struct TapHighlightButtonStyle: ButtonStyle {
 
 // MARK: - Tipografías
 
-/// Orbitron para la marca (bienvenida, título y barra de plataformas) y Space Grotesk para el resto.
+/// Orbitron (la de la bienvenida y la barra de plataformas) y Space Grotesk.
 /// Los archivos van en Resources/Fonts y se registran al arrancar la app.
 enum AppFont {
+    /// Prueba de la versión 0.1.8: Orbitron para todo. En `false` vuelve Space Grotesk para el texto.
+    static let useBrandEverywhere = true
+    /// Orbitron es muy ancha: el texto normal se pinta algo más pequeño para que quepa igual.
+    private static let brandTextScale: CGFloat = 0.88
+
     private static let files: [String] = [
-        "Orbitron-SemiBold", "Orbitron-Bold", "Orbitron-ExtraBold",
+        "Orbitron-Regular", "Orbitron-Medium", "Orbitron-SemiBold", "Orbitron-Bold", "Orbitron-ExtraBold",
         "SpaceGrotesk-Regular", "SpaceGrotesk-Medium", "SpaceGrotesk-SemiBold", "SpaceGrotesk-Bold"
     ]
 
@@ -615,32 +569,41 @@ enum AppFont {
         }
     }
 
-    /// Orbitron.
-    static func brand(_ size: CGFloat, _ weight: Font.Weight = .bold) -> Font {
-        let name: String
+    private static func orbitronName(_ weight: Font.Weight) -> String {
         if weight == .heavy || weight == .black {
-            name = "Orbitron-ExtraBold"
+            return "Orbitron-ExtraBold"
         } else if weight == .bold {
-            name = "Orbitron-Bold"
-        } else {
-            name = "Orbitron-SemiBold"
+            return "Orbitron-Bold"
+        } else if weight == .semibold {
+            return "Orbitron-SemiBold"
+        } else if weight == .medium {
+            return "Orbitron-Medium"
         }
-        return Font.custom(name, fixedSize: size)
+        return "Orbitron-Regular"
     }
 
-    /// Space Grotesk.
-    static func text(_ size: CGFloat, _ weight: Font.Weight = .regular) -> Font {
-        let name: String
+    private static func groteskName(_ weight: Font.Weight) -> String {
         if weight == .bold || weight == .heavy || weight == .black {
-            name = "SpaceGrotesk-Bold"
+            return "SpaceGrotesk-Bold"
         } else if weight == .semibold {
-            name = "SpaceGrotesk-SemiBold"
+            return "SpaceGrotesk-SemiBold"
         } else if weight == .medium {
-            name = "SpaceGrotesk-Medium"
-        } else {
-            name = "SpaceGrotesk-Regular"
+            return "SpaceGrotesk-Medium"
         }
-        return Font.custom(name, fixedSize: size)
+        return "SpaceGrotesk-Regular"
+    }
+
+    /// Orbitron (marca: bienvenida, título y barra de plataformas).
+    static func brand(_ size: CGFloat, _ weight: Font.Weight = .bold) -> Font {
+        Font.custom(orbitronName(weight), fixedSize: size)
+    }
+
+    /// Texto normal: Orbitron mientras dure la prueba, si no Space Grotesk.
+    static func text(_ size: CGFloat, _ weight: Font.Weight = .regular) -> Font {
+        if useBrandEverywhere {
+            return Font.custom(orbitronName(weight), fixedSize: (size * brandTextScale).rounded())
+        }
+        return Font.custom(groteskName(weight), fixedSize: size)
     }
 }
 

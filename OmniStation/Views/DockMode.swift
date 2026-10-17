@@ -52,6 +52,8 @@ struct DockCarousel: View {
     var focused: Bool
     var favorites: Set<String>
     var cardWidth: CGFloat
+    /// Cambia al guardar o quitar una carátula, para repintar.
+    var coverVersion: Int = 0
     var playHint: String
     var emptyText: String
     var onOpen: (Game) -> Void
@@ -79,14 +81,17 @@ struct DockCarousel: View {
     }
 
     private func carousel(width: CGFloat) -> some View {
-        // Las laterales encogen: se compensa el hueco para que queden juntas.
-        let spacing: CGFloat = 12 - cardWidth * (1 - Self.sideScale)
+        // Cada lateral encoge por los dos lados: se compensa la mitad para dejar un hueco limpio.
+        let spacing: CGFloat = 12 - cardWidth * (1 - Self.sideScale) / 2
         let margin: CGFloat = max(0, (width - cardWidth) / 2)
+        let selectedIndex: Int = games.firstIndex(where: { $0.id == selectedID }) ?? 0
         return ScrollView(.horizontal, showsIndicators: false) {
             LazyHStack(spacing: spacing) {
-                ForEach(games) { game in
+                ForEach(Array(games.enumerated()), id: \.element.id) { offset, game in
                     card(game)
                         .frame(width: cardWidth)
+                        // La del centro delante; a cada lado, las más cercanas tapan a las de detrás.
+                        .zIndex(Double(-abs(offset - selectedIndex)))
                 }
             }
             .scrollTargetLayout()
@@ -137,6 +142,24 @@ struct DockCarousel: View {
     private func cover(_ game: Game, selected: Bool) -> some View {
         let shape = RoundedRectangle(cornerRadius: 18, style: .continuous)
         return ZStack {
+            coverArt(game)
+            coverBadges(game)
+        }
+        .frame(width: cardWidth, height: cardWidth * Self.coverRatio)
+        .clipShape(shape)
+        .glassRim(in: shape)
+        .padRing(selected && focused, cornerRadius: 18)
+        .shadow(color: selected ? Color.cyan.opacity(0.45) : Color.clear, radius: 14)
+    }
+
+    @ViewBuilder
+    private func coverArt(_ game: Game) -> some View {
+        if let image = coverImage(game.id) {
+            Image(uiImage: image)
+                .resizable()
+                .scaledToFill()
+                .frame(width: cardWidth, height: cardWidth * Self.coverRatio)
+        } else {
             LinearGradient(
                 colors: [
                     game.tint.opacity(0.82),
@@ -155,13 +178,12 @@ struct DockCarousel: View {
             Image(systemName: game.symbol)
                 .font(.system(size: cardWidth * 0.34, weight: .medium))
                 .foregroundStyle(.white.opacity(0.92))
-            coverBadges(game)
         }
-        .frame(width: cardWidth, height: cardWidth * Self.coverRatio)
-        .clipShape(shape)
-        .glassRim(in: shape)
-        .padRing(selected && focused, cornerRadius: 18)
-        .shadow(color: selected ? Color.cyan.opacity(0.45) : Color.clear, radius: 14)
+    }
+
+    private func coverImage(_ id: String) -> UIImage? {
+        _ = coverVersion
+        return CoverStore.shared.image(for: id)
     }
 
     private func coverBadges(_ game: Game) -> some View {
