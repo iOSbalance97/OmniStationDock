@@ -511,7 +511,8 @@ struct HomeView: View {
                 cancel
             ])
         case .gameOptions:
-            guard let game = games.first(where: { $0.id == controllerSelectedGameID }) else { return nil }
+            let optionsID: String? = dockSelectedID(in: controllerGames)
+            guard let game = games.first(where: { $0.id == optionsID }) else { return nil }
             var items = [PadMenuItem(title: favoriteNames.contains(game.id) ? tr("Quitar de favoritos") : tr("Añadir a favoritos")) {
                 toggleFavorite(game.id)
                 closePadMenu()
@@ -924,7 +925,8 @@ struct HomeView: View {
                 }
                 return
             }
-            let current = items.firstIndex { $0.id == controllerSelectedGameID } ?? 0
+            let selectedID: String? = dockSelectedID(in: items)
+            let current: Int = items.firstIndex(where: { $0.id == selectedID }) ?? 0
             switch direction {
             case .left:
                 controllerSelectedArea = "games"
@@ -949,9 +951,9 @@ struct HomeView: View {
             controllerSelectedArea = "games"
             feedback()
         default:
-            guard let id = controllerSelectedGameID,
+            guard let id = dockSelectedID(in: controllerGames),
                   let game = controllerGames.first(where: { $0.id == id }) else { return }
-            open(game)
+            self.open(game)
         }
     }
 
@@ -968,10 +970,10 @@ struct HomeView: View {
     }
 
     private func activateDockOption(_ index: Int) {
-        guard let id = controllerSelectedGameID,
+        guard let id = dockSelectedID(in: controllerGames),
               let game = controllerGames.first(where: { $0.id == id }) else { return }
         switch index {
-        case 0: open(game)
+        case 0: self.open(game)
         case 1: showToast(tr("%@: próximamente", tr("Mando")))
         case 2: showToast(tr("%@: próximamente", tr("Rendimiento")))
         default:
@@ -1555,16 +1557,48 @@ struct HomeView: View {
          tr("Escaneo de juegos"), tr("Vincular carpeta"), tr("Acceso directo (URL)"), tr("Juegos de ejemplo"), tr("Borrar favoritos"), tr("Quitar añadidos")]
     }
 
+    /// Primer índice de cada sección de Ajustes: General, Apariencia y Juegos.
+    private static let settingSectionStarts: [Int] = [0, 8, 14]
+
+    /// Mueve la selección por la cuadrícula de Ajustes respetando las secciones:
+    /// cada sección empieza en fila nueva, también con 3 columnas en horizontal.
     private func moveSettingsSelection(_ direction: ControllerMonitor.Direction) {
-        let count = controllerSettingTitles.count
-        let columns = UIScreen.main.bounds.width > UIScreen.main.bounds.height ? 3 : 2
-        let current = min(max(controllerSelectedSettingIndex, 0), count - 1)
-        var next = current
+        let count: Int = controllerSettingTitles.count
+        guard count > 0 else { return }
+        let columns: Int = UIScreen.main.bounds.width > UIScreen.main.bounds.height ? 3 : 2
+        let current: Int = min(max(controllerSelectedSettingIndex, 0), count - 1)
+        let starts: [Int] = Self.settingSectionStarts.filter { $0 < count }
+        let section: Int = starts.lastIndex(where: { $0 <= current }) ?? 0
+        let start: Int = starts[section]
+        let end: Int = section + 1 < starts.count ? starts[section + 1] : count
+        let local: Int = current - start
+        let column: Int = local % columns
+        let lastRow: Int = (end - start - 1) / columns
+        var next: Int = current
         switch direction {
-        case .left: next = current % columns == 0 ? current : current - 1
-        case .right: next = current % columns == columns - 1 || current + 1 >= count ? current : current + 1
-        case .up: next = max(0, current - columns)
-        case .down: next = min(count - 1, current + columns)
+        case .left:
+            if column > 0 { next = current - 1 }
+        case .right:
+            if column < columns - 1, current + 1 < end { next = current + 1 }
+        case .up:
+            if local >= columns {
+                next = current - columns
+            } else if section > 0 {
+                // Última fila de la sección anterior, en la misma columna si existe.
+                let previousStart: Int = starts[section - 1]
+                let previousLastRowStart: Int = previousStart + ((start - previousStart - 1) / columns) * columns
+                next = min(previousLastRowStart + column, start - 1)
+            }
+        case .down:
+            if current + columns < end {
+                next = current + columns
+            } else if local / columns < lastRow {
+                // La última fila de la sección está incompleta: va a su último elemento.
+                next = end - 1
+            } else if end < count {
+                let nextEnd: Int = section + 2 < starts.count ? starts[section + 2] : count
+                next = min(end + column, nextEnd - 1)
+            }
         }
         controllerSelectedSettingIndex = next
         controllerSelectedArea = "settings"
@@ -1868,12 +1902,13 @@ struct HomeView: View {
     /// Inicio y Favoritos en el Modo Dock: filtros, título y carrusel de juegos.
     private func dockHome() -> some View {
         GeometryReader { geometry in
-            let isHome = selectedSection == .inicio
-            let list = isHome ? filteredGames : favoriteGames
+            let isHome: Bool = selectedSection == .inicio
+            let list: [Game] = isHome ? filteredGames : favoriteGames
             // Cabecera + filtros + título + barra inferior + separaciones.
-            let reserved = headerHeight + (isHome ? 41 : 0) + 24 + 52 + 24
-            let carouselHeight = max(150, geometry.size.height - reserved)
-            let cardWidth = min(max(carouselHeight * 0.62, 100), 190)
+            let filtersHeight: CGFloat = isHome ? 41 : 0
+            let reserved: CGFloat = headerHeight + filtersHeight + 100
+            let carouselHeight: CGFloat = max(150, geometry.size.height - reserved)
+            let cardWidth: CGFloat = min(max(carouselHeight * 0.62, 100), 190)
             VStack(spacing: 6) {
                 Color.clear.frame(height: headerHeight)
                 if isHome {
@@ -1884,8 +1919,8 @@ struct HomeView: View {
                     .padding(.horizontal, 22)
                 DockCarousel(
                     games: list,
-                    selectedID: Binding(
-                        get: { controllerSelectedGameID ?? list.first?.id },
+                    selectedID: Binding<String?>(
+                        get: { dockSelectedID(in: list) },
                         set: { controllerSelectedGameID = $0 }
                     ),
                     focused: gamepadConnected && controllerSelectedArea == "games",
@@ -1893,12 +1928,20 @@ struct HomeView: View {
                     cardWidth: cardWidth,
                     playHint: tr("Presiona ✕ para jugar"),
                     emptyText: isHome ? tr("Sin juegos en esta plataforma") : tr("Aún no hay favoritos"),
-                    onOpen: { open($0) }
+                    onOpen: { game in self.open(game) }
                 )
                 .frame(height: carouselHeight)
                 Spacer(minLength: 0)
             }
         }
+    }
+
+    /// Juego marcado en el carrusel: el seleccionado si está en la lista, si no el primero.
+    private func dockSelectedID(in list: [Game]) -> String? {
+        if let id = controllerSelectedGameID, list.contains(where: { $0.id == id }) {
+            return id
+        }
+        return list.first?.id
     }
 
     private var dockBottomBar: some View {
