@@ -1,7 +1,7 @@
 import SwiftUI
 
 /// Permite cambiar en tiempo de ejecución las orientaciones admitidas
-/// (ajustes «Dock en horizontal» y «Horizontal con HDMI»).
+/// (ajustes «Bloquear horizontal» y «Dock con HDMI»).
 final class AppDelegate: NSObject, UIApplicationDelegate {
     static var orientationMask: UIInterfaceOrientationMask = {
         UserDefaults.standard.bool(forKey: "keepLandscape") ? .landscape : .allButUpsideDown
@@ -15,6 +15,11 @@ final class AppDelegate: NSObject, UIApplicationDelegate {
 @main
 struct OmniStationDockApp: App {
     @UIApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
+
+    init() {
+        // Orbitron y Space Grotesk van dentro de la app: se registran antes de pintar nada.
+        AppFont.register()
+    }
 
     var body: some Scene {
         WindowGroup {
