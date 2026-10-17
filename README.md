@@ -1,11 +1,12 @@
-# OmniStation Dock — versión 0.1.5
+# OmniStation Dock — versión 0.1.6
 
 Esta versión incluye bienvenida animada con transición automática a la pantalla principal, interfaz espacial/Liquid Glass, buscador, filtros por plataforma, tarjetas de muestra y navegación inferior. Los juegos mostrados son ejemplos visuales; la importación y ejecución real aún no están implementadas.
+A partir de la 0.1.6 el Modo Dock, está disponible.
 
 ## Compilación
 El workflow `.github/workflows/ios-build.yml` compila una IPA sin firmar y la publica como prerelease de GitHub Release.
 
 ## Versión
-- Marketing version: `0.1.5`
-- Build: `15`
+- Marketing version: `0.1.6`
+- Build: `16`
 - Bundle ID: `com.omnistation.dock`
