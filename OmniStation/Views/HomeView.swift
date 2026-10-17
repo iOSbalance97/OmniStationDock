@@ -49,6 +49,11 @@ struct HomeView: View {
     @State private var controllerSelectedLetterIndex = 0
     @State private var controllerAlphabetSearchText = ""
     @FocusState private var controllerSearchFocused: Bool
+    // Ventanas de selección: puente con el mando y fila marcada en los menús propios.
+    @StateObject private var sheetPad = SheetPad()
+    @State private var menuIndex = 0
+    // Plataforma a la que debe desplazarse la barra de filtros.
+    @State private var platformScrollID: String?
 
     // Ajustes (se guardan en el dispositivo).
     @AppStorage("favoriteGames") private var favoritesRaw = ""
@@ -89,6 +94,7 @@ struct HomeView: View {
     @State private var dialog: SettingsDialog?
     @State private var toast: Toast?
     @State private var hdmiForced = false
+    @State private var hdmiPending = false
     @State private var hdmiTask: Task<Void, Never>?
 
     init() {
@@ -224,18 +230,11 @@ struct HomeView: View {
                     }
                 }
                 topBar(compact: landscape)
+                padMenuOverlay
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
             .overlay(alignment: .bottom) { toastOverlay }
             .onPreferenceChange(FramesKey.self) { frames = $0 }
-            .alert(tr("OmniStation Dock"), isPresented: $showAbout) {
-                Button(tr("Cerrar"), role: .cancel) {}
-            } message: {
-                Text(tr("Versión %@", appVersion) + "\nBundle ID: " + (Bundle.main.bundleIdentifier ?? "—"))
-            }
-            .confirmationDialog(dialogTitle, isPresented: dialogBinding, titleVisibility: .visible) {
-                dialogButtons
-            }
             .photosPicker(isPresented: $showPhotoPicker, selection: $photoItem, matching: .images)
             .fileImporter(isPresented: $showFolderImporter, allowedContentTypes: [.folder], allowsMultipleSelection: false) { result in
                 handleFolderPick(result)
@@ -243,11 +242,11 @@ struct HomeView: View {
             .sheet(item: $sheet) { kind in
                 switch kind {
                 case .controllers:
-                    ControllersSheet(lang: appLanguage, monitor: controllers, navigationEnabled: $controllerNavigation)
+                    ControllersSheet(lang: appLanguage, monitor: controllers, navigationEnabled: $controllerNavigation, pad: sheetPad)
                 case .platformOrder:
-                    PlatformOrderSheet(lang: appLanguage, orderRaw: $platformOrderRaw)
+                    PlatformOrderSheet(lang: appLanguage, orderRaw: $platformOrderRaw, pad: sheetPad)
                 case .addShortcut:
-                    AddShortcutSheet(lang: appLanguage) { addShortcut($0) }
+                    AddShortcutSheet(lang: appLanguage, pad: sheetPad) { addShortcut($0) }
                 }
             }
             .onChange(of: photoItem) { _, item in
@@ -255,6 +254,8 @@ struct HomeView: View {
                 Task { await applyBackground(from: item) }
             }
             .onChange(of: showSampleGames) { _, _ in refreshLibrary() }
+            .onChange(of: dialog) { _, _ in menuIndex = 0 }
+            .onChange(of: showAbout) { _, _ in menuIndex = 0 }
             .onChange(of: selectedSection) { _, section in
                 if section == .inicio { refreshLibrary() }
                 controllerSelectedGameID = controllerGames.first?.id
@@ -294,14 +295,23 @@ struct HomeView: View {
             .onAppear {
                 controllers.navigationEnabled = controllerNavigation
                 controllers.onShoulder = { step in
+                    // Con una ventana abierta, la interfaz de detrás no se mueve.
+                    guard !modalActive else { return }
                     // En Ajustes los hombros no cambian de plataforma: no hay filtros visibles.
                     guard selectedSection != .ajustes, selectedSection != .favoritos else { return }
                     cyclePlatform(step)
                 }
-                controllers.onTrigger = { step in cycleSection(step) }
+                controllers.onTrigger = { step in
+                    guard !modalActive else { return }
+                    cycleSection(step)
+                }
                 controllers.onCancel = { handleControllerCancel() }
-                controllers.onDirection = { direction in moveControllerSelection(direction) }
-                controllers.onAccept = { activateControllerSelection() }
+                controllers.onDirection = { direction in
+                    if modalActive { routeModalDirection(direction) } else { moveControllerSelection(direction) }
+                }
+                controllers.onAccept = {
+                    if modalActive { routeModalAccept() } else { activateControllerSelection() }
+                }
                 if keepLandscape {
                     DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) {
                         OrientationController.apply(landscape: true)
@@ -404,60 +414,172 @@ struct HomeView: View {
         }
     }
 
-    // MARK: - Diálogos de ajustes
+    // MARK: - Ventanas de selección (se manejan también con el mando)
 
-    private var dialogBinding: Binding<Bool> {
-        Binding(get: { dialog != nil }, set: { if !$0 { dialog = nil } })
+    private struct PadMenuItem {
+        enum Kind { case normal, destructive, cancel }
+        let title: String
+        var kind: Kind = .normal
+        let action: () -> Void
     }
 
-    private var dialogTitle: String {
+    private var systemPickerOpen: Bool { showPhotoPicker || showFolderImporter }
+
+    /// Hay una ventana encima: la interfaz de detrás no debe recibir el mando.
+    private var modalActive: Bool {
+        dialog != nil || showAbout || sheet != nil || systemPickerOpen
+    }
+
+    private func closePadMenu() {
+        dialog = nil
+        showAbout = false
+    }
+
+    private var padMenu: (title: String, message: String?, items: [PadMenuItem])? {
+        if showAbout {
+            return (
+                tr("OmniStation Dock"),
+                tr("Versión %@", appVersion) + "\nBundle ID: " + (Bundle.main.bundleIdentifier ?? "—"),
+                [PadMenuItem(title: tr("Cerrar"), kind: .cancel) { closePadMenu() }]
+            )
+        }
+        guard let dialog else { return nil }
+        let cancel = PadMenuItem(title: tr("Cancelar"), kind: .cancel) { closePadMenu() }
         switch dialog {
-        case .language: return tr("Idioma")
-        case .background: return tr("Fondo personalizado")
-        case .clearFavorites: return tr("¿Borrar todos los favoritos?")
-        case .clearLibrary: return tr("¿Quitar los juegos añadidos?")
-        case nil: return ""
+        case .language:
+            return (tr("Idioma"), nil, [
+                PadMenuItem(title: tr("Sistema")) { appLanguage = "system"; closePadMenu() },
+                PadMenuItem(title: "Español") { appLanguage = "es"; closePadMenu() },
+                PadMenuItem(title: "English") { appLanguage = "en"; closePadMenu() },
+                cancel
+            ])
+        case .background:
+            return (tr("Fondo personalizado"), nil, [
+                PadMenuItem(title: tr("Elegir otra imagen")) {
+                    closePadMenu()
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) { showPhotoPicker = true }
+                },
+                PadMenuItem(title: tr("Restaurar fondo"), kind: .destructive) {
+                    BackgroundStore.remove()
+                    customBackground = nil
+                    closePadMenu()
+                    showToast(tr("Fondo restaurado"))
+                },
+                cancel
+            ])
+        case .clearFavorites:
+            return (tr("¿Borrar todos los favoritos?"), nil, [
+                PadMenuItem(title: tr("Borrar favoritos"), kind: .destructive) { favoritesRaw = ""; closePadMenu() },
+                cancel
+            ])
+        case .clearLibrary:
+            return (tr("¿Quitar los juegos añadidos?"), nil, [
+                PadMenuItem(title: tr("Quitar juegos"), kind: .destructive) { setLibrary([]); closePadMenu() },
+                cancel
+            ])
         }
     }
 
     @ViewBuilder
-    private var dialogButtons: some View {
-        switch dialog {
-        case .language:
-            Button(tr("Sistema")) { appLanguage = "system" }
-            Button("Español") { appLanguage = "es" }
-            Button("English") { appLanguage = "en" }
-        case .background:
-            Button(tr("Elegir otra imagen")) {
-                DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) { showPhotoPicker = true }
+    private var padMenuOverlay: some View {
+        if let menu = padMenu {
+            ZStack {
+                Color.black.opacity(0.55)
+                    .ignoresSafeArea()
+                    .onTapGesture { closePadMenu() }
+                VStack(spacing: 14) {
+                    Text(menu.title)
+                        .font(.system(size: 17, weight: .bold, design: .rounded))
+                        .foregroundStyle(.white)
+                        .multilineTextAlignment(.center)
+                    if let message = menu.message {
+                        Text(message)
+                            .font(.system(size: 12))
+                            .foregroundStyle(.white.opacity(0.6))
+                            .multilineTextAlignment(.center)
+                    }
+                    VStack(spacing: 8) {
+                        ForEach(menu.items.indices, id: \.self) { index in
+                            padMenuButton(menu.items[index], selected: index == menuIndex)
+                        }
+                    }
+                }
+                .padding(18)
+                .frame(maxWidth: 340)
+                .glassCard(cornerRadius: 26)
+                .padding(24)
             }
-            Button(tr("Restaurar fondo"), role: .destructive) {
-                BackgroundStore.remove()
-                customBackground = nil
-                showToast(tr("Fondo restaurado"))
-            }
-        case .clearFavorites:
-            Button(tr("Borrar favoritos"), role: .destructive) { favoritesRaw = "" }
-        case .clearLibrary:
-            Button(tr("Quitar juegos"), role: .destructive) { setLibrary([]) }
-        case nil:
-            EmptyView()
+            .transition(.opacity)
         }
-        Button(tr("Cancelar"), role: .cancel) {}
+    }
+
+    private func padMenuButton(_ item: PadMenuItem, selected: Bool) -> some View {
+        let color: Color = item.kind == .destructive ? Color.red : (item.kind == .cancel ? Color.white.opacity(0.8) : Color.cyan)
+        return Button {
+            item.action()
+        } label: {
+            Text(item.title)
+                .font(.system(size: 15, weight: .semibold))
+                .foregroundStyle(color)
+                .frame(maxWidth: .infinity)
+                .padding(.vertical, 13)
+                .liquidGlass(
+                    in: RoundedRectangle(cornerRadius: 14, style: .continuous),
+                    tint: selected ? Color.cyan : nil,
+                    interactive: true
+                )
+                .padRing(selected, cornerRadius: 14)
+        }
+        .buttonStyle(.plain)
+    }
+
+    private func routeModalDirection(_ direction: ControllerMonitor.Direction) {
+        if let menu = padMenu {
+            switch direction {
+            case .up: menuIndex = max(0, menuIndex - 1)
+            case .down: menuIndex = min(menu.items.count - 1, menuIndex + 1)
+            default: break
+            }
+            feedback()
+            return
+        }
+        if sheet != nil {
+            switch direction {
+            case .up: sheetPad.send(.up)
+            case .down: sheetPad.send(.down)
+            case .left: sheetPad.send(.left)
+            case .right: sheetPad.send(.right)
+            }
+        }
+        // Los selectores del sistema (fotos, carpetas) no se pueden mover con el mando.
+    }
+
+    private func routeModalAccept() {
+        if let menu = padMenu {
+            let index = min(max(menuIndex, 0), menu.items.count - 1)
+            feedback()
+            menu.items[index].action()
+            return
+        }
+        if sheet != nil { sheetPad.send(.accept) }
     }
 
     // MARK: - HDMI y orientación
 
     private func handleHDMI(_ connected: Bool) {
         hdmiTask?.cancel()
+        hdmiPending = false
         if connected {
             guard hdmiAutoLandscape, !hdmiForced else { return }
+            hdmiPending = true
             showToast(tr("Pantalla HDMI detectada. Cambiando a horizontal…"), seconds: 3, actionTitle: tr("Cancelar")) {
                 hdmiTask?.cancel()
+                hdmiPending = false
             }
             hdmiTask = Task {
                 try? await Task.sleep(nanoseconds: 3_000_000_000)
                 guard !Task.isCancelled else { return }
+                hdmiPending = false
                 hdmiForced = true
                 OrientationController.apply(landscape: true)
             }
@@ -468,6 +590,7 @@ struct HomeView: View {
 
     private func releaseHDMILandscape() {
         hdmiTask?.cancel()
+        hdmiPending = false
         guard hdmiForced else { return }
         hdmiForced = false
         OrientationController.apply(landscape: keepLandscape)
@@ -484,8 +607,6 @@ struct HomeView: View {
     }
 
     private func moveControllerSelection(_ direction: ControllerMonitor.Direction) {
-        // Si hay una ventana de selección abierta, no mover la interfaz que queda detrás.
-        guard sheet == nil, dialog == nil, !showAbout, !showPhotoPicker, !showFolderImporter else { return }
         if selectedSection == .ajustes {
             moveSettingsSelection(direction)
             return
@@ -511,19 +632,12 @@ struct HomeView: View {
         // Navegación geométrica: solo se cambia de zona al llegar al borde real
         // de la cuadrícula, nunca por pulsar arriba desde cualquier fila.
         if selectedSection == .busqueda, controllerSelectedArea == "search" {
-            switch direction {
-            case .up:
-                controllerSelectedArea = "alphabet"
-                controllerSelectedLetterIndex = 0
-                controllerSearchFocused = false
-            case .down:
+            if direction == .down {
                 controllerSelectedArea = "games"
                 controllerSelectedGameID = controllerGames.first?.id
                 controllerSearchFocused = false
-            case .left, .right:
-                break
+                feedback()
             }
-            feedback()
             return
         }
 
@@ -611,8 +725,6 @@ struct HomeView: View {
     }
 
     private func activateControllerSelection() {
-        // Los botones de la ventana/modal deben recibir la acción antes que Ajustes.
-        guard sheet == nil, dialog == nil, !showAbout, !showPhotoPicker, !showFolderImporter else { return }
         if selectedSection == .ajustes {
             activateSelectedSetting()
             return
@@ -658,42 +770,48 @@ struct HomeView: View {
         withAnimation(.easeInOut(duration: 0.18)) { selectedPlatform = next }
     }
 
+    /// ○ / B: cancela lo que se esté haciendo, de lo más reciente a lo más antiguo.
+    /// Solo vuelve a Inicio cuando ya no queda nada que cancelar.
     private func handleControllerCancel() {
-        // Primero se cierra siempre la interfaz modal, sin actuar sobre la pantalla del fondo.
+        // 1) Ventanas abiertas (la de más arriba primero).
         if showPhotoPicker { showPhotoPicker = false; return }
         if showFolderImporter { showFolderImporter = false; return }
-        if dialog != nil { dialog = nil; return }
-        if showAbout { showAbout = false; return }
-        if sheet != nil { sheet = nil; return }
-
-        // En Búsqueda, O/B retrocede dentro de la acción actual; no cambia de sección.
-        if selectedSection == .busqueda {
-            if controllerSelectedArea == "alphabet" {
-                controllerSelectedArea = "search"
-                controllerSearchFocused = false
-                feedback()
-                return
-            }
-            if controllerSelectedArea == "search" {
-                controllerSelectedArea = "games"
-                controllerSearchFocused = false
-                feedback()
-                return
-            }
-            if !searchText.isEmpty {
-                searchText = ""
-                controllerAlphabetSearchText = ""
-                feedback()
-                return
-            }
-        }
-
-        if selectedSection != .inicio {
-            selectedSection = .inicio
+        if showAbout || dialog != nil { closePadMenu(); return }
+        if sheet != nil {
+            if !sheetPad.send(.cancel) { sheet = nil }
             return
         }
-        if selectedPlatform != "Todos" { selectedPlatform = "Todos" }
-        else if !searchText.isEmpty { searchText = "" }
+        // 2) Giro a horizontal por HDMI en cuenta atrás.
+        if hdmiPending {
+            hdmiTask?.cancel()
+            hdmiPending = false
+            showToast(tr("Giro a horizontal cancelado"))
+            return
+        }
+        // 3) Teclado del mando: sale del teclado y deja marcada la barra de búsqueda.
+        if selectedSection == .busqueda, controllerSelectedArea == "alphabet" {
+            controllerSelectedArea = "search"
+            feedback()
+            return
+        }
+        // 4) Búsqueda escrita.
+        if selectedSection == .busqueda, !searchText.isEmpty {
+            searchText = ""
+            controllerAlphabetSearchText = ""
+            feedback()
+            return
+        }
+        // 5) Filtro de plataforma.
+        if (selectedSection == .inicio || selectedSection == .busqueda), selectedPlatform != "Todos" {
+            withAnimation(.easeInOut(duration: 0.18)) { selectedPlatform = "Todos" }
+            feedback()
+            return
+        }
+        // 6) Nada más que cancelar: vuelve a Inicio.
+        if selectedSection != .inicio {
+            feedback()
+            withAnimation(.easeInOut(duration: 0.2)) { selectedSection = .inicio }
+        }
     }
 
     // MARK: - Biblioteca: abrir, favoritos, escaneo
@@ -847,53 +965,60 @@ struct HomeView: View {
         ScrollViewReader { proxy in
             ScrollView(showsIndicators: false) {
                 VStack(spacing: 0) {
-                    Color.clear.frame(height: 1).id("scroll-top")
+                    // Punto de anclaje en el borde superior: para volver exactamente arriba.
+                    Color.clear.frame(height: 0).id("screen-top")
                     content()
-                }
-                    .padding(.horizontal, 16)
-                    .padding(.top, headerHeight + topGap)
-                    .padding(.bottom, 44)
-                    .reportFrame("content")
-            }
-            .onChange(of: controllerSelectedGameID) { _, id in
-                guard let id else { return }
-                let items = controllerGames
-                let index = items.firstIndex(where: { $0.id == id }) ?? 0
-                let landscape = UIScreen.main.bounds.width > UIScreen.main.bounds.height
-                let columns = landscape ? (selectedSection == .inicio ? 3 : 4) : (compactGrid ? 3 : 2)
-                if index < columns {
-                    // La primera fila debe volver al inicio real del scroll, sin dejar
-                    // el contenido atrapado en una posición intermedia.
-                    withAnimation(.easeOut(duration: 0.22)) {
-                        proxy.scrollTo("scroll-top", anchor: .top)
-                    }
-                } else {
-                    withAnimation(.easeInOut(duration: 0.2)) {
-                        proxy.scrollTo("game-\(id)", anchor: .center)
-                    }
+                        .padding(.horizontal, 16)
+                        .padding(.top, headerHeight + topGap)
+                        .padding(.bottom, 44)
+                        .reportFrame("content")
                 }
             }
-            .onChange(of: controllerSelectedArea) { _, area in
-                let target: String?
-                switch area {
-                case "featured": target = "featured-panel"
-                case "search": target = "search-bar"
-                case "alphabet": target = "alphabet-bar"
-                case "settings": target = "setting-\(controllerSelectedSettingIndex)"
-                default: target = controllerSelectedGameID.map { "game-\($0)" }
-                }
-                if let target {
-                    withAnimation(.easeInOut(duration: 0.2)) { proxy.scrollTo(target, anchor: .top) }
-                }
-            }
-            .onChange(of: controllerSelectedSettingIndex) { _, index in
-                withAnimation(.easeInOut(duration: 0.2)) {
-                    proxy.scrollTo("setting-\(index)", anchor: index < 4 ? .top : .center)
-                }
-            }
+            .onChange(of: controllerSelectedGameID) { _, _ in scrollToSelection(proxy) }
+            .onChange(of: controllerSelectedArea) { _, _ in scrollToSelection(proxy) }
+            .onChange(of: controllerSelectedSettingIndex) { _, _ in scrollToSelection(proxy) }
             .reportFrame("scroll")
             .edgeFade(clear: fadeClearHeight, fade: headerHeight, bottom: Self.bottomFadeHeight)
         }
+    }
+
+    /// Lleva la pantalla hasta lo seleccionado. Si la selección está en las primeras filas
+    /// (o en la parte de arriba), la pantalla sube del todo para que la interfaz quede ajustada.
+    private func scrollToSelection(_ proxy: ScrollViewProxy) {
+        withAnimation(.easeInOut(duration: 0.2)) {
+            switch controllerSelectedArea {
+            case "featured", "search", "alphabet":
+                proxy.scrollTo("screen-top", anchor: .top)
+            case "settings":
+                if controllerSelectedSettingIndex < 6 {
+                    proxy.scrollTo("screen-top", anchor: .top)
+                } else {
+                    proxy.scrollTo("setting-\(controllerSelectedSettingIndex)", anchor: .center)
+                }
+            default:
+                guard let id = controllerSelectedGameID else { return }
+                if gameFitsFromTop(id) {
+                    proxy.scrollTo("screen-top", anchor: .top)
+                } else {
+                    proxy.scrollTo("game-\(id)", anchor: .center)
+                }
+            }
+        }
+    }
+
+    /// ¿Se vería entera la fila de este juego con la pantalla arriba del todo?
+    private func gameFitsFromTop(_ id: String) -> Bool {
+        guard let index = controllerGames.firstIndex(where: { $0.id == id }) else { return false }
+        let landscape = UIScreen.main.bounds.width > UIScreen.main.bounds.height
+        let columns = landscape ? (selectedSection == .inicio ? 3 : 4) : (compactGrid ? 3 : 2)
+        let row = index / columns
+        guard let first = frames["firstTile"], let content = frames["content"],
+              let header = frames["header"], let scroll = frames["scroll"] else { return row <= 1 }
+        let spacing: CGFloat = (landscape || compactGrid) ? 10 : 13
+        // Dónde estaría la primera fila si la pantalla estuviera arriba del todo.
+        let firstTop = header.minY + (first.minY - content.minY)
+        let rowBottom = firstTop + CGFloat(row + 1) * first.height + CGFloat(row) * spacing
+        return rowBottom <= scroll.maxY - 56
     }
 
     private func screenTitle(_ title: String, subtitle: String) -> some View {
@@ -1071,7 +1196,6 @@ struct HomeView: View {
     }
 
     private func platformFilters(compact: Bool) -> some View {
-        ScrollViewReader { proxy in
         ScrollView(.horizontal, showsIndicators: false) {
             HStack(spacing: 8) {
                 ForEach(platforms, id: \.name) { platform in
@@ -1107,20 +1231,18 @@ struct HomeView: View {
                     .buttonStyle(ControllerFocusableButtonStyle())
                     .focusable()
                     .contentShape(Capsule())
-                    .id("platform-\(platform.name)")
                 }
             }
+            .scrollTargetLayout()
             .padding(.horizontal, 12)
             .padding(.vertical, 8)
         }
+        // La barra sigue a la plataforma elegida (con el mando o con el dedo).
+        .scrollPosition(id: $platformScrollID, anchor: .center)
         .onChange(of: selectedPlatform) { _, value in
-            withAnimation(.easeInOut(duration: 0.28)) {
-                proxy.scrollTo("platform-\(value)", anchor: .center)
-            }
+            withAnimation(.easeInOut(duration: 0.25)) { platformScrollID = value }
         }
-        .onAppear {
-            proxy.scrollTo("platform-\(selectedPlatform)", anchor: .center)
-        }
+        .onAppear { platformScrollID = selectedPlatform }
         // Fade the scroll edges instead of covering the first/last chips with overlays.
         .mask {
             LinearGradient(
@@ -1133,7 +1255,6 @@ struct HomeView: View {
                 startPoint: .leading,
                 endPoint: .trailing
             )
-        }
         }
     }
 
@@ -1167,6 +1288,7 @@ struct HomeView: View {
                     onRemove: remove
                 )
                 .id("game-\(game.id)")
+                .reportFrame("firstTile", if: game.id == items.first?.id)
             }
         }
     }
@@ -1177,7 +1299,7 @@ struct HomeView: View {
         screen {
             VStack(alignment: .leading, spacing: 18) {
                 screenTitle(tr("Búsqueda"), subtitle: tr("Encuentra un juego o filtra por plataforma."))
-                if gamepadConnected && controllerSelectedArea == "alphabet" {
+                if gamepadConnected {
                     controllerAlphabetBar
                 } else {
                     searchBar
@@ -1227,13 +1349,7 @@ struct HomeView: View {
         .padding(12)
         .glassCard()
         .id("alphabet-bar")
-        .overlay {
-            if gamepadConnected && selectedSection == .busqueda && controllerSelectedArea == "alphabet" {
-                RoundedRectangle(cornerRadius: 18, style: .continuous)
-                    .stroke(Color.cyan.opacity(0.98), lineWidth: 2)
-                    .allowsHitTesting(false)
-            }
-        }
+        .padRing(selectedSection == .busqueda && (controllerSelectedArea == "search" || controllerSelectedArea == "alphabet"), cornerRadius: 18)
     }
 
     // MARK: - Favoritos
