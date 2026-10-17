@@ -38,8 +38,10 @@ struct HomeView: View {
     @State private var searchText = ""
     @State private var selectedPlatform = "Todos"
     @State private var selectedSection: DockSection = .inicio
-    // Posiciones medidas en pantalla: "header", "scroll" (zona de scroll) y "content" (contenido).
-    @State private var frames: [String: CGRect] = [:]
+    // Medidas de la cabecera y del scroll: solo repintan cuando cambian de verdad.
+    @StateObject private var metrics = LayoutMetrics()
+    // Desplazamiento vertical: lo observa solo el título (con @State no repinta esta vista).
+    @State private var scrollProgress = ScrollProgress()
     @State private var featuredIndex = 0
     // Selección explícita para la cruceta: no dependemos del focus automático de SwiftUI.
     @State private var controllerSelectedGameID: String?
@@ -63,10 +65,8 @@ struct HomeView: View {
     @AppStorage("showWelcome") private var showWelcome = true
     @AppStorage("hapticsEnabled") private var hapticsEnabled = true
     @AppStorage("clickSound") private var clickSound = false
-    @AppStorage("showHeaderLogo") private var showHeaderLogo = false
     @AppStorage("keepLandscape") private var keepLandscape = false
     @AppStorage("hdmiAutoLandscape") private var hdmiAutoLandscape = false
-    @AppStorage("controllerNavigation") private var controllerNavigation = true
     @AppStorage("appLanguage") private var appLanguage = "system"
     @AppStorage("platformOrder") private var platformOrderRaw = ""
     @AppStorage("showSampleGames") private var showSampleGames = true
@@ -100,6 +100,10 @@ struct HomeView: View {
     @State private var hdmiForced = false
     @State private var hdmiPending = false
     @State private var hdmiTask: Task<Void, Never>?
+    // Enlace con el que se abre «Añadir acceso directo» (vacío o el de LiveContainer).
+    @State private var shortcutInitialURL = ""
+    // Estado de JIT en esta app (se comprueba al abrir Ajustes y al volver a la app).
+    @State private var jitEnabled = false
 
     init() {
         let library = LibraryStore.load()
@@ -199,33 +203,8 @@ struct HomeView: View {
 
     // MARK: - Medidas de la cabecera
 
-    // Puntos de scroll en los que el título termina de desvanecerse (menos = más rápido).
-    private static let titleCollapseDistance: CGFloat = 36
-    // Altura de la barra superior mientras no se ha medido.
-    private static let defaultHeaderHeight: CGFloat = 57
     // Altura del desvanecimiento inferior.
     private static let bottomFadeHeight: CGFloat = 64
-
-    private var headerHeight: CGFloat {
-        frames["header"]?.height ?? Self.defaultHeaderHeight
-    }
-
-    /// Cuánto ha subido el contenido respecto a su posición de reposo (0 sin deslizar).
-    private var scrollOffset: CGFloat {
-        guard let header = frames["header"], let content = frames["content"] else { return 0 }
-        return max(0, header.minY - content.minY)
-    }
-
-    /// 0 = título visible, 1 = oculto del todo.
-    private var titleHidden: CGFloat {
-        min(1, scrollOffset / Self.titleCollapseDistance)
-    }
-
-    /// Zona por encima de la barra (p. ej. bajo la barra de estado) donde el contenido no se ve.
-    private var fadeClearHeight: CGFloat {
-        guard let header = frames["header"], let scroll = frames["scroll"] else { return 0 }
-        return max(0, header.minY - scroll.minY)
-    }
 
     // MARK: - Cuerpo
 
@@ -295,7 +274,7 @@ struct HomeView: View {
         view
             .overlay(alignment: .bottom) { dockBottomOverlay(dock) }
             .overlay(alignment: .bottom) { toastOverlay }
-            .onPreferenceChange(FramesKey.self) { frames = $0 }
+            .onPreferenceChange(FramesKey.self) { value in handleFrames(value) }
     }
 
     private func withPresentations<V: View>(_ view: V) -> some View {
@@ -313,11 +292,11 @@ struct HomeView: View {
     private func sheetView(_ kind: HomeSheet) -> some View {
         switch kind {
         case .controllers:
-            ControllersSheet(lang: appLanguage, monitor: controllers, navigationEnabled: $controllerNavigation, pad: sheetPad)
+            ControllersSheet(lang: appLanguage, monitor: controllers, pad: sheetPad)
         case .platformOrder:
             PlatformOrderSheet(lang: appLanguage, orderRaw: $platformOrderRaw, pad: sheetPad)
         case .addShortcut:
-            AddShortcutSheet(lang: appLanguage, pad: sheetPad) { item in
+            AddShortcutSheet(lang: appLanguage, pad: sheetPad, initialURL: shortcutInitialURL) { item in
                 addShortcut(item)
             }
         }
@@ -329,10 +308,12 @@ struct HomeView: View {
             .onChange(of: showSampleGames) { _, _ in refreshLibrary() }
             .onChange(of: dialog) { _, _ in menuIndex = 0 }
             .onChange(of: showAbout) { _, _ in menuIndex = 0 }
-            .onChange(of: controllerNavigation) { _, value in controllers.navigationEnabled = value }
             .onChange(of: keepLandscape) { _, value in handleKeepLandscapeChange(value) }
             .onChange(of: hdmi.isConnected) { _, connected in handleHDMI(connected) }
             .onChange(of: hdmiAutoLandscape) { _, enabled in handleHDMIAutoChange(enabled) }
+            .onReceive(NotificationCenter.default.publisher(for: UIApplication.didBecomeActiveNotification)) { _ in
+                refreshJITStatus(announce: false)
+            }
     }
 
     private func withNavigationObservers<V: View>(_ view: V) -> some View {
@@ -345,6 +326,31 @@ struct HomeView: View {
     }
 
     // MARK: - Reacciones a cambios
+
+    /// Medidas de pantalla: se guardan sin repintar; en iOS 17 también dan el desplazamiento.
+    private func handleFrames(_ value: [String: CGRect]) {
+        let offset: CGFloat? = metrics.update(value)
+        if !ScrollSupport.hasScrollGeometry, let offset {
+            scrollProgress.set(offset)
+        }
+    }
+
+    private func refreshJITStatus(announce: Bool) {
+        jitEnabled = DebugSupport.isJITEnabled
+        if announce {
+            showToast(jitEnabled ? tr("JIT activo en esta app") : tr("JIT no activo en esta app"))
+        }
+    }
+
+    /// Abre otra app (StikDebug, LiveContainer…) y avisa si no se puede.
+    private func openExternal(_ url: URL?, failure: String) {
+        guard let url else { return }
+        UIApplication.shared.open(url) { success in
+            if !success {
+                DispatchQueue.main.async { showToast(failure) }
+            }
+        }
+    }
 
     private func handlePhotoItem(_ item: PhotosPickerItem?) {
         guard let item else { return }
@@ -364,7 +370,10 @@ struct HomeView: View {
     }
 
     private func handleSectionChange(_ section: DockSection) {
+        // La pantalla nueva empieza arriba: el título debe verse entero.
+        scrollProgress.set(0)
         if section == .inicio { refreshLibrary() }
+        if section == .ajustes { refreshJITStatus(announce: false) }
         controllerSelectedGameID = controllerGames.first?.id
         controllerSearchFocused = false
         // En el Modo Dock, al cambiar de pestaña con el mando se queda en la barra de pestañas.
@@ -388,6 +397,7 @@ struct HomeView: View {
     }
 
     private func handleControllerCountChange(_ count: Int) {
+        sheetPad.gamepadConnected = count > 0
         guard selectedSection == .busqueda else { return }
         controllerSelectedArea = count > 0 ? "search" : "games"
         controllerSearchFocused = false
@@ -400,7 +410,10 @@ struct HomeView: View {
     }
 
     private func handleAppear() {
-        controllers.navigationEnabled = controllerNavigation
+        // El mando siempre maneja la interfaz.
+        controllers.navigationEnabled = true
+        sheetPad.gamepadConnected = gamepadConnected
+        refreshJITStatus(announce: false)
         controllers.onShoulder = { step in handleShoulder(step) }
         controllers.onTrigger = { step in handleTrigger(step) }
         controllers.onCancel = { handleControllerCancel() }
@@ -519,7 +532,7 @@ struct HomeView: View {
         if let toast {
             HStack(spacing: 14) {
                 Text(toast.text)
-                    .font(.system(size: 13, weight: .semibold))
+                    .font(AppFont.text(13, .semibold))
                     .foregroundStyle(.white)
                     .multilineTextAlignment(.leading)
                 if let title = toast.actionTitle, let action = toast.action {
@@ -527,10 +540,9 @@ struct HomeView: View {
                         action()
                         withAnimation(.easeInOut(duration: 0.25)) { self.toast = nil }
                     }
-                    .font(.system(size: 13, weight: .bold))
+                    .font(AppFont.text(13, .bold))
                     .foregroundStyle(Color.cyan)
                     .buttonStyle(ControllerFocusableButtonStyle())
-                    .focusable()
                 }
             }
             .padding(.horizontal, 16)
@@ -632,12 +644,12 @@ struct HomeView: View {
                     .onTapGesture { closePadMenu() }
                 VStack(spacing: 14) {
                     Text(menu.title)
-                        .font(.system(size: 17, weight: .bold, design: .rounded))
+                        .font(AppFont.text(17, .bold))
                         .foregroundStyle(.white)
                         .multilineTextAlignment(.center)
                     if let message = menu.message {
                         Text(message)
-                            .font(.system(size: 12))
+                            .font(AppFont.text(12))
                             .foregroundStyle(.white.opacity(0.6))
                             .multilineTextAlignment(.center)
                     }
@@ -656,16 +668,18 @@ struct HomeView: View {
         }
     }
 
-    private func padMenuButton(_ item: PadMenuItem, selected: Bool) -> some View {
+    private func padMenuButton(_ item: PadMenuItem, selected rawSelected: Bool) -> some View {
+        let selected: Bool = rawSelected && gamepadConnected
         let color: Color = item.kind == .destructive ? Color.red : (item.kind == .cancel ? Color.white.opacity(0.8) : Color.cyan)
         return Button {
             item.action()
         } label: {
             Text(item.title)
-                .font(.system(size: 15, weight: .semibold))
+                .font(AppFont.text(15, .semibold))
                 .foregroundStyle(color)
                 .frame(maxWidth: .infinity)
                 .padding(.vertical, 13)
+                .contentShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
                 .liquidGlass(
                     in: RoundedRectangle(cornerRadius: 14, style: .continuous),
                     tint: selected ? Color.cyan : nil,
@@ -673,7 +687,7 @@ struct HomeView: View {
                 )
                 .padRing(selected, cornerRadius: 14)
         }
-        .buttonStyle(.plain)
+        .buttonStyle(ControllerFocusableButtonStyle())
     }
 
     private func routeModalDirection(_ direction: ControllerMonitor.Direction) {
@@ -768,9 +782,15 @@ struct HomeView: View {
                 controllerSelectedArea = "games"
                 controllerSelectedGameID = controllerGames.first?.id
             case .left:
-                if !featured.isEmpty { featuredIndex = (featuredIndex - 1 + featured.count) % featured.count }
+                if !featured.isEmpty {
+                    let previousFeatured: Int = (featuredIndex - 1 + featured.count) % featured.count
+                    withAnimation(.easeInOut(duration: 0.3)) { featuredIndex = previousFeatured }
+                }
             case .right:
-                if !featured.isEmpty { featuredIndex = (featuredIndex + 1) % featured.count }
+                if !featured.isEmpty {
+                    let nextFeatured: Int = (featuredIndex + 1) % featured.count
+                    withAnimation(.easeInOut(duration: 0.3)) { featuredIndex = nextFeatured }
+                }
             case .up: break
             }
             feedback()
@@ -1152,69 +1172,11 @@ struct HomeView: View {
 
     private func topBar(compact: Bool) -> some View {
         HStack(spacing: 0) {
-            // Título (y logo, si se activa): se desvanecen y suben un poco mientras se desliza.
-            HStack(spacing: compact ? 10 : 12) {
-                if showHeaderLogo {
-                    Image("OmniLogo")
-                        .resizable()
-                        .interpolation(.high)
-                        .scaledToFit()
-                        .frame(width: compact ? 40 : 48, height: compact ? 40 : 48)
-                        .clipShape(RoundedRectangle(cornerRadius: compact ? 11 : 14, style: .continuous))
-                        .shadow(color: .cyan.opacity(0.24), radius: 9)
-                }
-
-                HStack(spacing: 5) {
-                    Text("OmniStation")
-                        .foregroundStyle(.white)
-                    Text("Dock")
-                        .foregroundStyle(Color(red: 0.08, green: 0.68, blue: 1.0))
-                }
-                .font(.system(size: compact ? (showHeaderLogo ? 18 : 22) : (showHeaderLogo ? 20 : 25), weight: .bold, design: .rounded))
-                .tracking(-0.5)
-                .lineLimit(1)
-                .fixedSize(horizontal: false, vertical: true)
-                .minimumScaleFactor(0.82)
-                .layoutPriority(1)
-                .shadow(color: Color.cyan.opacity(0.12), radius: 8, y: 0)
-            }
-            .opacity(1 - titleHidden)
-            .offset(y: -10 * titleHidden)
-            .scaleEffect(1 - 0.06 * titleHidden, anchor: .leading)
-
+            // El título se desvanece al deslizar; solo él se repinta con el desplazamiento.
+            HeaderTitle(progress: scrollProgress, size: 22)
             Spacer(minLength: 8)
-
-            HStack(spacing: 6) {
-                ForEach(DockSection.allCases, id: \.self) { section in
-                    Button {
-                        feedback()
-                        withAnimation(.easeInOut(duration: 0.2)) {
-                            selectedSection = section
-                        }
-                    } label: {
-                        Image(systemName: section.symbol)
-                            .font(.system(size: compact ? 15 : 17, weight: .semibold))
-                            .foregroundStyle(selectedSection == section ? Color.cyan : .white.opacity(0.76))
-                            .frame(width: compact ? 36 : 40, height: compact ? 36 : 40)
-                            .liquidGlass(
-                                in: RoundedRectangle(cornerRadius: 13, style: .continuous),
-                                tint: selectedSection == section ? Color.cyan : nil,
-                                interactive: true
-                            )
-                            .overlay {
-                                if selectedSection == section {
-                                    RoundedRectangle(cornerRadius: 13, style: .continuous)
-                                        .strokeBorder(Color.cyan.opacity(0.9), lineWidth: 1.2)
-                                }
-                            }
-                            .shadow(color: selectedSection == section ? Color.cyan.opacity(0.42) : .clear, radius: 12, y: 0)
-                    }
-                    .buttonStyle(ControllerFocusableButtonStyle())
-                    .focusable()
-                    .accessibilityLabel(tr(section.rawValue))
-                }
-            }
-            .layoutPriority(2)
+            tabButtons(compact: compact)
+                .layoutPriority(2)
         }
         .padding(.horizontal, 12)
         .padding(.top, 8)
@@ -1222,74 +1184,151 @@ struct HomeView: View {
         .reportFrame("header")
     }
 
+    /// Botones de las pestañas principales (los mismos en vertical y en el Modo Dock).
+    private func tabButtons(compact: Bool) -> some View {
+        HStack(spacing: 6) {
+            ForEach(DockSection.allCases, id: \.self) { section in
+                tabButton(section, compact: compact)
+            }
+        }
+    }
+
+    private func tabButton(_ section: DockSection, compact: Bool) -> some View {
+        let isSelected: Bool = selectedSection == section
+        let side: CGFloat = compact ? 36 : 40
+        let shape = RoundedRectangle(cornerRadius: 13, style: .continuous)
+        let tint: Color? = isSelected ? Color.cyan : nil
+        return Button {
+            feedback()
+            withAnimation(.easeInOut(duration: 0.2)) {
+                selectedSection = section
+            }
+        } label: {
+            Image(systemName: section.symbol)
+                .font(.system(size: compact ? 15 : 17, weight: .semibold))
+                .foregroundStyle(isSelected ? Color.cyan : Color.white.opacity(0.76))
+                .frame(width: side, height: side)
+                // Todo el cuadrado recibe el toque, no solo el dibujo del icono.
+                .contentShape(shape)
+                .liquidGlass(in: shape, tint: tint, interactive: true)
+                .overlay {
+                    if isSelected {
+                        shape.strokeBorder(Color.cyan.opacity(0.9), lineWidth: 1.2)
+                    }
+                }
+                .shadow(color: isSelected ? Color.cyan.opacity(0.42) : Color.clear, radius: 12, y: 0)
+        }
+        .buttonStyle(ControllerFocusableButtonStyle())
+        .accessibilityLabel(tr(section.rawValue))
+    }
+
     // MARK: - Estructura común de pantallas con scroll
 
     private func screen<Content: View>(topGap: CGFloat = 8, @ViewBuilder _ content: @escaping () -> Content) -> some View {
         ScrollViewReader { proxy in
-            ScrollView(showsIndicators: false) {
-                VStack(spacing: 0) {
-                    // Punto de anclaje en el borde superior: para volver exactamente arriba.
-                    Color.clear.frame(height: 0).id("screen-top")
-                    content()
-                        .padding(.horizontal, 16)
-                        .padding(.top, headerHeight + topGap)
-                        .padding(.bottom, dockActive ? 92 : 44)
-                        .reportFrame("content")
-                }
-            }
-            .onChange(of: controllerSelectedGameID) { _, _ in scrollToSelection(proxy) }
-            .onChange(of: controllerSelectedArea) { _, _ in scrollToSelection(proxy) }
-            .onChange(of: controllerSelectedSettingIndex) { _, _ in scrollToSelection(proxy) }
-            .reportFrame("scroll")
-            .edgeFade(clear: fadeClearHeight, fade: headerHeight, bottom: Self.bottomFadeHeight)
+            followSelection(scrollBody(topGap: topGap, content), proxy: proxy)
+                .reportFrame("scroll")
+                .edgeFade(clear: metrics.fadeClear, fade: metrics.headerHeight, bottom: Self.bottomFadeHeight)
         }
     }
 
-    /// Lleva la pantalla hasta lo seleccionado. Si la selección está en las primeras filas
+    private func scrollBody<Content: View>(topGap: CGFloat, _ content: @escaping () -> Content) -> some View {
+        let topPadding: CGFloat = metrics.headerHeight + topGap
+        let bottomPadding: CGFloat = dockActive ? 92 : 44
+        return ScrollView(showsIndicators: false) {
+            VStack(spacing: 0) {
+                // Punto de anclaje en el borde superior: para volver exactamente arriba.
+                Color.clear.frame(height: 0).id("screen-top")
+                content()
+                    .padding(.horizontal, 16)
+                    .padding(.top, topPadding)
+                    .padding(.bottom, bottomPadding)
+                    .reportFrame("content")
+            }
+        }
+        .modifier(ScrollOffsetReader(progress: scrollProgress))
+    }
+
+    /// Cuando el mando cambia la selección, la pantalla se desplaza para enseñarla.
+    private func followSelection<V: View>(_ view: V, proxy: ScrollViewProxy) -> some View {
+        view
+            .onChange(of: controllerSelectedGameID) { _, _ in scrollToSelection(proxy) }
+            .onChange(of: controllerSelectedArea) { _, _ in scrollToSelection(proxy) }
+            .onChange(of: controllerSelectedSettingIndex) { _, _ in scrollToSelection(proxy) }
+            .onChange(of: controllerSelectedLetterIndex) { _, _ in scrollToSelection(proxy) }
+    }
+
+    /// Lleva la pantalla hasta lo seleccionado con el mando. Si está en las primeras filas
     /// (o en la parte de arriba), la pantalla sube del todo para que la interfaz quede ajustada.
+    /// Sin mando no mueve nada: el dedo manda.
     private func scrollToSelection(_ proxy: ScrollViewProxy) {
+        guard gamepadConnected else { return }
         withAnimation(.easeInOut(duration: 0.2)) {
             switch controllerSelectedArea {
-            case "featured", "search", "alphabet":
+            case "featured", "search":
                 proxy.scrollTo("screen-top", anchor: .top)
+            case "alphabet":
+                scrollToLetter(proxy)
             case "settings":
-                if controllerSelectedSettingIndex < 6 {
-                    proxy.scrollTo("screen-top", anchor: .top)
-                } else {
-                    proxy.scrollTo("setting-\(controllerSelectedSettingIndex)", anchor: .center)
-                }
+                scrollToSetting(proxy)
             default:
-                guard let id = controllerSelectedGameID else { return }
-                if gameFitsFromTop(id) {
-                    proxy.scrollTo("screen-top", anchor: .top)
-                } else {
-                    proxy.scrollTo("game-\(id)", anchor: .center)
-                }
+                scrollToGame(proxy)
             }
+        }
+    }
+
+    /// En horizontal el teclado del mando no cabe entero: se sigue la tecla marcada.
+    private func scrollToLetter(_ proxy: ScrollViewProxy) {
+        if isLandscapeNow {
+            proxy.scrollTo("alphabet-\(controllerSelectedLetterIndex)", anchor: .center)
+        } else {
+            proxy.scrollTo("screen-top", anchor: .top)
+        }
+    }
+
+    /// La fila de la tarjeta marcada siempre queda a la vista (la primera fila, arriba del todo).
+    private func scrollToSetting(_ proxy: ScrollViewProxy) {
+        let columns: Int = isLandscapeNow ? 3 : 2
+        if controllerSelectedSettingIndex < columns {
+            proxy.scrollTo("screen-top", anchor: .top)
+        } else {
+            proxy.scrollTo("setting-\(controllerSelectedSettingIndex)", anchor: .center)
+        }
+    }
+
+    private func scrollToGame(_ proxy: ScrollViewProxy) {
+        guard let id = controllerSelectedGameID else { return }
+        if gameFitsFromTop(id) {
+            proxy.scrollTo("screen-top", anchor: .top)
+        } else {
+            proxy.scrollTo("game-\(id)", anchor: .center)
         }
     }
 
     /// ¿Se vería entera la fila de este juego con la pantalla arriba del todo?
     private func gameFitsFromTop(_ id: String) -> Bool {
         guard let index = controllerGames.firstIndex(where: { $0.id == id }) else { return false }
-        let landscape = UIScreen.main.bounds.width > UIScreen.main.bounds.height
-        let columns = landscape ? (selectedSection == .inicio ? 3 : 4) : (compactGrid ? 3 : 2)
-        let row = index / columns
+        let landscape: Bool = isLandscapeNow
+        let columns: Int = landscape ? (selectedSection == .inicio ? 3 : 4) : (compactGrid ? 3 : 2)
+        let row: Int = index / columns
+        let frames: [String: CGRect] = metrics.frames
         guard let first = frames["firstTile"], let content = frames["content"],
               let header = frames["header"], let scroll = frames["scroll"] else { return row <= 1 }
         let spacing: CGFloat = (landscape || compactGrid) ? 10 : 13
         // Dónde estaría la primera fila si la pantalla estuviera arriba del todo.
-        let firstTop = header.minY + (first.minY - content.minY)
-        let rowBottom = firstTop + CGFloat(row + 1) * first.height + CGFloat(row) * spacing
-        return rowBottom <= scroll.maxY - 56
+        let firstTop: CGFloat = header.minY + (first.minY - content.minY)
+        let rowBottom: CGFloat = firstTop + CGFloat(row + 1) * first.height + CGFloat(row) * spacing
+        // En el Modo Dock la barra inferior tapa más pantalla.
+        let bottomMargin: CGFloat = dockActive ? 110 : 56
+        return rowBottom <= scroll.maxY - bottomMargin
     }
 
     private func screenTitle(_ title: String, subtitle: String) -> some View {
         VStack(alignment: .leading, spacing: 5) {
             Text(title)
-                .font(.system(size: 28, weight: .bold, design: .rounded))
+                .font(AppFont.text(28, .bold))
             Text(subtitle)
-                .font(.subheadline)
+                .font(AppFont.text(15))
                 .foregroundStyle(.white.opacity(0.55))
         }
     }
@@ -1297,31 +1336,34 @@ struct HomeView: View {
     // MARK: - Inicio
 
     private func homeContent(landscape: Bool) -> some View {
-        screen(topGap: 5) {
+        // Se calcula una vez por pintado (antes se recalculaba en cada uso).
+        let list: [Game] = filteredGames
+        let showFeatured: Bool = selectedPlatform == "Todos"
+        return screen(topGap: 5) {
             VStack(alignment: .leading, spacing: landscape ? 15 : 20) {
                 platformFilters(compact: landscape)
 
                 if landscape {
                     HStack(alignment: .top, spacing: 16) {
-                        if selectedPlatform == "Todos" {
+                        if showFeatured {
                             featuredPanel
                                 .frame(maxWidth: geometryWidthFraction(0.34))
                         }
                         VStack(alignment: .leading, spacing: 12) {
-                            sectionHeading(tr("Juegos recientes"), detail: tr("%ld elementos", filteredGames.count))
-                            gameGrid(filteredGames, columns: 3, compact: true)
+                            sectionHeading(tr("Juegos recientes"), detail: tr("%ld elementos", list.count))
+                            gameGrid(list, columns: 3, compact: true)
                         }
                         .frame(maxWidth: .infinity, alignment: .leading)
                     }
                 } else {
-                    if selectedPlatform == "Todos" {
+                    if showFeatured {
                         featuredPanel
                     }
-                    sectionHeading(tr("Tu biblioteca"), detail: tr("%ld elementos", filteredGames.count))
-                    gameGrid(filteredGames, columns: compactGrid ? 3 : 2, compact: compactGrid)
+                    sectionHeading(tr("Tu biblioteca"), detail: tr("%ld elementos", list.count))
+                    gameGrid(list, columns: compactGrid ? 3 : 2, compact: compactGrid)
                 }
 
-                if filteredGames.isEmpty {
+                if list.isEmpty {
                     emptyResults
                 }
 
@@ -1343,27 +1385,48 @@ struct HomeView: View {
         if featured.isEmpty {
             emptyFeatured
         } else {
-            TabView(selection: $featuredIndex) {
-                ForEach(Array(featured.enumerated()), id: \.element.id) { index, game in
-                    featuredCard(game)
-                        .tag(index)
-                }
-            }
-            .tabViewStyle(.page(indexDisplayMode: .never))
-            .frame(height: 190)
-            .clipShape(RoundedRectangle(cornerRadius: 22, style: .continuous))
-            .glassRim(in: RoundedRectangle(cornerRadius: 22, style: .continuous))
-            .overlay(alignment: .bottomTrailing) { featuredDots }
-            .shadow(color: .blue.opacity(0.28), radius: 20, y: 5)
-            .overlay {
-                if selectedSection == .inicio && controllerSelectedArea == "featured" {
-                    RoundedRectangle(cornerRadius: 22, style: .continuous)
-                        .stroke(Color.cyan.opacity(0.98), lineWidth: 2.5)
-                        .shadow(color: Color.cyan.opacity(0.72), radius: 10)
-                        .allowsHitTesting(false)
-                }
-            }
+            featuredPager
+                .frame(height: 190)
+                .overlay(alignment: .bottomTrailing) { featuredDots }
+                .padRing(featuredRingVisible, cornerRadius: 22)
         }
+    }
+
+    private var featuredRingVisible: Bool {
+        gamepadConnected && selectedSection == .inicio && controllerSelectedArea == "featured"
+    }
+
+    /// Cada tarjeta es una página con sus esquinas y un hueco entre ellas; al pasar de una a otra
+    /// la que sale se encoge y se desvanece, así no se ve el corte entre tarjetas.
+    private var featuredPager: some View {
+        let shape = RoundedRectangle(cornerRadius: 22, style: .continuous)
+        return ScrollView(.horizontal, showsIndicators: false) {
+            LazyHStack(spacing: 14) {
+                ForEach(0..<featured.count, id: \.self) { index in
+                    featuredCard(featured[index])
+                        .clipShape(shape)
+                        .glassRim(in: shape)
+                        .containerRelativeFrame(.horizontal)
+                        .scrollTransition(.interactive, axis: .horizontal) { content, phase in
+                            content
+                                .opacity(1 - abs(phase.value) * 0.6)
+                                .scaleEffect(1 - CGFloat(abs(phase.value)) * 0.08)
+                        }
+                }
+            }
+            .scrollTargetLayout()
+        }
+        .scrollTargetBehavior(.viewAligned(limitBehavior: .always))
+        .scrollPosition(id: featuredScrollID)
+    }
+
+    private var featuredScrollID: Binding<Int?> {
+        Binding<Int?>(
+            get: { featuredIndex },
+            set: { newValue in
+                if let newValue { featuredIndex = newValue }
+            }
+        )
     }
 
     private var featuredDots: some View {
@@ -1377,13 +1440,13 @@ struct HomeView: View {
         .animation(.easeInOut(duration: 0.2), value: featuredIndex)
         .padding(.horizontal, 10)
         .padding(.vertical, 7)
-        .background(.ultraThinMaterial, in: Capsule())
+        .background(Color.black.opacity(0.35), in: Capsule())
         .padding(14)
         .allowsHitTesting(false)
     }
 
     private func featuredCard(_ game: Game) -> some View {
-        let plays = playCounts[game.id] ?? 0
+        let plays: Int = playCounts[game.id] ?? 0
         return ZStack(alignment: .bottomLeading) {
             LinearGradient(
                 colors: [
@@ -1394,51 +1457,56 @@ struct HomeView: View {
                 startPoint: .topLeading,
                 endPoint: .bottomTrailing
             )
-            Circle()
-                .fill(Color.cyan.opacity(0.34))
-                .frame(width: 170, height: 170)
-                .blur(radius: 30)
-                .offset(x: 95, y: -70)
+            RadialGradient(
+                colors: [Color.cyan.opacity(0.32), Color.clear],
+                center: .topTrailing,
+                startRadius: 4,
+                endRadius: 190
+            )
             Image(systemName: game.symbol)
                 .font(.system(size: 82, weight: .light))
                 .foregroundStyle(.white.opacity(0.15))
                 .rotationEffect(.degrees(-14))
                 .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topTrailing)
                 .padding(20)
-            VStack(alignment: .leading, spacing: 8) {
-                Text(plays > 0 ? tr("MÁS JUGADO") : tr("DESTACADO"))
-                    .font(.system(size: 9, weight: .heavy, design: .rounded))
-                    .tracking(2)
-                    .foregroundStyle(Color.cyan)
-                Text(game.name)
-                    .font(.system(size: 23, weight: .bold, design: .rounded))
-                    .foregroundStyle(.white)
-                    .lineLimit(2)
-                    .minimumScaleFactor(0.8)
-                Text(plays > 0 ? tr("%@ · %ld veces", game.platform, plays) : game.platform)
-                    .font(.system(size: 12, weight: .medium))
-                    .foregroundStyle(.white.opacity(0.68))
-                Button {
-                    open(game)
-                } label: {
-                    HStack(spacing: 6) {
-                        Image(systemName: "play.fill")
-                        Text(tr("Jugar"))
-                    }
-                    .font(.system(size: 11, weight: .bold))
-                    .foregroundStyle(.white)
-                    .padding(.horizontal, 13)
-                    .padding(.vertical, 9)
-                    .background(LinearGradient(colors: [.blue, .cyan.opacity(0.78)], startPoint: .leading, endPoint: .trailing), in: Capsule())
-                }
-                .buttonStyle(ControllerFocusableButtonStyle())
-                    .focusable()
-                .padding(.top, 3)
-            }
-            .padding(18)
-            .padding(.bottom, 4)
+            featuredText(game, plays: plays)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+
+    private func featuredText(_ game: Game, plays: Int) -> some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text(plays > 0 ? tr("MÁS JUGADO") : tr("DESTACADO"))
+                .font(AppFont.text(9, .bold))
+                .tracking(2)
+                .foregroundStyle(Color.cyan)
+            Text(game.name)
+                .font(AppFont.text(23, .bold))
+                .foregroundStyle(.white)
+                .lineLimit(2)
+                .minimumScaleFactor(0.8)
+            Text(plays > 0 ? tr("%@ · %ld veces", game.platform, plays) : game.platform)
+                .font(AppFont.text(12, .medium))
+                .foregroundStyle(.white.opacity(0.68))
+            Button {
+                self.open(game)
+            } label: {
+                HStack(spacing: 6) {
+                    Image(systemName: "play.fill")
+                    Text(tr("Jugar"))
+                }
+                .font(AppFont.text(11, .bold))
+                .foregroundStyle(.white)
+                .padding(.horizontal, 13)
+                .padding(.vertical, 9)
+                .background(LinearGradient(colors: [Color.blue, Color.cyan.opacity(0.78)], startPoint: .leading, endPoint: .trailing), in: Capsule())
+                .contentShape(Capsule())
+            }
+            .buttonStyle(ControllerFocusableButtonStyle())
+            .padding(.top, 3)
+        }
+        .padding(18)
+        .padding(.bottom, 4)
     }
 
     private var emptyFeatured: some View {
@@ -1447,9 +1515,9 @@ struct HomeView: View {
                 .font(.system(size: 26, weight: .light))
                 .foregroundStyle(Color.cyan)
             Text(tr("Tu biblioteca está vacía"))
-                .font(.system(size: 15, weight: .semibold, design: .rounded))
+                .font(AppFont.text(15, .semibold))
             Text(tr("Vincula una carpeta o añade un acceso directo en Ajustes → Juegos."))
-                .font(.system(size: 12))
+                .font(AppFont.text(12))
                 .foregroundStyle(.white.opacity(0.55))
                 .multilineTextAlignment(.center)
         }
@@ -1462,38 +1530,7 @@ struct HomeView: View {
         ScrollView(.horizontal, showsIndicators: false) {
             HStack(spacing: 8) {
                 ForEach(platforms, id: \.name) { platform in
-                    let isSelected = selectedPlatform == platform.name
-                    Button {
-                        feedback()
-                        withAnimation(.easeInOut(duration: 0.18)) {
-                            selectedPlatform = platform.name
-                        }
-                    } label: {
-                        HStack(spacing: 7) {
-                            Image(systemName: platform.symbol)
-                                .font(.system(size: 13, weight: .semibold))
-                            Text(platformLabel(platform.name))
-                                .font(.system(size: 14, weight: .semibold))
-                        }
-                        .foregroundStyle(isSelected ? Color.white : Color.white.opacity(0.78))
-                        .padding(.horizontal, compact ? 15 : 17)
-                        .padding(.vertical, dock ? 8 : (compact ? 11 : 13))
-                        .contentShape(Capsule())
-                        .liquidGlass(
-                            in: Capsule(),
-                            tint: isSelected ? Color(red: 0.05, green: 0.45, blue: 1.0) : nil,
-                            interactive: true
-                        )
-                        .overlay {
-                            if isSelected {
-                                Capsule().strokeBorder(Color.cyan.opacity(0.7), lineWidth: 1)
-                            }
-                        }
-                        .shadow(color: isSelected ? Color.cyan.opacity(0.30) : Color.clear, radius: 10)
-                    }
-                    .buttonStyle(ControllerFocusableButtonStyle())
-                    .focusable()
-                    .contentShape(Capsule())
+                    platformChip(platform.name, symbol: platform.symbol, compact: compact, dock: dock)
                 }
             }
             .scrollTargetLayout()
@@ -1521,58 +1558,142 @@ struct HomeView: View {
         }
     }
 
+    private func platformChip(_ name: String, symbol: String, compact: Bool, dock: Bool) -> some View {
+        let isSelected: Bool = selectedPlatform == name
+        let tint: Color? = isSelected ? Color(red: 0.05, green: 0.45, blue: 1.0) : nil
+        let verticalPadding: CGFloat = dock ? 8 : (compact ? 11 : 13)
+        return Button {
+            feedback()
+            withAnimation(.easeInOut(duration: 0.18)) {
+                selectedPlatform = name
+            }
+        } label: {
+            HStack(spacing: 7) {
+                Image(systemName: symbol)
+                    .font(.system(size: 13, weight: .semibold))
+                Text(platformLabel(name))
+                    .font(AppFont.brand(12, .semibold))
+            }
+            .foregroundStyle(isSelected ? Color.white : Color.white.opacity(0.78))
+            .padding(.horizontal, compact ? 15 : 17)
+            .padding(.vertical, verticalPadding)
+            .contentShape(Capsule())
+            .liquidGlass(in: Capsule(), tint: tint, interactive: true)
+            .overlay {
+                if isSelected {
+                    Capsule().strokeBorder(Color.cyan.opacity(0.7), lineWidth: 1)
+                }
+            }
+            .shadow(color: isSelected ? Color.cyan.opacity(0.30) : Color.clear, radius: 10)
+        }
+        .buttonStyle(ControllerFocusableButtonStyle())
+    }
+
     private func sectionHeading(_ title: String, detail: String) -> some View {
         HStack(alignment: .firstTextBaseline) {
             Text(title)
-                .font(.system(size: 21, weight: .bold, design: .rounded))
+                .font(AppFont.text(21, .bold))
                 .foregroundStyle(.white)
             Spacer()
             Text(detail)
-                .font(.system(size: 11, weight: .medium))
+                .font(AppFont.text(11, .medium))
                 .foregroundStyle(.white.opacity(0.45))
         }
     }
 
     private func gameGrid(_ items: [Game], columns: Int, compact: Bool) -> some View {
-        let gridColumns = Array(repeating: GridItem(.flexible(), spacing: compact ? 10 : 12), count: columns)
+        let gridColumns: [GridItem] = Array(repeating: GridItem(.flexible(), spacing: compact ? 10 : 12), count: columns)
+        // Se leen una sola vez por cuadrícula, no una vez por tarjeta.
+        let favorites: Set<String> = favoriteNames
+        let padSelection: String? = padSelectedGameID
+        let firstID: String? = items.first?.id
         return LazyVGrid(columns: gridColumns, alignment: .leading, spacing: compact ? 10 : 13) {
             ForEach(items) { game in
-                let isFavorite = favoriteNames.contains(game.id)
-                let remove: (() -> Void)? = game.isCustom ? { removeGame(game) } : nil
-                GameTile(
-                    game: game,
-                    compact: compact,
-                    isFavorite: isFavorite,
-                    isControllerSelected: controllerSelectedGameID == game.id,
-                    favoriteLabel: isFavorite ? tr("Quitar de favoritos") : tr("Añadir a favoritos"),
-                    removeLabel: tr("Quitar de la biblioteca"),
-                    onToggleFavorite: { toggleFavorite(game.id) },
-                    onOpen: { open(game) },
-                    onRemove: remove
-                )
-                .id("game-\(game.id)")
-                .reportFrame("firstTile", if: game.id == items.first?.id)
+                gameTile(game, compact: compact, isFavorite: favorites.contains(game.id), selected: padSelection == game.id)
+                    .id("game-\(game.id)")
+                    .reportFrame("firstTile", if: game.id == firstID)
             }
         }
+    }
+
+    /// Juego marcado por el mando (sin mando no se marca ninguno).
+    private var padSelectedGameID: String? {
+        guard gamepadConnected, controllerSelectedArea == "games" else { return nil }
+        return controllerSelectedGameID
+    }
+
+    private func gameTile(_ game: Game, compact: Bool, isFavorite: Bool, selected: Bool) -> some View {
+        let remove: (() -> Void)? = game.isCustom ? { removeGame(game) } : nil
+        return GameTile(
+            game: game,
+            compact: compact,
+            isFavorite: isFavorite,
+            isControllerSelected: selected,
+            favoriteLabel: isFavorite ? tr("Quitar de favoritos") : tr("Añadir a favoritos"),
+            removeLabel: tr("Quitar de la biblioteca"),
+            onToggleFavorite: { toggleFavorite(game.id) },
+            onOpen: { self.open(game) },
+            onRemove: remove
+        )
     }
 
     // MARK: - Búsqueda
 
     private func searchContent(landscape: Bool) -> some View {
-        screen {
+        let list: [Game] = filteredGames
+        let columns: Int = landscape ? 4 : (compactGrid ? 3 : 2)
+        return screen {
             VStack(alignment: .leading, spacing: 18) {
                 screenTitle(tr("Búsqueda"), subtitle: tr("Encuentra un juego o filtra por plataforma."))
-                if gamepadConnected {
-                    controllerAlphabetBar
-                } else {
-                    searchBar
-                }
+                searchInput(landscape: landscape)
                 platformFilters(compact: landscape)
-                sectionHeading(tr("Resultados"), detail: tr("%ld encontrados", filteredGames.count))
-                gameGrid(filteredGames, columns: landscape ? 4 : (compactGrid ? 3 : 2), compact: landscape || compactGrid)
-                if filteredGames.isEmpty { emptyResults }
+                sectionHeading(tr("Resultados"), detail: tr("%ld encontrados", list.count))
+                gameGrid(list, columns: columns, compact: landscape || compactGrid)
+                if list.isEmpty { emptyResults }
             }
         }
+    }
+
+    /// Sin mando: campo de texto normal. Con mando: teclado propio. En horizontal el teclado
+    /// se queda plegado hasta pulsar ✕ (no cabe en pantalla y no debe abrirse solo al conectar).
+    @ViewBuilder
+    private func searchInput(landscape: Bool) -> some View {
+        if !gamepadConnected {
+            searchBar
+        } else if landscape && controllerSelectedArea != "alphabet" {
+            controllerSearchField
+        } else {
+            controllerAlphabetBar
+        }
+    }
+
+    private var controllerSearchField: some View {
+        let shape = RoundedRectangle(cornerRadius: 18, style: .continuous)
+        let empty: Bool = controllerAlphabetSearchText.isEmpty
+        return Button {
+            controllerSelectedArea = "alphabet"
+            controllerSelectedLetterIndex = 0
+        } label: {
+            HStack(spacing: 10) {
+                Image(systemName: "magnifyingglass")
+                    .foregroundStyle(Color.cyan)
+                Text(empty ? tr("Selecciona letras con el mando") : controllerAlphabetSearchText)
+                    .font(AppFont.text(14, .medium))
+                    .foregroundStyle(empty ? Color.white.opacity(0.55) : Color.white)
+                    .lineLimit(1)
+                Spacer()
+                Text(tr("✕: escribir"))
+                    .font(AppFont.text(10, .semibold))
+                    .foregroundStyle(Color.cyan.opacity(0.9))
+            }
+            .padding(.horizontal, 14)
+            .padding(.vertical, 13)
+            .contentShape(shape)
+            .glassCard()
+        }
+        .buttonStyle(ControllerFocusableButtonStyle())
+        .id("search-bar")
+        .padRing(searchRingVisible, cornerRadius: 18)
     }
 
     private var controllerAlphabetBar: some View {
@@ -1580,53 +1701,68 @@ struct HomeView: View {
             HStack(spacing: 10) {
                 Image(systemName: "magnifyingglass").foregroundStyle(.cyan)
                 Text(controllerAlphabetSearchText.isEmpty ? tr("Selecciona letras con el mando") : controllerAlphabetSearchText)
-                    .font(.system(size: 14, weight: .medium))
+                    .font(AppFont.text(14, .medium))
                     .foregroundStyle(controllerAlphabetSearchText.isEmpty ? .white.opacity(0.55) : .white)
                     .lineLimit(1)
                 Spacer()
                 Text(tr("A/X: elegir"))
-                    .font(.system(size: 10, weight: .semibold))
+                    .font(AppFont.text(10, .semibold))
                     .foregroundStyle(.cyan.opacity(0.9))
             }
             LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 6), count: 7), spacing: 6) {
                 ForEach(Array(controllerAlphabet.enumerated()), id: \.offset) { index, letter in
-                    Button {
-                        controllerSelectedLetterIndex = index
-                        controllerSelectedArea = "alphabet"
-                        activateAlphabetSelection()
-                    } label: {
-                        Text(letter)
-                            .font(.system(size: 13, weight: .bold, design: .rounded))
-                            .foregroundStyle(index == controllerSelectedLetterIndex && controllerSelectedArea == "alphabet" ? Color.black : Color.white)
-                            .frame(maxWidth: .infinity, minHeight: 34)
-                            .background(
-                                index == controllerSelectedLetterIndex && controllerSelectedArea == "alphabet" ? Color.cyan : Color.white.opacity(0.07),
-                                in: RoundedRectangle(cornerRadius: 8, style: .continuous)
-                            )
-                    }
-                    .buttonStyle(.plain)
-                    .id("alphabet-\(index)")
+                    alphabetKey(letter, index: index)
                 }
             }
         }
         .padding(12)
         .glassCard()
         .id("alphabet-bar")
-        .padRing(selectedSection == .busqueda && (controllerSelectedArea == "search" || controllerSelectedArea == "alphabet"), cornerRadius: 18)
+        .padRing(alphabetRingVisible, cornerRadius: 18)
+    }
+
+    private var alphabetRingVisible: Bool {
+        guard gamepadConnected, selectedSection == .busqueda else { return false }
+        return controllerSelectedArea == "search" || controllerSelectedArea == "alphabet"
+    }
+
+    private var searchRingVisible: Bool {
+        gamepadConnected && selectedSection == .busqueda && controllerSelectedArea == "search"
+    }
+
+    private func alphabetKey(_ letter: String, index: Int) -> some View {
+        let isSelected: Bool = index == controllerSelectedLetterIndex && controllerSelectedArea == "alphabet"
+        let shape = RoundedRectangle(cornerRadius: 8, style: .continuous)
+        return Button {
+            controllerSelectedLetterIndex = index
+            controllerSelectedArea = "alphabet"
+            activateAlphabetSelection()
+        } label: {
+            Text(letter)
+                .font(AppFont.text(13, .bold))
+                .foregroundStyle(isSelected ? Color.black : Color.white)
+                .frame(maxWidth: .infinity, minHeight: 34)
+                .background(isSelected ? Color.cyan : Color.white.opacity(0.07), in: shape)
+                .contentShape(shape)
+        }
+        .buttonStyle(.plain)
+        .id("alphabet-\(index)")
     }
 
     // MARK: - Favoritos
 
     private func favoritesContent(landscape: Bool) -> some View {
-        screen {
+        let list: [Game] = favoriteGames
+        let columns: Int = landscape ? 4 : (compactGrid ? 3 : 2)
+        return screen {
             VStack(alignment: .leading, spacing: 18) {
                 screenTitle(tr("Favoritos"), subtitle: tr("Tus juegos marcados con estrella."))
 
-                if favoriteGames.isEmpty {
+                if list.isEmpty {
                     emptyFavorites
                 } else {
-                    sectionHeading(tr("Tus favoritos"), detail: tr("%ld elementos", favoriteGames.count))
-                    gameGrid(favoriteGames, columns: landscape ? 4 : (compactGrid ? 3 : 2), compact: landscape || compactGrid)
+                    sectionHeading(tr("Tus favoritos"), detail: tr("%ld elementos", list.count))
+                    gameGrid(list, columns: columns, compact: landscape || compactGrid)
                 }
             }
         }
@@ -1643,190 +1779,289 @@ struct HomeView: View {
         .glassCard()
     }
 
-    // MARK: - Ajustes
+    // MARK: - Ajustes (generados desde una lista)
+    // Las tarjetas, el orden del mando y lo que hace cada una salen de la misma lista:
+    // así no pueden desincronizarse al añadir o quitar ajustes.
 
-    // Orden de tarjetas de Ajustes: coincide con el orden visual de las tres cuadrículas.
-    private var controllerSettingTitles: [String] {
-        [tr("Mandos"), tr("Vibración"), tr("Sonido al pulsar"), tr("Modo Dock"), tr("Dock con HDMI"), tr("Bloquear horizontal"), tr("Reloj 24 horas"), tr("Acerca de"),
-         tr("Fondo personalizado"), tr("Idioma"), tr("Reorganizar plataformas"), tr("Cuadrícula completa"), tr("Bienvenida animada"), tr("Logo en cabecera"),
-         tr("Escaneo de juegos"), tr("Vincular carpeta"), tr("Acceso directo (URL)"), tr("Juegos de ejemplo"), tr("Borrar favoritos"), tr("Quitar añadidos")]
+    private var settingGroups: [SettingGroup] {
+        [generalSettings, appearanceSettings, gameSettings, debugSettings, liveContainerSettings]
     }
 
-    /// Primer índice de cada sección de Ajustes: General, Apariencia y Juegos.
-    private static let settingSectionStarts: [Int] = [0, 8, 14]
+    private var allSettingItems: [SettingItem] {
+        settingGroups.flatMap { $0.items }
+    }
 
-    /// Mueve la selección por la cuadrícula de Ajustes respetando las secciones:
-    /// cada sección empieza en fila nueva, también con 3 columnas en horizontal.
+    /// Posición (en la lista completa) de la primera tarjeta de cada grupo.
+    private func settingStarts(_ groups: [SettingGroup]) -> [Int] {
+        var starts: [Int] = []
+        var next: Int = 0
+        for group in groups {
+            starts.append(next)
+            next += group.items.count
+        }
+        return starts
+    }
+
+    private func toggleSetting(_ id: String, _ title: String, _ subtitle: String, _ symbol: String, _ tint: Color, _ binding: Binding<Bool>) -> SettingItem {
+        SettingItem(id: id, title: title, subtitle: subtitle, symbol: symbol, tint: tint, control: .toggle(binding.wrappedValue), action: {
+            binding.wrappedValue.toggle()
+        })
+    }
+
+    private var generalSettings: SettingGroup {
+        let count: Int = controllers.controllers.count
+        let countColor: Color = count == 0 ? Color.gray : Color.green
+        var items: [SettingItem] = []
+        items.append(SettingItem(id: "controllers", title: tr("Mandos"), subtitle: controllersSubtitle, symbol: "gamecontroller.fill", tint: SettingTint.sky, control: .badge("\(count)", countColor), action: {
+            sheet = .controllers
+        }))
+        items.append(toggleSetting("haptics", tr("Vibración"), tr("Respuesta háptica al tocar"), "iphone.radiowaves.left.and.right", SettingTint.sky, $hapticsEnabled))
+        items.append(toggleSetting("sound", tr("Sonido al pulsar"), tr("Clic al tocar botones"), "speaker.wave.2.fill", SettingTint.periwinkle, $clickSound))
+        items.append(toggleSetting("dock", tr("Modo Dock"), tr("Carrusel al girar a horizontal"), "tv.fill", SettingTint.blue, $dockModeEnabled))
+        items.append(toggleSetting("hdmi", tr("Dock con HDMI"), tr("Activa Dock y horizontal al conectar HDMI"), "display", SettingTint.aqua, $hdmiAutoLandscape))
+        items.append(toggleSetting("landscape", tr("Bloquear horizontal"), tr("Mantener la app en horizontal"), "iphone.landscape", SettingTint.periwinkle, $keepLandscape))
+        items.append(toggleSetting("clock", tr("Reloj 24 horas"), tr("Formato de la hora en Dock"), "clock.fill", SettingTint.sky, $clock24h))
+        items.append(SettingItem(id: "about", title: tr("Acerca de"), subtitle: tr("Versión %@", appVersion), symbol: "info.circle.fill", tint: Color.cyan, control: .symbol("chevron.right"), action: {
+            showAbout = true
+        }))
+        return SettingGroup(id: "general", title: tr("General"), items: items)
+    }
+
+    private var appearanceSettings: SettingGroup {
+        let hasBackground: Bool = customBackground != nil
+        let backgroundControl: SettingControl = hasBackground ? .badge("ON", Color.cyan) : .plain
+        var items: [SettingItem] = []
+        items.append(SettingItem(id: "background", title: tr("Fondo personalizado"), subtitle: hasBackground ? tr("Imagen propia") : tr("Predeterminado"), symbol: "photo.on.rectangle", tint: SettingTint.blue, control: backgroundControl, action: {
+            if customBackground == nil { showPhotoPicker = true } else { dialog = .background }
+        }))
+        items.append(SettingItem(id: "language", title: tr("Idioma"), subtitle: languageLabel, symbol: "globe", tint: SettingTint.sky, control: .symbol("chevron.up.chevron.down"), action: {
+            dialog = .language
+        }))
+        items.append(SettingItem(id: "platformOrder", title: tr("Reorganizar plataformas"), subtitle: tr("Orden de los filtros"), symbol: "arrow.up.arrow.down", tint: SettingTint.periwinkle, control: .symbol("chevron.right"), action: {
+            sheet = .platformOrder
+        }))
+        items.append(toggleSetting("grid", tr("Cuadrícula completa"), tr("Más juegos por pantalla"), "square.grid.3x3.fill", Color.cyan, $compactGrid))
+        items.append(toggleSetting("welcome", tr("Bienvenida animada"), tr("Pantalla de inicio al abrir"), "sparkles", SettingTint.periwinkle, $showWelcome))
+        return SettingGroup(id: "appearance", title: tr("Apariencia"), items: items)
+    }
+
+    private var gameSettings: SettingGroup {
+        let linked: Bool = !folderName.isEmpty
+        let scanControl: SettingControl = isScanning ? .progress : .badge("\(scannedCount)", Color.cyan)
+        let scanSubtitle: String = linked ? tr("Buscar en «%@»", folderName) : tr("Vincula una carpeta primero")
+        let favoriteCount: Int = favoriteNames.count
+        let libraryCount: Int = libraryGames.count
+        var items: [SettingItem] = []
+        items.append(SettingItem(id: "scan", title: tr("Escaneo de juegos"), subtitle: scanSubtitle, symbol: "arrow.triangle.2.circlepath", tint: SettingTint.sky, control: scanControl, action: {
+            scanLibrary()
+        }))
+        items.append(SettingItem(id: "folder", title: tr("Vincular carpeta"), subtitle: linked ? folderName : tr("Carpeta contenedora"), symbol: "folder.badge.plus", tint: SettingTint.periwinkle, control: linked ? .badge("OK", Color.green) : .plain, action: {
+            showFolderImporter = true
+        }))
+        items.append(SettingItem(id: "shortcut", title: tr("Acceso directo (URL)"), subtitle: tr("Abre un emulador con un enlace"), symbol: "link.badge.plus", tint: SettingTint.blue, control: .symbol("plus"), action: {
+            shortcutInitialURL = ""
+            sheet = .addShortcut
+        }))
+        items.append(toggleSetting("samples", tr("Juegos de ejemplo"), tr("Mostrar los de demostración"), "square.stack.3d.up.fill", SettingTint.aqua, $showSampleGames))
+        items.append(SettingItem(id: "clearFavorites", title: tr("Borrar favoritos"), subtitle: tr("Quita todos los marcados"), symbol: "star.slash.fill", tint: Color.orange, control: .badge("\(favoriteCount)", Color.orange), action: {
+            if !favoriteNames.isEmpty { dialog = .clearFavorites }
+        }))
+        items.append(SettingItem(id: "clearLibrary", title: tr("Quitar añadidos"), subtitle: tr("Escaneados y accesos directos"), symbol: "trash.fill", tint: Color.orange, control: .badge("\(libraryCount)", Color.orange), action: {
+            if !libraryGames.isEmpty { dialog = .clearLibrary }
+        }))
+        return SettingGroup(id: "games", title: tr("Juegos"), items: items)
+    }
+
+    private var debugSettings: SettingGroup {
+        let jitControl: SettingControl = jitEnabled ? .badge("ON", Color.green) : .badge("OFF", Color.gray)
+        let stikFailure: String = tr("No se pudo abrir StikDebug. ¿Está instalado?")
+        var items: [SettingItem] = []
+        items.append(SettingItem(id: "jitStatus", title: tr("Estado JIT"), subtitle: jitEnabled ? tr("Activo en esta app") : tr("No activo en esta app"), symbol: "cpu", tint: SettingTint.violet, control: jitControl, action: {
+            refreshJITStatus(announce: true)
+        }))
+        items.append(SettingItem(id: "enableJIT", title: tr("Activar JIT"), subtitle: tr("Con StikDebug, en esta app"), symbol: "bolt.fill", tint: SettingTint.violet, control: .symbol("arrow.up.forward"), action: {
+            openExternal(DebugSupport.enableJITURL, failure: stikFailure)
+        }))
+        items.append(SettingItem(id: "openStik", title: tr("Abrir StikDebug"), subtitle: tr("Emparejamiento y scripts JIT"), symbol: "ladybug.fill", tint: SettingTint.violet, control: .symbol("arrow.up.forward"), action: {
+            openExternal(DebugSupport.stikDebugURL, failure: stikFailure)
+        }))
+        items.append(SettingItem(id: "copyBundle", title: tr("Copiar Bundle ID"), subtitle: DebugSupport.bundleID, symbol: "doc.on.doc.fill", tint: SettingTint.violet, control: .plain, action: {
+            UIPasteboard.general.string = DebugSupport.bundleID
+            showToast(tr("Bundle ID copiado"))
+        }))
+        return SettingGroup(id: "debug", title: tr("Depuración"), items: items)
+    }
+
+    private var liveContainerSettings: SettingGroup {
+        let inside: Bool = DebugSupport.isInsideLiveContainer
+        let statusText: String = inside ? tr("Dentro de LiveContainer") : tr("Fuera de LiveContainer")
+        let statusControl: SettingControl = inside ? .badge(tr("SÍ"), Color.green) : .badge(tr("NO"), Color.gray)
+        var items: [SettingItem] = []
+        items.append(SettingItem(id: "lcStatus", title: tr("Estado"), subtitle: statusText, symbol: "shippingbox.fill", tint: SettingTint.aqua, control: statusControl, action: {
+            showToast(statusText)
+        }))
+        items.append(SettingItem(id: "lcOpen", title: tr("Abrir LiveContainer"), subtitle: tr("Abre la app de LiveContainer"), symbol: "square.stack.3d.up.fill", tint: SettingTint.aqua, control: .symbol("arrow.up.forward"), action: {
+            openExternal(DebugSupport.liveContainerURL, failure: tr("No se pudo abrir LiveContainer. ¿Está instalado?"))
+        }))
+        items.append(SettingItem(id: "lcGame", title: tr("Juego de LiveContainer"), subtitle: tr("Acceso directo a una app de LiveContainer"), symbol: "plus.app.fill", tint: SettingTint.aqua, control: .symbol("plus"), action: {
+            shortcutInitialURL = DebugSupport.liveContainerLaunchPrefix
+            sheet = .addShortcut
+        }))
+        return SettingGroup(id: "livecontainer", title: "LiveContainer", isSubsection: true, items: items)
+    }
+
+    /// Mueve la selección por la cuadrícula de Ajustes respetando los grupos:
+    /// cada grupo empieza en fila nueva, también con 3 columnas en horizontal.
     private func moveSettingsSelection(_ direction: ControllerMonitor.Direction) {
-        let count: Int = controllerSettingTitles.count
-        guard count > 0 else { return }
-        let columns: Int = UIScreen.main.bounds.width > UIScreen.main.bounds.height ? 3 : 2
+        let groups: [SettingGroup] = settingGroups
+        let starts: [Int] = settingStarts(groups)
+        let count: Int = groups.reduce(0) { total, group in total + group.items.count }
+        guard count > 0, !starts.isEmpty else { return }
+        let columns: Int = isLandscapeNow ? 3 : 2
         let current: Int = min(max(controllerSelectedSettingIndex, 0), count - 1)
-        let starts: [Int] = Self.settingSectionStarts.filter { $0 < count }
         let section: Int = starts.lastIndex(where: { $0 <= current }) ?? 0
         let start: Int = starts[section]
         let end: Int = section + 1 < starts.count ? starts[section + 1] : count
         let local: Int = current - start
         let column: Int = local % columns
         let lastRow: Int = (end - start - 1) / columns
-        var next: Int = current
+        var target: Int = current
         switch direction {
         case .left:
-            if column > 0 { next = current - 1 }
+            if column > 0 { target = current - 1 }
         case .right:
-            if column < columns - 1, current + 1 < end { next = current + 1 }
+            if column < columns - 1, current + 1 < end { target = current + 1 }
         case .up:
             if local >= columns {
-                next = current - columns
+                target = current - columns
             } else if section > 0 {
-                // Última fila de la sección anterior, en la misma columna si existe.
+                // Última fila del grupo anterior, en la misma columna si existe.
                 let previousStart: Int = starts[section - 1]
                 let previousLastRowStart: Int = previousStart + ((start - previousStart - 1) / columns) * columns
-                next = min(previousLastRowStart + column, start - 1)
+                target = min(previousLastRowStart + column, start - 1)
             }
         case .down:
             if current + columns < end {
-                next = current + columns
+                target = current + columns
             } else if local / columns < lastRow {
-                // La última fila de la sección está incompleta: va a su último elemento.
-                next = end - 1
+                // La última fila del grupo está incompleta: va a su último elemento.
+                target = end - 1
             } else if end < count {
                 let nextEnd: Int = section + 2 < starts.count ? starts[section + 2] : count
-                next = min(end + column, nextEnd - 1)
+                target = min(end + column, nextEnd - 1)
             }
         }
-        controllerSelectedSettingIndex = next
+        controllerSelectedSettingIndex = target
         controllerSelectedArea = "settings"
         feedback()
     }
 
     private func activateSelectedSetting() {
-        switch controllerSelectedSettingIndex {
-        case 0: sheet = .controllers
-        case 1: hapticsEnabled.toggle()
-        case 2: clickSound.toggle()
-        case 3: dockModeEnabled.toggle()
-        case 4: hdmiAutoLandscape.toggle()
-        case 5: keepLandscape.toggle()
-        case 6: clock24h.toggle()
-        case 7: showAbout = true
-        case 8: if customBackground == nil { showPhotoPicker = true } else { dialog = .background }
-        case 9: dialog = .language
-        case 10: sheet = .platformOrder
-        case 11: compactGrid.toggle()
-        case 12: showWelcome.toggle()
-        case 13: showHeaderLogo.toggle()
-        case 14: scanLibrary()
-        case 15: showFolderImporter = true
-        case 16: sheet = .addShortcut
-        case 17: showSampleGames.toggle()
-        case 18: if !favoriteNames.isEmpty { dialog = .clearFavorites }
-        case 19: if !libraryGames.isEmpty { dialog = .clearLibrary }
-        default: break
-        }
+        let items: [SettingItem] = allSettingItems
+        guard items.indices.contains(controllerSelectedSettingIndex) else { return }
+        runSetting(items[controllerSelectedSettingIndex])
+    }
+
+    private func runSetting(_ item: SettingItem) {
         feedback()
+        item.action()
     }
 
     private func settingsContent(landscape: Bool) -> some View {
-        screen {
+        let groups: [SettingGroup] = settingGroups
+        let starts: [Int] = settingStarts(groups)
+        return screen {
             VStack(alignment: .leading, spacing: 14) {
                 screenTitle(tr("Ajustes"), subtitle: tr("Personaliza tu experiencia."))
                     .padding(.bottom, 4)
-
-                settingsHeader(tr("General"))
-                settingsGrid(landscape: landscape) {
-                    settingCard(tr("Mandos"), subtitle: controllersSubtitle, symbol: "gamecontroller.fill", tint: Color(red: 0.0, green: 0.72, blue: 1.0), action: {
-                        feedback()
-                        sheet = .controllers
-                    }) {
-                        settingBadge("\(controllers.controllers.count)", tint: controllers.controllers.isEmpty ? Color.gray : Color.green)
-                    }
-                    settingToggleCard(tr("Vibración"), subtitle: tr("Respuesta háptica al tocar"), symbol: "iphone.radiowaves.left.and.right", tint: Color(red: 0.0, green: 0.72, blue: 1.0), isOn: $hapticsEnabled)
-                    settingToggleCard(tr("Sonido al pulsar"), subtitle: tr("Clic al tocar botones"), symbol: "speaker.wave.2.fill", tint: Color(red: 0.30, green: 0.60, blue: 1.0), isOn: $clickSound)
-                    settingToggleCard(tr("Modo Dock"), subtitle: tr("Carrusel al girar a horizontal"), symbol: "tv.fill", tint: Color(red: 0.18, green: 0.46, blue: 1.0), isOn: $dockModeEnabled)
-                    settingToggleCard(tr("Dock con HDMI"), subtitle: tr("Activa Dock y horizontal al conectar HDMI"), symbol: "display", tint: Color(red: 0.16, green: 0.82, blue: 1.0), isOn: $hdmiAutoLandscape)
-                    settingToggleCard(tr("Bloquear horizontal"), subtitle: tr("Mantener la app en horizontal"), symbol: "iphone.landscape", tint: Color(red: 0.30, green: 0.60, blue: 1.0), isOn: $keepLandscape)
-                    settingToggleCard(tr("Reloj 24 horas"), subtitle: tr("Formato de la hora en Dock"), symbol: "clock.fill", tint: Color(red: 0.0, green: 0.72, blue: 1.0), isOn: $clock24h)
-                    settingCard(tr("Acerca de"), subtitle: tr("Versión %@", appVersion), symbol: "info.circle.fill", tint: Color.cyan, action: {
-                        feedback()
-                        showAbout = true
-                    }) {
-                        Image(systemName: "chevron.right")
-                            .font(.system(size: 11, weight: .bold))
-                            .foregroundStyle(Color.white.opacity(0.38))
-                    }
-                }
-
-                settingsHeader(tr("Apariencia"))
-                settingsGrid(landscape: landscape) {
-                    settingCard(tr("Fondo personalizado"), subtitle: customBackground == nil ? tr("Predeterminado") : tr("Imagen propia"), symbol: "photo.on.rectangle", tint: Color(red: 0.18, green: 0.46, blue: 1.0), action: {
-                        feedback()
-                        if customBackground == nil { showPhotoPicker = true } else { dialog = .background }
-                    }) {
-                        if customBackground != nil { settingBadge("ON") }
-                    }
-                    settingCard(tr("Idioma"), subtitle: languageLabel, symbol: "globe", tint: Color(red: 0.0, green: 0.72, blue: 1.0), action: {
-                        feedback()
-                        dialog = .language
-                    }) {
-                        Image(systemName: "chevron.up.chevron.down")
-                            .font(.system(size: 11, weight: .bold))
-                            .foregroundStyle(Color.white.opacity(0.38))
-                    }
-                    settingCard(tr("Reorganizar plataformas"), subtitle: tr("Orden de los filtros"), symbol: "arrow.up.arrow.down", tint: Color(red: 0.30, green: 0.60, blue: 1.0), action: {
-                        feedback()
-                        sheet = .platformOrder
-                    }) {
-                        Image(systemName: "chevron.right")
-                            .font(.system(size: 11, weight: .bold))
-                            .foregroundStyle(Color.white.opacity(0.38))
-                    }
-                    settingToggleCard(tr("Cuadrícula completa"), subtitle: tr("Más juegos por pantalla"), symbol: "square.grid.3x3.fill", tint: Color.cyan, isOn: $compactGrid)
-                    settingToggleCard(tr("Bienvenida animada"), subtitle: tr("Pantalla de inicio al abrir"), symbol: "sparkles", tint: Color(red: 0.30, green: 0.60, blue: 1.0), isOn: $showWelcome)
-                    settingToggleCard(tr("Logo en cabecera"), subtitle: tr("Icono junto al nombre"), symbol: "photo.fill", tint: Color(red: 0.18, green: 0.46, blue: 1.0), isOn: $showHeaderLogo)
-                }
-
-                settingsHeader(tr("Juegos"))
-                settingsGrid(landscape: landscape) {
-                    settingCard(tr("Escaneo de juegos"), subtitle: folderName.isEmpty ? tr("Vincula una carpeta primero") : tr("Buscar en «%@»", folderName), symbol: "arrow.triangle.2.circlepath", tint: Color(red: 0.0, green: 0.72, blue: 1.0), action: {
-                        feedback()
-                        scanLibrary()
-                    }) {
-                        if isScanning {
-                            ProgressView().tint(Color.cyan)
-                        } else {
-                            settingBadge("\(scannedCount)")
-                        }
-                    }
-                    settingCard(tr("Vincular carpeta"), subtitle: folderName.isEmpty ? tr("Carpeta contenedora") : folderName, symbol: "folder.badge.plus", tint: Color(red: 0.30, green: 0.60, blue: 1.0), action: {
-                        feedback()
-                        showFolderImporter = true
-                    }) {
-                        if !folderName.isEmpty { settingBadge("OK", tint: Color.green) }
-                    }
-                    settingCard(tr("Acceso directo (URL)"), subtitle: tr("Abre un emulador con un enlace"), symbol: "link.badge.plus", tint: Color(red: 0.18, green: 0.46, blue: 1.0), action: {
-                        feedback()
-                        sheet = .addShortcut
-                    }) {
-                        Image(systemName: "plus")
-                            .font(.system(size: 11, weight: .bold))
-                            .foregroundStyle(Color.white.opacity(0.5))
-                    }
-                    settingToggleCard(tr("Juegos de ejemplo"), subtitle: tr("Mostrar los de demostración"), symbol: "square.stack.3d.up.fill", tint: Color(red: 0.16, green: 0.82, blue: 1.0), isOn: $showSampleGames)
-                    settingCard(tr("Borrar favoritos"), subtitle: tr("Quita todos los marcados"), symbol: "star.slash.fill", tint: Color.orange, action: {
-                        feedback()
-                        if !favoriteNames.isEmpty { dialog = .clearFavorites }
-                    }) {
-                        settingBadge("\(favoriteNames.count)", tint: Color.orange)
-                    }
-                    settingCard(tr("Quitar añadidos"), subtitle: tr("Escaneados y accesos directos"), symbol: "trash.fill", tint: Color.orange, action: {
-                        feedback()
-                        if !libraryGames.isEmpty { dialog = .clearLibrary }
-                    }) {
-                        settingBadge("\(libraryGames.count)", tint: Color.orange)
-                    }
+                ForEach(groups.indices, id: \.self) { groupIndex in
+                    settingsSection(groups[groupIndex], start: starts[groupIndex], landscape: landscape)
                 }
             }
+        }
+    }
+
+    private func settingsSection(_ group: SettingGroup, start: Int, landscape: Bool) -> some View {
+        let columns: [GridItem] = Array(repeating: GridItem(.flexible(), spacing: 12), count: landscape ? 3 : 2)
+        return VStack(alignment: .leading, spacing: 12) {
+            settingsHeader(group.title, subsection: group.isSubsection)
+            LazyVGrid(columns: columns, spacing: 12) {
+                ForEach(group.items.indices, id: \.self) { offset in
+                    settingCard(group.items[offset], index: start + offset)
+                }
+            }
+        }
+    }
+
+    private func isSettingSelected(_ index: Int) -> Bool {
+        guard gamepadConnected, selectedSection == .ajustes, controllerSelectedArea == "settings" else { return false }
+        return controllerSelectedSettingIndex == index
+    }
+
+    private func settingCard(_ item: SettingItem, index: Int) -> some View {
+        let shape = RoundedRectangle(cornerRadius: 18, style: .continuous)
+        return Button {
+            runSetting(item)
+        } label: {
+            settingCardLabel(item)
+                .contentShape(shape)
+        }
+        .buttonStyle(TapHighlightButtonStyle(cornerRadius: 18))
+        .id("setting-\(index)")
+        .padRing(isSettingSelected(index), cornerRadius: 18)
+    }
+
+    /// Tarjeta de ajuste: icono arriba, control a la derecha (interruptor, etiqueta...) y texto debajo.
+    private func settingCardLabel(_ item: SettingItem) -> some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack(alignment: .center) {
+                Image(systemName: item.symbol)
+                    .font(.system(size: 17, weight: .semibold))
+                    .foregroundStyle(item.tint)
+                    .frame(width: 40, height: 40)
+                    .background(item.tint.opacity(0.14), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+                Spacer(minLength: 4)
+                settingControl(item.control)
+            }
+            VStack(alignment: .leading, spacing: 4) {
+                Text(item.title)
+                    .font(AppFont.text(14, .semibold))
+                    .foregroundStyle(.white)
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.8)
+                Text(item.subtitle)
+                    .font(AppFont.text(11))
+                    .foregroundStyle(.white.opacity(0.5))
+                    .lineLimit(2)
+                    .multilineTextAlignment(.leading)
+            }
+            Spacer(minLength: 0)
+        }
+        .padding(13)
+        .frame(maxWidth: .infinity, minHeight: 132, alignment: .topLeading)
+        .glassCard(interactive: true)
+    }
+
+    @ViewBuilder
+    private func settingControl(_ control: SettingControl) -> some View {
+        switch control {
+        case .toggle(let isOn):
+            Toggle("", isOn: .constant(isOn))
+                .labelsHidden()
+                .tint(Color.cyan)
+                .fixedSize()
+                .allowsHitTesting(false)
+        case .badge(let text, let color):
+            settingBadge(text, tint: color)
+        case .symbol(let name):
+            Image(systemName: name)
+                .font(.system(size: 11, weight: .bold))
+                .foregroundStyle(Color.white.opacity(0.45))
+        case .progress:
+            ProgressView()
+                .tint(Color.cyan)
+        case .plain:
+            EmptyView()
         }
     }
 
@@ -1846,95 +2081,18 @@ struct HomeView: View {
         }
     }
 
-    private func settingsHeader(_ title: String) -> some View {
+    private func settingsHeader(_ title: String, subsection: Bool = false) -> some View {
         Text(title.uppercased())
-            .font(.system(size: 12, weight: .heavy, design: .rounded))
+            .font(AppFont.text(subsection ? 11 : 12, .bold))
             .tracking(1.6)
-            .foregroundStyle(Color.cyan.opacity(0.85))
-            .padding(.top, 8)
+            .foregroundStyle(Color.cyan.opacity(subsection ? 0.6 : 0.85))
+            .padding(.top, subsection ? 2 : 8)
             .padding(.leading, 2)
-    }
-
-    private func settingsGrid<Content: View>(landscape: Bool, @ViewBuilder content: () -> Content) -> some View {
-        LazyVGrid(
-            columns: Array(repeating: GridItem(.flexible(), spacing: 12), count: landscape ? 3 : 2),
-            spacing: 12
-        ) {
-            content()
-        }
-    }
-
-    /// Tarjeta de ajuste: icono arriba, control a la derecha (interruptor, etiqueta...) y texto debajo.
-    private func settingCard<Trailing: View>(
-        _ title: String,
-        subtitle: String,
-        symbol: String,
-        tint: Color,
-        action: @escaping () -> Void,
-        @ViewBuilder trailing: () -> Trailing
-    ) -> some View {
-        let trailingView = trailing()
-        return Button(action: action) {
-            VStack(alignment: .leading, spacing: 10) {
-                HStack(alignment: .center) {
-                    Image(systemName: symbol)
-                        .font(.system(size: 17, weight: .semibold))
-                        .foregroundStyle(tint)
-                        .frame(width: 40, height: 40)
-                        .background(tint.opacity(0.14), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
-                    Spacer(minLength: 4)
-                    trailingView
-                }
-                VStack(alignment: .leading, spacing: 4) {
-                    Text(title)
-                        .font(.system(size: 14, weight: .semibold))
-                        .foregroundStyle(.white)
-                        .lineLimit(1)
-                        .minimumScaleFactor(0.8)
-                    Text(subtitle)
-                        .font(.system(size: 11))
-                        .foregroundStyle(.white.opacity(0.5))
-                        .lineLimit(2)
-                        .multilineTextAlignment(.leading)
-                }
-                Spacer(minLength: 0)
-            }
-            .padding(13)
-            .frame(maxWidth: .infinity, minHeight: 132, alignment: .topLeading)
-            .glassCard(interactive: true)
-        }
-        .buttonStyle(ControllerFocusableButtonStyle())
-        .focusable()
-        .id("setting-\(controllerSettingTitles.firstIndex(of: title) ?? -1)")
-        .overlay {
-            if selectedSection == .ajustes,
-               controllerSelectedArea == "settings",
-               controllerSettingTitles.indices.contains(controllerSelectedSettingIndex),
-               controllerSettingTitles[controllerSelectedSettingIndex] == title {
-                RoundedRectangle(cornerRadius: 18, style: .continuous)
-                    .stroke(Color.cyan.opacity(0.98), lineWidth: 2.5)
-                    .shadow(color: Color.cyan.opacity(0.65), radius: 9)
-                    .allowsHitTesting(false)
-            }
-        }
-    }
-
-    private func settingToggleCard(_ title: String, subtitle: String, symbol: String, tint: Color, isOn: Binding<Bool>) -> some View {
-        settingCard(title, subtitle: subtitle, symbol: symbol, tint: tint, action: {
-            isOn.wrappedValue.toggle()
-            feedback()
-        }) {
-            Toggle(title, isOn: isOn)
-                .labelsHidden()
-                .tint(Color.cyan)
-                .fixedSize()
-                .allowsHitTesting(false)
-        }
     }
 
     private func settingBadge(_ text: String, tint: Color = Color.cyan) -> some View {
         Text(text)
-            .font(.system(size: 9, weight: .bold, design: .rounded))
+            .font(AppFont.text(9, .bold))
             .tracking(0.6)
             .foregroundStyle(tint)
             .padding(.horizontal, 8)
@@ -1947,88 +2105,76 @@ struct HomeView: View {
     private static let dockOptionSymbols = ["flag.checkered", "gamecontroller.fill", "bolt.fill", "gearshape.fill"]
 
     private func dockTopBar() -> some View {
-        ZStack {
-            HStack {
-                HStack(spacing: 5) {
-                    Text("OmniStation")
-                        .foregroundStyle(.white)
-                    Text("Dock")
-                        .foregroundStyle(Color(red: 0.08, green: 0.68, blue: 1.0))
-                }
-                .font(.system(size: 19, weight: .bold, design: .rounded))
-                .tracking(-0.4)
-                .lineLimit(1)
-                Spacer()
-                DockClock(use24h: clock24h)
-            }
-            HStack(spacing: 4) {
-                ForEach(DockSection.allCases, id: \.self) { section in
-                    dockNavItem(section)
-                }
-            }
-            .padRing(controllerSelectedArea == "dockNav", cornerRadius: 16)
+        // Los dos lados ocupan lo mismo: las pestañas quedan centradas y el nombre
+        // se ajusta a su mitad sin montarse encima de ellas en pantallas más estrechas.
+        HStack(spacing: 12) {
+            BrandTitle(size: 28)
+                .frame(maxWidth: .infinity, alignment: .leading)
+            // Las mismas pestañas que en vertical.
+            tabButtons(compact: false)
+                .padding(5)
+                .padRing(gamepadConnected && controllerSelectedArea == "dockNav", cornerRadius: 18)
+                .fixedSize()
+            DockStatus(use24h: clock24h)
+                .frame(maxWidth: .infinity, alignment: .trailing)
         }
         .padding(.horizontal, 22)
         .padding(.top, 8)
-        .padding(.bottom, 4)
+        .padding(.bottom, 6)
         .reportFrame("header")
     }
 
-    private func dockNavItem(_ section: DockSection) -> some View {
-        let isSelected = selectedSection == section
-        return Button {
-            feedback()
-            withAnimation(.easeInOut(duration: 0.2)) { selectedSection = section }
-        } label: {
-            VStack(spacing: 3) {
-                Image(systemName: section.symbol)
-                    .font(.system(size: 19, weight: .semibold))
-                Text(tr(section.rawValue))
-                    .font(.system(size: 10, weight: .semibold))
-            }
-            .foregroundStyle(isSelected ? Color.cyan : Color.white.opacity(0.72))
-            .frame(width: 70, height: 42)
-            .shadow(color: isSelected ? Color.cyan.opacity(0.5) : Color.clear, radius: 8)
-        }
-        .buttonStyle(.plain)
-        .accessibilityLabel(tr(section.rawValue))
-    }
-
     /// Inicio y Favoritos en el Modo Dock: filtros, título y carrusel de juegos.
+    /// Las dos pantallas reservan el mismo hueco para los filtros, así las tarjetas miden lo mismo.
     private func dockHome() -> some View {
         GeometryReader { geometry in
             let isHome: Bool = selectedSection == .inicio
             let list: [Game] = isHome ? filteredGames : favoriteGames
-            // Cabecera + filtros + título + barra inferior + separaciones.
-            let filtersHeight: CGFloat = isHome ? 41 : 0
-            let reserved: CGFloat = headerHeight + filtersHeight + 100
+            let header: CGFloat = metrics.headerHeight
+            // Cabecera + filtros + título de sección + barra inferior.
+            let reserved: CGFloat = header + 40 + 30 + 62
             let carouselHeight: CGFloat = max(150, geometry.size.height - reserved)
-            let cardWidth: CGFloat = min(max(carouselHeight * 0.62, 100), 190)
-            VStack(spacing: 6) {
-                Color.clear.frame(height: headerHeight)
-                if isHome {
-                    platformFilters(compact: true, dock: true)
-                        .padRing(controllerSelectedArea == "dockChips", cornerRadius: 22)
-                }
+            // La portada ocupa todo el alto que dejan el nombre y la indicación de debajo.
+            let coverHeight: CGFloat = carouselHeight - DockCarousel.textHeight
+            let cardWidth: CGFloat = min(max(coverHeight / DockCarousel.coverRatio, 90), 230)
+            VStack(spacing: 0) {
+                Color.clear.frame(height: header)
+                dockFilters(isHome: isHome)
+                    .frame(height: 40)
                 sectionHeading(isHome ? tr("Tu biblioteca") : tr("Tus favoritos"), detail: tr("%ld elementos", list.count))
                     .padding(.horizontal, 22)
-                DockCarousel(
-                    games: list,
-                    selectedID: Binding<String?>(
-                        get: { dockSelectedID(in: list) },
-                        set: { controllerSelectedGameID = $0 }
-                    ),
-                    focused: gamepadConnected && controllerSelectedArea == "games",
-                    favorites: favoriteNames,
-                    cardWidth: cardWidth,
-                    playHint: tr("Presiona ✕ para jugar"),
-                    emptyText: isHome ? tr("Sin juegos en esta plataforma") : tr("Aún no hay favoritos"),
-                    onOpen: { game in self.open(game) }
-                )
-                .frame(height: carouselHeight)
+                    .frame(height: 30)
+                dockCarousel(list, isHome: isHome, cardWidth: cardWidth)
+                    .frame(height: carouselHeight)
                 Spacer(minLength: 0)
             }
         }
+    }
+
+    @ViewBuilder
+    private func dockFilters(isHome: Bool) -> some View {
+        if isHome {
+            platformFilters(compact: true, dock: true)
+                .padRing(gamepadConnected && controllerSelectedArea == "dockChips", cornerRadius: 22)
+        } else {
+            Color.clear
+        }
+    }
+
+    private func dockCarousel(_ list: [Game], isHome: Bool, cardWidth: CGFloat) -> some View {
+        DockCarousel(
+            games: list,
+            selectedID: Binding<String?>(
+                get: { dockSelectedID(in: list) },
+                set: { controllerSelectedGameID = $0 }
+            ),
+            focused: gamepadConnected && controllerSelectedArea == "games",
+            favorites: favoriteNames,
+            cardWidth: cardWidth,
+            playHint: tr("Presiona ✕ para jugar"),
+            emptyText: isHome ? tr("Sin juegos en esta plataforma") : tr("Aún no hay favoritos"),
+            onOpen: { game in self.open(game) }
+        )
     }
 
     /// Juego marcado en el carrusel: el seleccionado si está en la lista, si no el primero.
@@ -2075,7 +2221,7 @@ struct HomeView: View {
     private func dockHint(_ key: String, _ label: String) -> some View {
         HStack(spacing: 6) {
             Text(key)
-                .font(.system(size: 10, weight: .bold, design: .rounded))
+                .font(AppFont.text(10, .bold))
                 .foregroundStyle(.white.opacity(0.9))
                 .padding(.horizontal, 6)
                 .padding(.vertical, 3)
@@ -2084,13 +2230,13 @@ struct HomeView: View {
                         .strokeBorder(Color.white.opacity(0.45), lineWidth: 1)
                 )
             Text(label)
-                .font(.system(size: 12, weight: .medium))
+                .font(AppFont.text(12, .medium))
                 .foregroundStyle(.white.opacity(0.75))
         }
     }
 
     private func dockOptionButton(_ index: Int) -> some View {
-        let focused = controllerSelectedArea == "dockOptions" && dockOptionIndex == index
+        let focused: Bool = gamepadConnected && controllerSelectedArea == "dockOptions" && dockOptionIndex == index
         return Button {
             activateDockOption(index)
         } label: {
@@ -2098,6 +2244,7 @@ struct HomeView: View {
                 .font(.system(size: 17, weight: .semibold))
                 .foregroundStyle(focused ? Color.cyan : Color.cyan.opacity(0.8))
                 .frame(width: 38, height: 38)
+                .contentShape(Circle())
                 .liquidGlass(in: Circle(), tint: focused ? Color.cyan : nil, interactive: true)
                 .padRing(focused, cornerRadius: 19)
         }
@@ -2110,7 +2257,7 @@ struct HomeView: View {
         HStack(spacing: 10) {
             Image(systemName: "magnifyingglass").foregroundStyle(.cyan)
             TextField(tr("Buscar juegos y plataformas…"), text: $searchText)
-                .font(.system(size: 14))
+                .font(AppFont.text(14))
                 .focused($controllerSearchFocused)
                 .autocorrectionDisabled()
                 .textInputAutocapitalization(.never)
@@ -2119,21 +2266,13 @@ struct HomeView: View {
                     Image(systemName: "xmark.circle.fill").foregroundStyle(.white.opacity(0.5))
                 }
                 .buttonStyle(ControllerFocusableButtonStyle())
-                    .focusable()
             }
         }
         .padding(.horizontal, 14)
         .padding(.vertical, 13)
         .glassCard()
         .id("search-bar")
-        .overlay {
-            if selectedSection == .busqueda && controllerSelectedArea == "search" {
-                RoundedRectangle(cornerRadius: 18, style: .continuous)
-                    .stroke(Color.cyan.opacity(0.98), lineWidth: 2.5)
-                    .shadow(color: Color.cyan.opacity(0.72), radius: 10)
-                    .allowsHitTesting(false)
-            }
-        }
+        .padRing(searchRingVisible, cornerRadius: 18)
     }
 
     private var emptyResults: some View {
@@ -2154,9 +2293,9 @@ struct HomeView: View {
                 .frame(width: 35, height: 35)
             VStack(alignment: .leading, spacing: 3) {
                 Text(tr("Tu universo está tomando forma"))
-                    .font(.system(size: 13, weight: .semibold))
+                    .font(AppFont.text(13, .semibold))
                 Text(tr("Estos son juegos de ejemplo. Vincula una carpeta o añade accesos directos en Ajustes → Juegos."))
-                    .font(.system(size: 11))
+                    .font(AppFont.text(11))
                     .foregroundStyle(.white.opacity(0.52))
             }
             Spacer(minLength: 0)
@@ -2167,7 +2306,6 @@ struct HomeView: View {
 }
 
 private struct GameTile: View {
-    @Environment(\.isFocused) private var isFocused
     let game: Game
     var compact: Bool = false
     var isFavorite: Bool = false
@@ -2178,74 +2316,16 @@ private struct GameTile: View {
     var onOpen: () -> Void = {}
     var onRemove: (() -> Void)? = nil
 
-    var body: some View {
-        VStack(alignment: .leading, spacing: compact ? 6 : 8) {
-            ZStack {
-                LinearGradient(
-                    colors: [game.tint.opacity(0.76), Color(red: 0.015, green: 0.055, blue: 0.14).opacity(0.94), Color(red: 0.003, green: 0.012, blue: 0.04)],
-                    startPoint: .topLeading,
-                    endPoint: .bottomTrailing
-                )
-                Circle()
-                    .fill(Color.cyan.opacity(0.12))
-                    .frame(width: compact ? 64 : 90, height: compact ? 64 : 90)
-                    .blur(radius: 2)
-                    .offset(x: 24, y: -22)
-                Image(systemName: game.symbol)
-                    .font(.system(size: compact ? 27 : 34, weight: .medium))
-                    .foregroundStyle(.white.opacity(0.92))
-                    .shadow(color: .black.opacity(0.3), radius: 8)
-                VStack {
-                    HStack {
-                        Text(game.platform)
-                            .font(.system(size: 9, weight: .bold))
-                            .padding(.horizontal, 7)
-                            .padding(.vertical, 4)
-                            .background(.ultraThinMaterial, in: Capsule())
-                            .overlay(Capsule().strokeBorder(Color.white.opacity(0.22), lineWidth: 0.5))
-                        Spacer()
-                        Button(action: onToggleFavorite) {
-                            Image(systemName: isFavorite ? "star.fill" : "star")
-                                .font(.system(size: compact ? 11 : 13, weight: .bold))
-                                .foregroundStyle(isFavorite ? Color.yellow : Color.white.opacity(0.85))
-                                .frame(width: compact ? 24 : 28, height: compact ? 24 : 28)
-                                .background(.ultraThinMaterial, in: Circle())
-                                .overlay(Circle().strokeBorder(Color.white.opacity(0.22), lineWidth: 0.5))
-                        }
-                        .buttonStyle(ControllerFocusableButtonStyle())
-                    .focusable()
-                        .accessibilityLabel(favoriteLabel)
-                    }
-                    Spacer()
-                }
-                .padding(8)
-            }
-            .frame(height: compact ? 90 : 118)
-            .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
-            .glassRim(in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+    private static let tileShape = RoundedRectangle(cornerRadius: 18, style: .continuous)
+    private static let coverShape = RoundedRectangle(cornerRadius: 14, style: .continuous)
 
-            Text(game.name)
-                .font(.system(size: compact ? 11 : 12, weight: .semibold, design: .rounded))
-                .tracking(0.1)
-                .lineLimit(2)
-                .foregroundStyle(.white.opacity(0.95))
-                .frame(maxWidth: .infinity, minHeight: compact ? 28 : 30, alignment: .topLeading)
+    var body: some View {
+        // Un botón de verdad: se remarca al tocar y no necesita el foco de iOS.
+        Button(action: onOpen) {
+            tileContent
         }
-        .padding(7)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .glassCard()
-        .overlay {
-            if isControllerSelected {
-                RoundedRectangle(cornerRadius: 18, style: .continuous)
-                    .stroke(Color.cyan.opacity(0.98), lineWidth: 2.5)
-                    .shadow(color: Color.cyan.opacity(0.72), radius: 10)
-                    .padding(-2)
-                    .allowsHitTesting(false)
-            }
-        }
-        .contentShape(Rectangle())
-        .focusable()
-        .onTapGesture(perform: onOpen)
+        .buttonStyle(TapHighlightButtonStyle(cornerRadius: 18))
+        .padRing(isControllerSelected, cornerRadius: 18)
         .contextMenu {
             Button(action: onToggleFavorite) {
                 Label(favoriteLabel, systemImage: isFavorite ? "star.slash" : "star")
@@ -2257,6 +2337,168 @@ private struct GameTile: View {
             }
         }
     }
+
+    private var tileContent: some View {
+        VStack(alignment: .leading, spacing: compact ? 6 : 8) {
+            cover
+            Text(game.name)
+                .font(AppFont.text(compact ? 11 : 12, .semibold))
+                .tracking(0.1)
+                .lineLimit(2)
+                .multilineTextAlignment(.leading)
+                .foregroundStyle(.white.opacity(0.95))
+                .frame(maxWidth: .infinity, minHeight: compact ? 28 : 30, alignment: .topLeading)
+        }
+        .padding(7)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background { tileBackground }
+        .glassRim(in: Self.tileShape)
+        .contentShape(Self.tileShape)
+    }
+
+    /// Cristal ligero: relleno translúcido y borde de luz, sin desenfoques
+    /// (con muchas tarjetas, el desenfoque de cada una hacía que deslizar fuera a tirones).
+    private var tileBackground: some View {
+        Self.tileShape.fill(
+            LinearGradient(
+                colors: [Color.white.opacity(0.10), Color.blue.opacity(0.05), Color.black.opacity(0.22)],
+                startPoint: .topLeading,
+                endPoint: .bottomTrailing
+            )
+        )
+    }
+
+    private var cover: some View {
+        ZStack {
+            LinearGradient(
+                colors: [game.tint.opacity(0.76), Color(red: 0.015, green: 0.055, blue: 0.14).opacity(0.94), Color(red: 0.003, green: 0.012, blue: 0.04)],
+                startPoint: .topLeading,
+                endPoint: .bottomTrailing
+            )
+            RadialGradient(
+                colors: [Color.cyan.opacity(0.16), Color.clear],
+                center: .topTrailing,
+                startRadius: 2,
+                endRadius: compact ? 70 : 95
+            )
+            Image(systemName: game.symbol)
+                .font(.system(size: compact ? 27 : 34, weight: .medium))
+                .foregroundStyle(.white.opacity(0.92))
+            coverBadges
+        }
+        .frame(height: compact ? 90 : 118)
+        .clipShape(Self.coverShape)
+        .overlay { Self.coverShape.strokeBorder(Color.white.opacity(0.14), lineWidth: 0.5) }
+    }
+
+    private var coverBadges: some View {
+        VStack {
+            HStack {
+                Text(game.platform)
+                    .font(AppFont.text(9, .bold))
+                    .padding(.horizontal, 7)
+                    .padding(.vertical, 4)
+                    .background(Color.black.opacity(0.38), in: Capsule())
+                    .overlay(Capsule().strokeBorder(Color.white.opacity(0.22), lineWidth: 0.5))
+                Spacer()
+                favoriteButton
+            }
+            Spacer()
+        }
+        .padding(8)
+    }
+
+    private var favoriteButton: some View {
+        let side: CGFloat = compact ? 24 : 28
+        return Button(action: onToggleFavorite) {
+            Image(systemName: isFavorite ? "star.fill" : "star")
+                .font(.system(size: compact ? 11 : 13, weight: .bold))
+                .foregroundStyle(isFavorite ? Color.yellow : Color.white.opacity(0.85))
+                .frame(width: side, height: side)
+                .background(Color.black.opacity(0.38), in: Circle())
+                .overlay(Circle().strokeBorder(Color.white.opacity(0.22), lineWidth: 0.5))
+                .contentShape(Circle())
+        }
+        .buttonStyle(ControllerFocusableButtonStyle())
+        .accessibilityLabel(favoriteLabel)
+    }
+}
+
+// MARK: - Título de la interfaz
+
+/// «OmniStation Dock» en Orbitron, en un solo texto para que encoja de forma uniforme.
+struct BrandTitle: View {
+    var size: CGFloat
+
+    private var title: AttributedString {
+        var first = AttributedString("OmniStation ")
+        first.foregroundColor = Color.white
+        var second = AttributedString("Dock")
+        second.foregroundColor = Color(red: 0.08, green: 0.68, blue: 1.0)
+        return first + second
+    }
+
+    var body: some View {
+        Text(title)
+            .font(AppFont.brand(size, .bold))
+            .lineLimit(1)
+            .minimumScaleFactor(0.7)
+            .shadow(color: Color.cyan.opacity(0.12), radius: 8, y: 0)
+    }
+}
+
+/// Título de la cabecera: se desvanece y sube un poco al deslizar.
+/// Es una vista aparte para que solo ella se repinte con el desplazamiento.
+private struct HeaderTitle: View {
+    @ObservedObject var progress: ScrollProgress
+    var size: CGFloat
+
+    /// Puntos de scroll en los que el título termina de desvanecerse.
+    private static let collapseDistance: CGFloat = 36
+
+    var body: some View {
+        let hidden: CGFloat = min(1, progress.offset / Self.collapseDistance)
+        return BrandTitle(size: size)
+            .opacity(1 - hidden)
+            .offset(y: -10 * hidden)
+            .scaleEffect(1 - 0.06 * hidden, anchor: .leading)
+    }
+}
+
+// MARK: - Tipos de los Ajustes
+
+/// Lo que se ve a la derecha del icono en cada tarjeta de ajuste.
+private enum SettingControl {
+    case toggle(Bool)
+    case badge(String, Color)
+    case symbol(String)
+    case progress
+    case plain
+}
+
+private struct SettingItem: Identifiable {
+    let id: String
+    let title: String
+    let subtitle: String
+    let symbol: String
+    let tint: Color
+    let control: SettingControl
+    let action: () -> Void
+}
+
+private struct SettingGroup: Identifiable {
+    let id: String
+    let title: String
+    var isSubsection: Bool = false
+    let items: [SettingItem]
+}
+
+private enum SettingTint {
+    static let sky = Color(red: 0.0, green: 0.72, blue: 1.0)
+    static let blue = Color(red: 0.18, green: 0.46, blue: 1.0)
+    static let periwinkle = Color(red: 0.30, green: 0.60, blue: 1.0)
+    static let aqua = Color(red: 0.16, green: 0.82, blue: 1.0)
+    static let violet = Color(red: 0.55, green: 0.42, blue: 1.0)
 }
 
 #Preview {

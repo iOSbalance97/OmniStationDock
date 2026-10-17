@@ -9,6 +9,8 @@ enum PadAction {
 /// Puente entre el mando (que escucha HomeView) y la ventana que esté abierta encima.
 /// La ventana registra aquí su `handler`; devuelve `true` si ha usado el botón.
 final class SheetPad: ObservableObject {
+    /// Con mando conectado se dibuja el recuadro de selección; sin mando, no.
+    @Published var gamepadConnected = false
     var handler: ((PadAction) -> Bool)?
 
     @discardableResult
@@ -33,14 +35,12 @@ extension View {
 
 // MARK: - Mandos
 
+/// Solo informa de los mandos conectados: la interfaz siempre responde al mando.
 struct ControllersSheet: View {
     let lang: String
     @ObservedObject var monitor: ControllerMonitor
-    @Binding var navigationEnabled: Bool
-    let pad: SheetPad
+    @ObservedObject var pad: SheetPad
     @Environment(\.dismiss) private var dismiss
-    // Con el mando: 0 = interruptor, 1 = Listo.
-    @State private var selected = 0
 
     private func tr(_ key: String, _ args: CVarArg...) -> String {
         let base = L10n.tr(key, lang)
@@ -58,7 +58,6 @@ struct ControllersSheet: View {
                             row(controller)
                         }
                     }
-                    navigationToggle
                     doneButton
                 }
                 .padding(16)
@@ -72,12 +71,10 @@ struct ControllersSheet: View {
         .onAppear {
             pad.handler = { action in
                 switch action {
-                case .up: selected = 0
-                case .down: selected = 1
-                case .left, .right: break
-                case .accept:
-                    if selected == 0 { navigationEnabled.toggle() } else { dismiss() }
-                case .cancel: dismiss()
+                case .accept, .cancel:
+                    dismiss()
+                default:
+                    break
                 }
                 return true
             }
@@ -91,9 +88,9 @@ struct ControllersSheet: View {
                 .font(.system(size: 34, weight: .light))
                 .foregroundStyle(Color.cyan)
             Text(tr("Ningún mando conectado"))
-                .font(.system(size: 15, weight: .semibold, design: .rounded))
+                .font(AppFont.text(15, .semibold))
             Text(tr("Conecta un mando por Bluetooth (DualSense, Xbox…) y aparecerá aquí."))
-                .font(.system(size: 12))
+                .font(AppFont.text(12))
                 .foregroundStyle(.white.opacity(0.55))
                 .multilineTextAlignment(.center)
         }
@@ -111,16 +108,14 @@ struct ControllersSheet: View {
                 .background(Color.cyan.opacity(0.14), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
             VStack(alignment: .leading, spacing: 3) {
                 Text(controller.name)
-                    .font(.system(size: 14, weight: .semibold))
+                    .font(AppFont.text(14, .semibold))
                 Text(controller.category)
-                    .font(.system(size: 11))
+                    .font(AppFont.text(11))
                     .foregroundStyle(.white.opacity(0.5))
             }
             Spacer(minLength: 6)
             if let battery = controller.battery {
-                Label(controller.charging ? tr("Cargando") + " \(battery)%" : "\(battery)%", systemImage: controller.charging ? "battery.100.bolt" : "battery.75")
-                    .font(.system(size: 11, weight: .semibold))
-                    .foregroundStyle(.white.opacity(0.7))
+                batteryLabel(battery, charging: controller.charging)
             }
         }
         .padding(13)
@@ -128,28 +123,12 @@ struct ControllersSheet: View {
         .glassCard()
     }
 
-    private var navigationToggle: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            HStack(spacing: 12) {
-                VStack(alignment: .leading, spacing: 3) {
-                    Text(tr("Navegar con el mando"))
-                        .font(.system(size: 14, weight: .semibold))
-                    Text(tr("L1 y R1 cambian de pestaña"))
-                        .font(.system(size: 11))
-                        .foregroundStyle(.white.opacity(0.5))
-                }
-                Spacer(minLength: 6)
-                Toggle(tr("Navegar con el mando"), isOn: $navigationEnabled)
-                    .labelsHidden()
-                    .tint(Color.cyan)
-            }
-            Text(tr("Si lo desactivas, el mando dejará de mover la interfaz."))
-                .font(.system(size: 10))
-                .foregroundStyle(.white.opacity(0.4))
-        }
-        .padding(13)
-        .glassCard()
-        .padRing(selected == 0, cornerRadius: 18)
+    private func batteryLabel(_ battery: Int, charging: Bool) -> some View {
+        let text: String = charging ? tr("Cargando") + " \(battery)%" : "\(battery)%"
+        let symbol: String = charging ? "battery.100percent.bolt" : "battery.75percent"
+        return Label(text, systemImage: symbol)
+            .font(AppFont.text(11, .semibold))
+            .foregroundStyle(.white.opacity(0.7))
     }
 
     private var doneButton: some View {
@@ -157,14 +136,15 @@ struct ControllersSheet: View {
             dismiss()
         } label: {
             Text(tr("Listo"))
-                .font(.system(size: 15, weight: .semibold))
+                .font(AppFont.text(15, .semibold))
                 .foregroundStyle(Color.cyan)
                 .frame(maxWidth: .infinity)
                 .padding(.vertical, 13)
+                .contentShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
                 .liquidGlass(in: RoundedRectangle(cornerRadius: 14, style: .continuous), interactive: true)
-                .padRing(selected == 1, cornerRadius: 14)
+                .padRing(pad.gamepadConnected, cornerRadius: 14)
         }
-        .buttonStyle(.plain)
+        .buttonStyle(ControllerFocusableButtonStyle())
     }
 }
 
@@ -173,7 +153,7 @@ struct ControllersSheet: View {
 struct PlatformOrderSheet: View {
     let lang: String
     @Binding var orderRaw: String
-    let pad: SheetPad
+    @ObservedObject var pad: SheetPad
     @Environment(\.dismiss) private var dismiss
     @State private var items: [String] = []
     // Con el mando: 0..<items.count = plataformas, luego «Restablecer» y «Listo».
@@ -192,7 +172,7 @@ struct PlatformOrderSheet: View {
                     Section {
                         ForEach(Array(items.enumerated()), id: \.element) { index, name in
                             Label(name, systemImage: Platforms.symbol(for: name))
-                                .font(.system(size: 15, weight: .semibold))
+                                .font(AppFont.text(15, .semibold))
                                 .listRowBackground(rowBackground(index))
                         }
                         .onMove { source, destination in
@@ -204,6 +184,7 @@ struct PlatformOrderSheet: View {
                             Text(tr("Arrastra para cambiar el orden de los filtros."))
                             Text(tr("Con el mando: X agarra y suelta, ↑↓ mueve."))
                         }
+                        .font(AppFont.text(12))
                     }
                 }
                 .environment(\.editMode, .constant(.active))
@@ -232,9 +213,10 @@ struct PlatformOrderSheet: View {
     }
 
     private func rowBackground(_ index: Int) -> some View {
-        let isSelected = selected == index
+        let isSelected: Bool = pad.gamepadConnected && selected == index
+        let fill: Color = isSelected ? Color.cyan.opacity(grabbed ? 0.38 : 0.18) : Color.white.opacity(0.07)
         return ZStack {
-            (isSelected ? Color.cyan.opacity(grabbed ? 0.38 : 0.18) : Color.white.opacity(0.07))
+            fill
             if isSelected {
                 Rectangle()
                     .strokeBorder(Color.cyan.opacity(0.98), lineWidth: 2.5)
@@ -245,14 +227,15 @@ struct PlatformOrderSheet: View {
     private func actionButton(_ title: String, row: Int, action: @escaping () -> Void) -> some View {
         Button(action: action) {
             Text(title)
-                .font(.system(size: 15, weight: .semibold))
+                .font(AppFont.text(15, .semibold))
                 .foregroundStyle(Color.cyan)
                 .frame(maxWidth: .infinity)
                 .padding(.vertical, 13)
+                .contentShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
                 .liquidGlass(in: RoundedRectangle(cornerRadius: 14, style: .continuous), interactive: true)
-                .padRing(selected == row, cornerRadius: 14)
+                .padRing(pad.gamepadConnected && selected == row, cornerRadius: 14)
         }
-        .buttonStyle(.plain)
+        .buttonStyle(ControllerFocusableButtonStyle())
     }
 
     private func reset() {
@@ -305,7 +288,9 @@ struct AddShortcutSheet: View {
     private enum Field { case name, url }
 
     let lang: String
-    let pad: SheetPad
+    @ObservedObject var pad: SheetPad
+    /// Enlace con el que empieza el campo URL (por ejemplo, el de LiveContainer).
+    var initialURL: String = ""
     var onSave: (LibraryGame) -> Void
     @Environment(\.dismiss) private var dismiss
 
@@ -339,32 +324,30 @@ struct AddShortcutSheet: View {
             ScrollView {
                 VStack(alignment: .leading, spacing: 16) {
                     caption(tr("Plataforma"))
-                    LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 8), count: 3), spacing: 8) {
-                        ForEach(Array(Platforms.movableNames.enumerated()), id: \.element) { index, item in
-                            platformChip(item, index: index)
-                        }
-                    }
+                    platformGrid
 
                     caption(tr("Nombre"))
                     TextField(tr("Nombre del juego"), text: $name)
+                        .font(AppFont.text(15))
                         .focused($field, equals: .name)
                         .textInputAutocapitalization(.words)
                         .padding(14)
                         .glassCard(cornerRadius: 14)
-                        .padRing(selected == nameRow, cornerRadius: 14)
+                        .padRing(pad.gamepadConnected && selected == nameRow, cornerRadius: 14)
 
                     caption(tr("URL de acceso directo"))
                     TextField("app://juego", text: $urlText)
+                        .font(AppFont.text(15))
                         .focused($field, equals: .url)
                         .keyboardType(.URL)
                         .textInputAutocapitalization(.never)
                         .autocorrectionDisabled()
                         .padding(14)
                         .glassCard(cornerRadius: 14)
-                        .padRing(selected == urlRow, cornerRadius: 14)
+                        .padRing(pad.gamepadConnected && selected == urlRow, cornerRadius: 14)
 
                     Text(tr("Debe incluir el esquema de la app, por ejemplo app://…"))
-                        .font(.system(size: 11))
+                        .font(AppFont.text(11))
                         .foregroundStyle(.white.opacity(0.5))
 
                     HStack(spacing: 10) {
@@ -383,6 +366,7 @@ struct AddShortcutSheet: View {
         .presentationBackground(.ultraThinMaterial)
         .preferredColorScheme(.dark)
         .onAppear {
+            if urlText.isEmpty { urlText = initialURL }
             pad.handler = { action in
                 handle(action)
                 return true
@@ -391,15 +375,24 @@ struct AddShortcutSheet: View {
         .onDisappear { pad.handler = nil }
     }
 
+    private var platformGrid: some View {
+        LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 8), count: 3), spacing: 8) {
+            ForEach(Array(Platforms.movableNames.enumerated()), id: \.element) { index, item in
+                platformChip(item, index: index)
+            }
+        }
+    }
+
     private func caption(_ text: String) -> some View {
         Text(text.uppercased())
-            .font(.system(size: 11, weight: .heavy, design: .rounded))
+            .font(AppFont.text(11, .bold))
             .tracking(1.4)
             .foregroundStyle(Color.cyan.opacity(0.85))
     }
 
     private func platformChip(_ item: String, index: Int) -> some View {
-        let isChosen = platform == item
+        let isChosen: Bool = platform == item
+        let tint: Color? = isChosen ? Color(red: 0.05, green: 0.45, blue: 1.0) : nil
         return Button {
             platform = item
         } label: {
@@ -407,35 +400,36 @@ struct AddShortcutSheet: View {
                 Image(systemName: Platforms.symbol(for: item))
                     .font(.system(size: 12, weight: .semibold))
                 Text(item)
-                    .font(.system(size: 13, weight: .semibold))
+                    .font(AppFont.text(13, .semibold))
             }
             .foregroundStyle(isChosen ? Color.white : Color.white.opacity(0.78))
             .padding(.horizontal, 12)
             .padding(.vertical, 10)
             .frame(maxWidth: .infinity)
-            .liquidGlass(in: Capsule(), tint: isChosen ? Color(red: 0.05, green: 0.45, blue: 1.0) : nil, interactive: true)
+            .contentShape(Capsule())
+            .liquidGlass(in: Capsule(), tint: tint, interactive: true)
             .overlay {
                 if isChosen {
                     Capsule().strokeBorder(Color.cyan.opacity(0.7), lineWidth: 1)
                 }
             }
-            .padRing(selected == index, cornerRadius: 20)
+            .padRing(pad.gamepadConnected && selected == index, cornerRadius: 20)
         }
         .buttonStyle(ControllerFocusableButtonStyle())
-        .focusable()
     }
 
     private func bottomButton(_ title: String, row: Int, enabled: Bool, action: @escaping () -> Void) -> some View {
         Button(action: action) {
             Text(title)
-                .font(.system(size: 15, weight: .semibold))
+                .font(AppFont.text(15, .semibold))
                 .foregroundStyle(enabled ? Color.cyan : Color.white.opacity(0.35))
                 .frame(maxWidth: .infinity)
                 .padding(.vertical, 13)
+                .contentShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
                 .liquidGlass(in: RoundedRectangle(cornerRadius: 14, style: .continuous), interactive: true)
-                .padRing(selected == row, cornerRadius: 14)
+                .padRing(pad.gamepadConnected && selected == row, cornerRadius: 14)
         }
-        .buttonStyle(.plain)
+        .buttonStyle(ControllerFocusableButtonStyle())
         .disabled(!enabled)
     }
 

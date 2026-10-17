@@ -2,6 +2,7 @@ import SwiftUI
 import UIKit
 import GameController
 import AudioToolbox
+import CoreText
 
 // MARK: - Idioma
 
@@ -149,6 +150,30 @@ enum L10n {
         "Mando": "Controller",
         "Rendimiento": "Performance",
         "%@: próximamente": "%@: coming soon",
+        "Depuración": "Debugging",
+        "Estado JIT": "JIT status",
+        "Activo en esta app": "Active in this app",
+        "No activo en esta app": "Not active in this app",
+        "JIT activo en esta app": "JIT is active in this app",
+        "JIT no activo en esta app": "JIT is not active in this app",
+        "Activar JIT": "Enable JIT",
+        "Con StikDebug, en esta app": "With StikDebug, in this app",
+        "Abrir StikDebug": "Open StikDebug",
+        "Emparejamiento y scripts JIT": "Pairing and JIT scripts",
+        "Copiar Bundle ID": "Copy Bundle ID",
+        "Bundle ID copiado": "Bundle ID copied",
+        "No se pudo abrir StikDebug. ¿Está instalado?": "StikDebug couldn't be opened. Is it installed?",
+        "Estado": "Status",
+        "Dentro de LiveContainer": "Inside LiveContainer",
+        "Fuera de LiveContainer": "Outside LiveContainer",
+        "SÍ": "YES",
+        "NO": "NO",
+        "Abrir LiveContainer": "Open LiveContainer",
+        "Abre la app de LiveContainer": "Opens the LiveContainer app",
+        "No se pudo abrir LiveContainer. ¿Está instalado?": "LiveContainer couldn't be opened. Is it installed?",
+        "Juego de LiveContainer": "LiveContainer game",
+        "Acceso directo a una app de LiveContainer": "Shortcut to a LiveContainer app",
+        "✕: escribir": "✕: type",
         "Listo": "Done"
     ]
 }
@@ -543,24 +568,229 @@ final class ControllerMonitor: ObservableObject {
 }
 
 
-/// Estilo común para que el foco del mando sea visible en botones de toda la app.
+/// Estilo común de botones: se encoge un poco al pulsar.
+/// No usa el foco de iOS: el mando tiene su propia selección, y el foco de iOS hacía que
+/// apareciera un recuadro al tocar sin mando y que algunos toques solo enfocaran sin pulsar.
 struct ControllerFocusableButtonStyle: ButtonStyle {
-    @Environment(\.isFocused) private var isFocused
+    func makeBody(configuration: Configuration) -> some View {
+        configuration.label
+            .scaleEffect(configuration.isPressed ? 0.96 : 1.0)
+            .animation(.easeOut(duration: 0.1), value: configuration.isPressed)
+    }
+}
+
+/// Tarjetas: mientras se mantiene pulsada, se remarca con un borde cian.
+struct TapHighlightButtonStyle: ButtonStyle {
+    var cornerRadius: CGFloat = 18
 
     func makeBody(configuration: Configuration) -> some View {
         configuration.label
             .overlay {
-                if isFocused {
-                    RoundedRectangle(cornerRadius: 16, style: .continuous)
-                        .stroke(Color.cyan.opacity(0.98), lineWidth: 2.5)
-                        .shadow(color: Color.cyan.opacity(0.72), radius: 9)
-                        .padding(-3)
+                if configuration.isPressed {
+                    RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
+                        .strokeBorder(Color.cyan.opacity(0.95), lineWidth: 2)
+                        .shadow(color: Color.cyan.opacity(0.6), radius: 8)
                         .allowsHitTesting(false)
                 }
             }
-            .scaleEffect(configuration.isPressed ? 0.97 : (isFocused ? 1.015 : 1.0))
-            .animation(.easeOut(duration: 0.12), value: isFocused)
-            .animation(.easeOut(duration: 0.1), value: configuration.isPressed)
+            .scaleEffect(configuration.isPressed ? 0.97 : 1.0)
+            .animation(.easeOut(duration: 0.12), value: configuration.isPressed)
+    }
+}
+
+// MARK: - Tipografías
+
+/// Orbitron para la marca (bienvenida, título y barra de plataformas) y Space Grotesk para el resto.
+/// Los archivos van en Resources/Fonts y se registran al arrancar la app.
+enum AppFont {
+    private static let files: [String] = [
+        "Orbitron-SemiBold", "Orbitron-Bold", "Orbitron-ExtraBold",
+        "SpaceGrotesk-Regular", "SpaceGrotesk-Medium", "SpaceGrotesk-SemiBold", "SpaceGrotesk-Bold"
+    ]
+
+    static func register() {
+        for name in files {
+            guard let url = Bundle.main.url(forResource: name, withExtension: "ttf") else { continue }
+            _ = CTFontManagerRegisterFontsForURL(url as CFURL, .process, nil)
+        }
+    }
+
+    /// Orbitron.
+    static func brand(_ size: CGFloat, _ weight: Font.Weight = .bold) -> Font {
+        let name: String
+        if weight == .heavy || weight == .black {
+            name = "Orbitron-ExtraBold"
+        } else if weight == .bold {
+            name = "Orbitron-Bold"
+        } else {
+            name = "Orbitron-SemiBold"
+        }
+        return Font.custom(name, fixedSize: size)
+    }
+
+    /// Space Grotesk.
+    static func text(_ size: CGFloat, _ weight: Font.Weight = .regular) -> Font {
+        let name: String
+        if weight == .bold || weight == .heavy || weight == .black {
+            name = "SpaceGrotesk-Bold"
+        } else if weight == .semibold {
+            name = "SpaceGrotesk-SemiBold"
+        } else if weight == .medium {
+            name = "SpaceGrotesk-Medium"
+        } else {
+            name = "SpaceGrotesk-Regular"
+        }
+        return Font.custom(name, fixedSize: size)
+    }
+}
+
+// MARK: - Depuración (JIT, StikDebug y LiveContainer)
+
+enum DebugSupport {
+    /// Firma de csops, la función del sistema que informa del estado de firma del proceso.
+    private typealias CSOpsFunction = @convention(c) (Int32, UInt32, UnsafeMutableRawPointer?, Int) -> Int32
+
+    /// JIT activo en esta app: el sistema marca el proceso como depurado (CS_DEBUGGED).
+    /// csops se busca en tiempo de ejecución (dlsym), sin declaraciones especiales.
+    static var isJITEnabled: Bool {
+        // RTLD_DEFAULT vale -2 en Apple: busca en todas las librerías cargadas.
+        guard let symbol = dlsym(UnsafeMutableRawPointer(bitPattern: -2), "csops") else { return false }
+        let csops: CSOpsFunction = unsafeBitCast(symbol, to: CSOpsFunction.self)
+        var flags: UInt32 = 0
+        let result: Int32 = withUnsafeMutablePointer(to: &flags) { pointer in
+            csops(getpid(), 0, UnsafeMutableRawPointer(pointer), MemoryLayout<UInt32>.size)
+        }
+        return result == 0 && (flags & 0x1000_0000) != 0
+    }
+
+    /// LiveContainer define LC_HOME_PATH en las apps que ejecuta dentro.
+    static var isInsideLiveContainer: Bool {
+        getenv("LC_HOME_PATH") != nil
+    }
+
+    static var bundleID: String {
+        Bundle.main.bundleIdentifier ?? "com.omnistation.dock"
+    }
+
+    /// Pide a StikDebug que active JIT en esta app ya abierta (por su número de proceso).
+    static var enableJITURL: URL? {
+        URL(string: "stikjit://enable-jit?pid=\(getpid())")
+    }
+
+    static let stikDebugURL: URL? = URL(string: "stikjit://")
+    static let liveContainerURL: URL? = URL(string: "livecontainer://")
+    /// Enlace para abrir una app instalada dentro de LiveContainer (se completa con su nombre).
+    static let liveContainerLaunchPrefix = "livecontainer://livecontainer-launch?bundle-name="
+}
+
+// MARK: - Batería
+
+final class BatteryMonitor: ObservableObject {
+    /// Porcentaje de 0 a 100, o -1 si el sistema no lo da.
+    @Published private(set) var level: Int = -1
+    @Published private(set) var charging = false
+    private var tokens: [NSObjectProtocol] = []
+
+    init() {
+        UIDevice.current.isBatteryMonitoringEnabled = true
+        update()
+        let center = NotificationCenter.default
+        let names: [Notification.Name] = [UIDevice.batteryLevelDidChangeNotification, UIDevice.batteryStateDidChangeNotification]
+        for name in names {
+            tokens.append(center.addObserver(forName: name, object: nil, queue: .main) { [weak self] _ in
+                self?.update()
+            })
+        }
+    }
+
+    deinit {
+        tokens.forEach { NotificationCenter.default.removeObserver($0) }
+    }
+
+    func update() {
+        let raw: Float = UIDevice.current.batteryLevel
+        level = raw < 0 ? -1 : Int((raw * 100).rounded())
+        let state: UIDevice.BatteryState = UIDevice.current.batteryState
+        charging = state == .charging || state == .full
+    }
+
+    var symbolName: String {
+        if charging { return "battery.100percent.bolt" }
+        switch level {
+        case ..<13: return "battery.0percent"
+        case ..<38: return "battery.25percent"
+        case ..<63: return "battery.50percent"
+        case ..<88: return "battery.75percent"
+        default: return "battery.100percent"
+        }
+    }
+}
+
+// MARK: - Desplazamiento y medidas de la interfaz
+
+/// Desplazamiento vertical de la pantalla actual. Solo lo observa el título de la cabecera:
+/// así deslizar no repinta toda la interfaz con todas sus tarjetas.
+final class ScrollProgress: ObservableObject {
+    @Published private(set) var offset: CGFloat = 0
+
+    func set(_ value: CGFloat) {
+        // Más allá de 80 puntos el título ya está oculto: no hace falta seguir avisando.
+        let limited: CGFloat = min(max(0, value), 80)
+        if abs(limited - offset) > 0.5 || (limited == 0 && offset != 0) {
+            offset = limited
+        }
+    }
+}
+
+/// Medidas de la cabecera y del área de scroll. Solo avisa cuando cambian de verdad.
+final class LayoutMetrics: ObservableObject {
+    @Published private(set) var headerHeight: CGFloat = 57
+    @Published private(set) var fadeClear: CGFloat = 0
+    private(set) var frames: [String: CGRect] = [:]
+
+    /// Guarda las medidas y devuelve cuánto ha subido el contenido (si se ha medido).
+    func update(_ newFrames: [String: CGRect]) -> CGFloat? {
+        frames = newFrames
+        guard let header = newFrames["header"] else { return nil }
+        if abs(header.height - headerHeight) > 0.5 {
+            headerHeight = header.height
+        }
+        if let scroll = newFrames["scroll"] {
+            let clear: CGFloat = max(0, header.minY - scroll.minY)
+            if abs(clear - fadeClear) > 0.5 {
+                fadeClear = clear
+            }
+        }
+        guard let content = newFrames["content"] else { return nil }
+        return header.minY - content.minY
+    }
+}
+
+enum ScrollSupport {
+    /// iOS 18 da el desplazamiento directamente; en iOS 17 se calcula con las medidas.
+    static var hasScrollGeometry: Bool {
+        if #available(iOS 18.0, *) {
+            return true
+        }
+        return false
+    }
+}
+
+/// Lee el desplazamiento del ScrollView en iOS 18 (más fiable que medir marcos).
+struct ScrollOffsetReader: ViewModifier {
+    let progress: ScrollProgress
+
+    @ViewBuilder
+    func body(content: Content) -> some View {
+        if #available(iOS 18.0, *) {
+            content.onScrollGeometryChange(for: CGFloat.self) { geometry in
+                geometry.contentOffset.y + geometry.contentInsets.top
+            } action: { _, newValue in
+                progress.set(newValue)
+            }
+        } else {
+            content
+        }
     }
 }
 

@@ -66,14 +66,14 @@ struct WelcomeView: View {
 
                     VStack(spacing: 3) {
                         Text("OMNISTATION")
-                            .font(.system(size: min(geometry.size.width * 0.075, 31), weight: .medium, design: .rounded))
+                            .font(AppFont.brand(min(geometry.size.width * 0.075, 31), .semibold))
                             .tracking(geometry.size.width < 400 ? 3.5 : 5.5)
                             .foregroundStyle(.white)
                             .minimumScaleFactor(0.65)
                             .lineLimit(1)
 
                         Text("DOCK")
-                            .font(.system(size: min(geometry.size.width * 0.09, 38), weight: .bold, design: .rounded))
+                            .font(AppFont.brand(min(geometry.size.width * 0.09, 38), .heavy))
                             .tracking(geometry.size.width < 400 ? 7 : 10)
                             .foregroundStyle(
                                 LinearGradient(
@@ -88,7 +88,7 @@ struct WelcomeView: View {
                     Spacer()
 
                     Text(L10n.tr("TU UNIVERSO DE JUEGOS,\nEN UN SOLO LUGAR.", appLanguage))
-                        .font(.system(size: 12, weight: .medium, design: .rounded))
+                        .font(AppFont.text(12, .medium))
                         .tracking(2.5)
                         .multilineTextAlignment(.center)
                         .lineSpacing(7)
