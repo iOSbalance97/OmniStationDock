@@ -1,0 +1,31 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>LSApplicationQueriesSchemes</key>
+	<array>
+		<string>minecraft</string>
+		<string>roblox</string>
+		<string>clashofclans</string>
+		<string>clashroyale</string>
+		<string>brawlstars</string>
+		<string>hayday</string>
+		<string>boombeach</string>
+		<string>squadbusters</string>
+		<string>fortnite</string>
+		<string>pubgmobile</string>
+		<string>codm</string>
+		<string>yuanshengame</string>
+		<string>pokemongo</string>
+		<string>amongus</string>
+		<string>asphalt9</string>
+		<string>subwaysurfers</string>
+		<string>candycrushsaga</string>
+		<string>clashmini</string>
+		<string>steamlink</string>
+		<string>xbox</string>
+		<string>stikjit</string>
+		<string>livecontainer</string>
+	</array>
+</dict>
+</plist>
