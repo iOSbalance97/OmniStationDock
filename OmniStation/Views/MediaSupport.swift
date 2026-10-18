@@ -489,8 +489,14 @@ enum RetroAchievements {
         UserDefaults.standard.string(forKey: userKey) ?? ""
     }
 
+    /// La clave se lee del llavero una sola vez: leerla en cada repintado de Ajustes iba lento.
+    private static var keyCache: String?
+
     static var apiKey: String {
-        KeychainStore.read(keyAccount) ?? ""
+        if let keyCache { return keyCache }
+        let value: String = KeychainStore.read(keyAccount) ?? ""
+        keyCache = value
+        return value
     }
 
     static var isConfigured: Bool {
@@ -500,11 +506,13 @@ enum RetroAchievements {
     static func save(username: String, apiKey: String) {
         UserDefaults.standard.set(username, forKey: userKey)
         KeychainStore.write(apiKey, for: keyAccount)
+        keyCache = apiKey
     }
 
     static func signOut() {
         UserDefaults.standard.removeObject(forKey: userKey)
         KeychainStore.delete(keyAccount)
+        keyCache = nil
         clearSession()
     }
 

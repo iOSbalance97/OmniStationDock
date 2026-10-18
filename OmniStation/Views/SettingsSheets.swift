@@ -13,10 +13,60 @@ final class SheetPad: ObservableObject {
     /// Con mando conectado se dibuja el recuadro de selección; sin mando, no.
     @Published var gamepadConnected = false
     var handler: ((PadAction) -> Bool)?
+    /// Botón □ (cuadrado): en las ventanas con teclado borra la última letra.
+    var deleteHandler: (() -> Bool)?
 
     @discardableResult
     func send(_ action: PadAction) -> Bool {
         handler?(action) ?? false
+    }
+
+    /// Devuelve `true` si la ventana abierta ha usado el □.
+    @discardableResult
+    func sendDelete() -> Bool {
+        deleteHandler?() ?? false
+    }
+}
+
+/// Identidad de una fila para que la ventana la siga con el mando.
+/// Es un tipo propio para que no choque con otros `.id(...)` numéricos.
+struct PadAnchor: Hashable {
+    let row: Int
+}
+
+extension View {
+    /// Marca la vista como fila `row` de una `PadScrollView`.
+    func padAnchor(_ row: Int) -> some View {
+        id(PadAnchor(row: row))
+    }
+}
+
+/// `ScrollView` que se desplaza sola hasta la fila marcada con el mando
+/// (en horizontal las ventanas no caben enteras y la selección se quedaba fuera).
+struct PadScrollView<Content: View>: View {
+    let selection: Int
+    /// Fila a la que ir; si es nil, la propia selección.
+    let anchor: Int?
+    let content: Content
+
+    init(selection: Int, anchor: Int? = nil, @ViewBuilder content: () -> Content) {
+        self.selection = selection
+        self.anchor = anchor
+        self.content = content()
+    }
+
+    var body: some View {
+        ScrollViewReader { proxy in
+            ScrollView {
+                content
+            }
+            .onChange(of: selection) { _, value in
+                let row: Int = anchor ?? value
+                withAnimation(.easeInOut(duration: 0.2)) {
+                    proxy.scrollTo(PadAnchor(row: row), anchor: .center)
+                }
+            }
+        }
     }
 }
 
@@ -156,6 +206,7 @@ struct PlatformOrderSheet: View {
     @Binding var orderRaw: String
     @ObservedObject var pad: SheetPad
     @Environment(\.dismiss) private var dismiss
+    @AppStorage(Platforms.hiddenKey) private var hiddenRaw = ""
     @State private var items: [String] = []
     // Con el mando: 0..<items.count = plataformas, luego «Restablecer» y «Listo».
     @State private var selected = 0
@@ -169,27 +220,13 @@ struct PlatformOrderSheet: View {
     var body: some View {
         NavigationStack {
             VStack(spacing: 0) {
-                List {
-                    Section {
-                        ForEach(Array(items.enumerated()), id: \.element) { index, name in
-                            Label(name, systemImage: Platforms.symbol(for: name))
-                                .font(AppFont.text(15, .semibold))
-                                .listRowBackground(rowBackground(index))
+                ScrollViewReader { proxy in
+                    platformList
+                        .onChange(of: selected) { _, value in
+                            guard items.indices.contains(value) else { return }
+                            withAnimation(.easeInOut(duration: 0.2)) { proxy.scrollTo(items[value], anchor: .center) }
                         }
-                        .onMove { source, destination in
-                            items.move(fromOffsets: source, toOffset: destination)
-                            orderRaw = items.joined(separator: "|")
-                        }
-                    } footer: {
-                        VStack(alignment: .leading, spacing: 4) {
-                            Text(tr("Arrastra para cambiar el orden de los filtros."))
-                            Text(tr("Con el mando: X agarra y suelta, ↑↓ mueve."))
-                        }
-                        .font(AppFont.text(12))
-                    }
                 }
-                .environment(\.editMode, .constant(.active))
-                .scrollContentBackground(.hidden)
 
                 HStack(spacing: 10) {
                     actionButton(tr("Restablecer"), row: resetRow) { reset() }
@@ -211,6 +248,62 @@ struct PlatformOrderSheet: View {
             }
         }
         .onDisappear { pad.handler = nil }
+    }
+
+    private var platformList: some View {
+        List {
+            Section {
+                ForEach(Array(items.enumerated()), id: \.element) { index, name in
+                    platformRow(name)
+                        .listRowBackground(rowBackground(index))
+                }
+                .onMove { source, destination in
+                    items.move(fromOffsets: source, toOffset: destination)
+                    orderRaw = items.joined(separator: "|")
+                }
+            } footer: {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text(tr("Arrastra para cambiar el orden de los filtros. El interruptor decide si la plataforma sale en la barra."))
+                    Text(tr("Con el mando: X agarra y suelta, ↑↓ mueve, ←→ muestra u oculta."))
+                    Text(tr("Las plataformas de la carpeta externa solo salen si tienen juegos."))
+                }
+                .font(AppFont.text(12))
+            }
+        }
+        .environment(\.editMode, .constant(.active))
+        .scrollContentBackground(.hidden)
+    }
+
+    private func platformRow(_ name: String) -> some View {
+        let visible: Bool = !Platforms.hidden(hiddenRaw).contains(name)
+        return HStack(spacing: 10) {
+            Label(name, systemImage: Platforms.symbol(for: name))
+                .font(AppFont.text(15, .semibold))
+                .opacity(visible ? 1 : 0.45)
+            Spacer(minLength: 6)
+            Toggle("", isOn: visibilityBinding(name))
+                .labelsHidden()
+                .tint(Color.cyan)
+        }
+    }
+
+    private func visibilityBinding(_ name: String) -> Binding<Bool> {
+        Binding<Bool>(
+            get: { !Platforms.hidden(hiddenRaw).contains(name) },
+            set: { value in setVisible(name, value) }
+        )
+    }
+
+    private func setVisible(_ name: String, _ visible: Bool) {
+        var hidden: Set<String> = Platforms.hidden(hiddenRaw)
+        if visible { hidden.remove(name) } else { hidden.insert(name) }
+        hiddenRaw = Platforms.encodeHidden(hidden)
+    }
+
+    private func toggleSelected() {
+        guard items.indices.contains(selected) else { return }
+        let name: String = items[selected]
+        setVisible(name, Platforms.hidden(hiddenRaw).contains(name))
     }
 
     private func rowBackground(_ index: Int) -> some View {
@@ -241,6 +334,7 @@ struct PlatformOrderSheet: View {
 
     private func reset() {
         orderRaw = ""
+        hiddenRaw = ""
         items = Platforms.ordered("")
         grabbed = false
         selected = 0
@@ -266,9 +360,17 @@ struct PlatformOrderSheet: View {
         case .down:
             move(1)
         case .left:
-            if selected >= resetRow { selected = resetRow }
+            if selected >= resetRow {
+                selected = resetRow
+            } else if !grabbed {
+                toggleSelected()
+            }
         case .right:
-            if selected >= resetRow { selected = doneRow }
+            if selected >= resetRow {
+                selected = doneRow
+            } else if !grabbed {
+                toggleSelected()
+            }
         case .accept:
             if selected < items.count {
                 grabbed.toggle()

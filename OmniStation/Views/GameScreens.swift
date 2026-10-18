@@ -238,20 +238,23 @@ struct RenameGameSheet: View {
 
     var body: some View {
         NavigationStack {
-            ScrollView {
+            PadScrollView(selection: selected < keys.count ? 0 : 1) {
                 VStack(spacing: 14) {
-                    TextField(tr(placeholder), text: $name)
-                        .font(AppFont.text(17, .semibold))
-                        .textInputAutocapitalization(bundleMode ? .never : .words)
-                        .autocorrectionDisabled(bundleMode)
-                        .padding(14)
-                        .glassCard(cornerRadius: 14)
-                    PadKeyboardView(
-                        keys: keys,
-                        selectedIndex: pad.gamepadConnected && selected < keys.count ? selected : nil,
-                        lowercase: bundleMode || !shift,
-                        onKey: { index in press(index) }
-                    )
+                    VStack(spacing: 14) {
+                        TextField(tr(placeholder), text: $name)
+                            .font(AppFont.text(17, .semibold))
+                            .textInputAutocapitalization(bundleMode ? .never : .words)
+                            .autocorrectionDisabled(bundleMode)
+                            .padding(14)
+                            .glassCard(cornerRadius: 14)
+                        PadKeyboardView(
+                            keys: keys,
+                            selectedIndex: pad.gamepadConnected && selected < keys.count ? selected : nil,
+                            lowercase: bundleMode || !shift,
+                            onKey: { index in press(index) }
+                        )
+                    }
+                    .padAnchor(0)
                     HStack(spacing: 10) {
                         SheetActionButton(title: tr("Cancelar"), tint: Color.white.opacity(0.85), selected: pad.gamepadConnected && selected == cancelIndex) {
                             dismiss()
@@ -260,6 +263,7 @@ struct RenameGameSheet: View {
                             save()
                         }
                     }
+                    .padAnchor(1)
                 }
                 .padding(16)
             }
@@ -274,8 +278,21 @@ struct RenameGameSheet: View {
                 handle(action)
                 return true
             }
+            pad.deleteHandler = {
+                deleteLetter()
+                return true
+            }
         }
-        .onDisappear { pad.handler = nil }
+        .onDisappear {
+            pad.handler = nil
+            pad.deleteHandler = nil
+        }
+    }
+
+    /// □ del mando: borra la última letra.
+    private func deleteLetter() {
+        guard let index = keys.firstIndex(of: "⌫") else { return }
+        PadKeys.apply(keys[index], to: &name, shift: &shift, autoCapitalize: !bundleMode)
     }
 
     private func press(_ index: Int) {
@@ -376,6 +393,11 @@ struct GameAchievementsSheet: View {
                 .onChange(of: matchIndex) { _, value in
                     withAnimation(.easeInOut(duration: 0.2)) { proxy.scrollTo("match-\(value)", anchor: .center) }
                 }
+                .onChange(of: entryZone) { _, value in
+                    // El teclado numérico se enseña entero y no se mueve al escribir.
+                    let target: String = value == 1 ? "id-entry" : "match-\(matchIndex)"
+                    withAnimation(.easeInOut(duration: 0.2)) { proxy.scrollTo(target, anchor: .center) }
+                }
             }
             .navigationTitle(tr("Logros"))
             .navigationBarTitleDisplayMode(.inline)
@@ -388,11 +410,19 @@ struct GameAchievementsSheet: View {
                 handle(action)
                 return true
             }
+            pad.deleteHandler = {
+                guard showingEntry, !idText.isEmpty else { return false }
+                idText.removeLast()
+                return true
+            }
             if configured && initialGameID == nil {
                 Task { await search() }
             }
         }
-        .onDisappear { pad.handler = nil }
+        .onDisappear {
+            pad.handler = nil
+            pad.deleteHandler = nil
+        }
         .task(id: gameID) {
             await load()
         }
@@ -506,6 +536,7 @@ struct GameAchievementsSheet: View {
             )
             .frame(maxWidth: 280)
         }
+        .id("id-entry")
     }
 
     // MARK: Lista de logros
@@ -770,7 +801,7 @@ struct RetroAccountSheet: View {
 
     var body: some View {
         NavigationStack {
-            ScrollView {
+            PadScrollView(selection: selected, anchor: 0) {
                 VStack(spacing: 14) {
                     if let profile {
                         loggedInView(profile)
@@ -838,6 +869,7 @@ struct RetroAccountSheet: View {
                     login()
                 }
             }
+            .padAnchor(0)
         }
     }
 
@@ -925,6 +957,7 @@ struct RetroAccountSheet: View {
                     dismiss()
                 }
             }
+            .padAnchor(0)
             if let errorText {
                 Text(errorText)
                     .font(AppFont.text(11, .medium))
@@ -1446,25 +1479,29 @@ struct PlatformManagerSheet: View {
 
     private var custom: [Platforms.Entry] { Platforms.parse(customRaw) }
     private var keys: [String] { PadKeys.text }
+
+    /// Fila que sigue la pantalla. El teclado entero es una sola fila: así la pantalla
+    /// se queda quieta mientras se escribe.
+    private var focusRow: Int {
+        switch zone {
+        case .keys: return 0
+        case .symbols: return 1
+        case .add: return 2
+        case .list: return 10 + listIndex
+        case .done: return -1
+        }
+    }
     private var cleanName: String { name.trimmingCharacters(in: .whitespacesAndNewlines) }
 
     var body: some View {
         NavigationStack {
-            ScrollView {
+            PadScrollView(selection: focusRow) {
                 VStack(spacing: 14) {
-                    SheetCaption(text: tr("Nueva plataforma"))
-                    TextField(tr("Nombre de la plataforma"), text: $name)
-                        .font(AppFont.text(16, .semibold))
-                        .padding(14)
-                        .glassCard(cornerRadius: 14)
-                    PadKeyboardView(
-                        keys: keys,
-                        selectedIndex: pad.gamepadConnected && zone == .keys ? keyIndex : nil,
-                        lowercase: !shift,
-                        onKey: { index in pressKey(index) }
-                    )
+                    writingArea
+                        .padAnchor(0)
                     SheetCaption(text: tr("Icono"))
                     symbolGrid
+                        .padAnchor(1)
                     if let message {
                         Text(message)
                             .font(AppFont.text(12, .medium))
@@ -1473,15 +1510,18 @@ struct PlatformManagerSheet: View {
                     SheetActionButton(title: tr("Añadir plataforma"), selected: pad.gamepadConnected && zone == .add, enabled: !cleanName.isEmpty) {
                         add()
                     }
+                    .padAnchor(2)
                     if !custom.isEmpty {
                         SheetCaption(text: tr("Tus plataformas"))
                         ForEach(custom.indices, id: \.self) { index in
                             customRow(index)
+                                .padAnchor(10 + index)
                         }
                     }
                     SheetActionButton(title: tr("Listo"), tint: Color.white.opacity(0.85), selected: pad.gamepadConnected && zone == .done) {
                         dismiss()
                     }
+                    .padAnchor(-1)
                 }
                 .padding(16)
             }
@@ -1494,8 +1534,39 @@ struct PlatformManagerSheet: View {
                 handle(action)
                 return true
             }
+            pad.deleteHandler = {
+                deleteLetter()
+                return true
+            }
         }
-        .onDisappear { pad.handler = nil }
+        .onDisappear {
+            pad.handler = nil
+            pad.deleteHandler = nil
+        }
+    }
+
+    /// Nombre y teclado juntos: la pantalla los enseña a la vez y no se mueve al escribir.
+    private var writingArea: some View {
+        VStack(spacing: 14) {
+            SheetCaption(text: tr("Nueva plataforma"))
+            TextField(tr("Nombre de la plataforma"), text: $name)
+                .font(AppFont.text(16, .semibold))
+                .padding(14)
+                .glassCard(cornerRadius: 14)
+            PadKeyboardView(
+                keys: keys,
+                selectedIndex: pad.gamepadConnected && zone == .keys ? keyIndex : nil,
+                lowercase: !shift,
+                onKey: { index in pressKey(index) }
+            )
+        }
+    }
+
+    /// □ del mando: borra la última letra.
+    private func deleteLetter() {
+        guard let index = keys.firstIndex(of: "⌫") else { return }
+        PadKeys.apply(keys[index], to: &name, shift: &shift, autoCapitalize: true)
+        message = nil
     }
 
     private var symbolGrid: some View {
@@ -1656,10 +1727,11 @@ struct SoundsSheet: View {
 
     var body: some View {
         NavigationStack {
-            ScrollView {
+            PadScrollView(selection: selected) {
                 VStack(spacing: 12) {
                     ForEach(kinds.indices, id: \.self) { index in
                         soundRow(index)
+                            .padAnchor(index)
                     }
                     if let message {
                         Text(message)
@@ -1673,6 +1745,7 @@ struct SoundsSheet: View {
                     SheetActionButton(title: tr("Listo"), tint: Color.white.opacity(0.85), selected: pad.gamepadConnected && selected == kinds.count) {
                         dismiss()
                     }
+                    .padAnchor(kinds.count)
                 }
                 .padding(16)
                 .id(refresh)

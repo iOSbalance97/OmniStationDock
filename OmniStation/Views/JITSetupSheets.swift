@@ -19,7 +19,7 @@ struct JITSetupSheet: View {
 
     var body: some View {
         NavigationStack {
-            ScrollView {
+            PadScrollView(selection: selected, anchor: selected / 2) {
                 VStack(spacing: 14) {
                     statusCard
                     if let message {
@@ -151,6 +151,7 @@ struct JITSetupSheet: View {
                     onOpenPairing()
                 }
             }
+            .padAnchor(0)
             HStack(spacing: 10) {
                 SheetActionButton(title: forceScript ? tr("Forzar script: SÍ") : tr("Forzar script: NO"), tint: Color.white.opacity(0.85), selected: pad.gamepadConnected && selected == 2) {
                     forceScript.toggle()
@@ -159,9 +160,11 @@ struct JITSetupSheet: View {
                     resetImage()
                 }
             }
+            .padAnchor(1)
             SheetActionButton(title: tr("Listo"), tint: Color.white.opacity(0.85), selected: pad.gamepadConnected && selected == 4) {
                 dismiss()
             }
+            .padAnchor(2)
         }
     }
 

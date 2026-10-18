@@ -30,7 +30,7 @@ struct EmulatorSetupSheet: View {
 
     var body: some View {
         NavigationStack {
-            ScrollView {
+            PadScrollView(selection: selected, anchor: selected / 2) {
                 VStack(spacing: 14) {
                     Text(tr("¿Qué emuladores tienes instalados?"))
                         .font(AppFont.text(16, .bold))
@@ -41,10 +41,12 @@ struct EmulatorSetupSheet: View {
                         .multilineTextAlignment(.center)
                     ForEach(emulators.indices, id: \.self) { index in
                         emulatorCard(emulators[index], index: index)
+                            .padAnchor(index)
                     }
                     SheetActionButton(title: tr("Listo"), selected: pad.gamepadConnected && selected == doneIndex) {
                         finish()
                     }
+                    .padAnchor(emulators.count)
                 }
                 .padding(16)
             }

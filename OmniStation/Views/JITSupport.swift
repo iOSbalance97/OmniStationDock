@@ -15,7 +15,7 @@ enum InstallMethod: String, CaseIterable, Identifiable {
 
     static let storageKey = "installMethod"
 
-    /// Lo que parece por cómo se está ejecutando la app (solo es una sugerencia).
+    /// Cómo se está ejecutando la app: dentro de LiveContainer o instalada directamente.
     static var detected: InstallMethod {
         DebugSupport.isInsideLiveContainer ? .liveContainer : .sideStore
     }
@@ -206,47 +206,48 @@ struct PairingDocument: FileDocument {
     }
 }
 
-// MARK: - Ventana: ¿cómo has instalado la app?
+// MARK: - Ventana: método de instalación (solo informa)
 
+/// La app detecta sola cómo se instaló y aquí solo explica qué ofrece ese método frente al otro.
 struct InstallMethodSheet: View {
     let lang: String
     @ObservedObject var pad: SheetPad
-    /// Primera vez: hay que elegir (no se puede cerrar sin hacerlo).
+    /// Primera vez: al continuar sigue la configuración inicial.
     let firstTime: Bool
-    let current: InstallMethod?
-    var onChoose: (InstallMethod) -> Void
+    var onContinue: () -> Void
     @Environment(\.dismiss) private var dismiss
-
-    @State private var choice: InstallMethod = .liveContainer
-    // Con el mando: 0 = LiveContainer, 1 = SideStore/AltStore, 2 = Confirmar.
-    @State private var selected = 0
 
     private func tr(_ key: String) -> String { L10n.tr(key, lang) }
 
-    private var methods: [InstallMethod] { InstallMethod.allCases }
+    private var detected: InstallMethod { InstallMethod.detected }
+    private var other: InstallMethod { detected == .liveContainer ? .sideStore : .liveContainer }
 
     var body: some View {
         NavigationStack {
-            ScrollView {
-                VStack(spacing: 14) {
-                    Image(systemName: "bolt.horizontal.circle.fill")
-                        .font(.system(size: 46, weight: .light))
-                        .foregroundStyle(Color.cyan)
-                    Text(tr("¿Cómo has instalado OmniStation Dock?"))
-                        .font(AppFont.text(17, .bold))
-                        .multilineTextAlignment(.center)
-                    Text(tr("Así la app sabe cómo activar el JIT de tus juegos. Puedes cambiarlo cuando quieras en Ajustes → Depuración."))
-                        .font(AppFont.text(12))
-                        .foregroundStyle(.white.opacity(0.65))
-                        .multilineTextAlignment(.center)
-                    ForEach(methods.indices, id: \.self) { index in
-                        methodCard(methods[index], index: index)
+            ScrollViewReader { proxy in
+                ScrollView {
+                    VStack(spacing: 14) {
+                        header
+                        methodCard(detected, inUse: true)
+                        methodCard(other, inUse: false)
+                        Text(tr("Para usar el otro método, instala OmniStation Dock de esa forma: la app lo detecta sola al abrirse."))
+                            .font(AppFont.text(11))
+                            .foregroundStyle(.white.opacity(0.55))
+                            .multilineTextAlignment(.center)
+                        SheetActionButton(title: firstTime ? tr("Continuar") : tr("Listo"), selected: pad.gamepadConnected) {
+                            finish()
+                        }
+                        .id("install-done")
                     }
-                    SheetActionButton(title: tr("Confirmar"), selected: pad.gamepadConnected && selected == 2) {
-                        confirm()
+                    .padding(16)
+                }
+                .onAppear {
+                    // Con mando, el botón queda a la vista desde el principio.
+                    guard pad.gamepadConnected else { return }
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) {
+                        withAnimation(.easeInOut(duration: 0.2)) { proxy.scrollTo("install-done", anchor: .bottom) }
                     }
                 }
-                .padding(16)
             }
             .navigationTitle(tr("Método de instalación"))
             .navigationBarTitleDisplayMode(.inline)
@@ -254,14 +255,32 @@ struct InstallMethodSheet: View {
         .padSheetStyle(large: true)
         .interactiveDismissDisabled(firstTime)
         .onAppear {
-            choice = current ?? InstallMethod.detected
-            selected = choice == .liveContainer ? 0 : 1
             pad.handler = { action in
-                handle(action)
+                switch action {
+                case .accept, .cancel:
+                    finish()
+                default:
+                    break
+                }
                 return true
             }
         }
         .onDisappear { pad.handler = nil }
+    }
+
+    private var header: some View {
+        VStack(spacing: 8) {
+            Image(systemName: detected.symbol)
+                .font(.system(size: 42, weight: .light))
+                .foregroundStyle(Color.cyan)
+            Text(tr("Detectado automáticamente"))
+                .font(AppFont.text(11, .bold))
+                .foregroundStyle(Color.green)
+            Text(title(detected))
+                .font(AppFont.text(18, .bold))
+                .multilineTextAlignment(.center)
+        }
+        .frame(maxWidth: .infinity)
     }
 
     private func title(_ method: InstallMethod) -> String {
@@ -271,95 +290,91 @@ struct InstallMethodSheet: View {
         }
     }
 
-    private func detail(_ method: InstallMethod) -> String {
+    private func summary(_ method: InstallMethod) -> String {
         switch method {
         case .liveContainer:
-            return tr("La app y tus juegos están dentro de LiveContainer. El JIT lo activa LiveContainer con StikDebug (elige StikDebug como activador de JIT en los ajustes de LiveContainer).")
+            return tr("OmniStation y tus emuladores van dentro de LiveContainer. El JIT lo pide LiveContainer a StikDebug cada vez que se abre un juego.")
         case .sideStore:
-            return tr("La app está instalada directamente. El JIT lo activa OmniStation por sí misma (StikJIT integrado) o la app StikDebug, con tu archivo de emparejamiento.")
+            return tr("OmniStation está instalada directamente. El JIT lo activa la propia app (StikJIT integrado), sin necesitar otra app.")
         }
     }
 
-    private func methodCard(_ method: InstallMethod, index: Int) -> some View {
-        let chosen: Bool = choice == method
+    private func advantages(_ method: InstallMethod) -> [String] {
+        switch method {
+        case .liveContainer:
+            return [
+                tr("No ocupa huecos de SideStore: dentro de LiveContainer caben las apps que quieras."),
+                tr("No necesita archivo de emparejamiento dentro de OmniStation."),
+                tr("OmniStation abre cada emulador dentro de LiveContainer pidiendo el JIT.")
+            ]
+        case .sideStore:
+            return [
+                tr("JIT integrado: OmniStation lo activa sola, sin StikDebug."),
+                tr("Los juegos de MeloNX se abren en un toque, ya con JIT."),
+                tr("El punto JIT de la barra indica si el JIT está listo de verdad.")
+            ]
+        }
+    }
+
+    private func needs(_ method: InstallMethod) -> String {
+        switch method {
+        case .liveContainer:
+            return tr("Necesita StikDebug elegido como activador de JIT en los ajustes de LiveContainer.")
+        case .sideStore:
+            return tr("Necesita un archivo RPPairing (iloader), la VPN LocalDevVPN y ocupa un hueco de SideStore (3 con cuenta gratuita).")
+        }
+    }
+
+    private func methodCard(_ method: InstallMethod, inUse: Bool) -> some View {
         let shape = RoundedRectangle(cornerRadius: 18, style: .continuous)
-        let ringOn: Bool = pad.gamepadConnected && selected == index
-        return Button {
-            choice = method
-            selected = index
-        } label: {
-            methodLabel(method, chosen: chosen)
-                .padding(13)
-                .contentShape(shape)
-                .glassCard()
-                .overlay {
-                    shape.strokeBorder(Color.cyan.opacity(chosen ? 0.6 : 0), lineWidth: 1)
-                }
-                .padRing(ringOn, cornerRadius: 18)
-        }
-        .buttonStyle(ControllerFocusableButtonStyle())
-    }
-
-    private func methodLabel(_ method: InstallMethod, chosen: Bool) -> some View {
-        HStack(alignment: .top, spacing: 12) {
-            Image(systemName: method.symbol)
-                .font(.system(size: 20, weight: .semibold))
-                .foregroundStyle(Color.cyan)
-                .frame(width: 44, height: 44)
-                .background(Color.cyan.opacity(0.14), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
-            VStack(alignment: .leading, spacing: 5) {
-                methodHeader(method)
-                Text(detail(method))
-                    .font(AppFont.text(11))
-                    .foregroundStyle(.white.opacity(0.6))
-                    .multilineTextAlignment(.leading)
-            }
-            Spacer(minLength: 0)
-            Image(systemName: chosen ? "checkmark.circle.fill" : "circle")
-                .font(.system(size: 20))
-                .foregroundStyle(chosen ? Color.cyan : Color.white.opacity(0.35))
-        }
-    }
-
-    private func methodHeader(_ method: InstallMethod) -> some View {
-        HStack(spacing: 8) {
-            Text(title(method))
-                .font(AppFont.text(15, .bold))
-                .foregroundStyle(.white)
-            if method == InstallMethod.detected {
-                Text(tr("Detectado"))
+        return VStack(alignment: .leading, spacing: 8) {
+            HStack(spacing: 8) {
+                Image(systemName: method.symbol)
+                    .font(.system(size: 16, weight: .semibold))
+                    .foregroundStyle(Color.cyan)
+                Text(title(method))
+                    .font(AppFont.text(15, .bold))
+                Spacer(minLength: 0)
+                Text(inUse ? tr("En uso") : tr("Otro método"))
                     .font(AppFont.text(9, .bold))
-                    .foregroundStyle(Color.green)
+                    .foregroundStyle(inUse ? Color.green : Color.white.opacity(0.6))
                     .padding(.horizontal, 7)
                     .padding(.vertical, 3)
-                    .background(Color.green.opacity(0.15), in: Capsule())
+                    .background((inUse ? Color.green : Color.white).opacity(0.15), in: Capsule())
             }
+            Text(summary(method))
+                .font(AppFont.text(11))
+                .foregroundStyle(.white.opacity(0.7))
+                .frame(maxWidth: .infinity, alignment: .leading)
+            ForEach(advantages(method), id: \.self) { line in
+                bullet(line, symbol: "checkmark", color: Color.green)
+            }
+            bullet(needs(method), symbol: "exclamationmark", color: Color.orange)
+        }
+        .padding(13)
+        .glassCard()
+        .overlay {
+            shape.strokeBorder(Color.cyan.opacity(inUse ? 0.6 : 0), lineWidth: 1)
+        }
+        .opacity(inUse ? 1 : 0.75)
+    }
+
+    private func bullet(_ text: String, symbol: String, color: Color) -> some View {
+        HStack(alignment: .top, spacing: 8) {
+            Image(systemName: symbol)
+                .font(.system(size: 10, weight: .bold))
+                .foregroundStyle(color)
+                .frame(width: 14, height: 14)
+            Text(text)
+                .font(AppFont.text(11))
+                .foregroundStyle(.white.opacity(0.75))
+                .frame(maxWidth: .infinity, alignment: .leading)
         }
     }
 
-    private func confirm() {
-        onChoose(choice)
+    private func finish() {
         dismiss()
-    }
-
-    private func handle(_ action: PadAction) {
-        switch action {
-        case .up:
-            selected = max(0, selected - 1)
-        case .down:
-            selected = min(2, selected + 1)
-        case .accept:
-            if selected < methods.count {
-                choice = methods[selected]
-                selected = 2
-            } else {
-                confirm()
-            }
-        case .cancel:
-            if !firstTime { dismiss() }
-        default:
-            break
-        }
+        onContinue()
     }
 }
 
@@ -387,7 +402,7 @@ struct PairingFileSheet: View {
 
     var body: some View {
         NavigationStack {
-            ScrollView {
+            PadScrollView(selection: selected, anchor: selected / 2) {
                 VStack(spacing: 14) {
                     statusCard
                     if let message {
@@ -477,6 +492,7 @@ struct PairingFileSheet: View {
                     startExport()
                 }
             }
+            .padAnchor(0)
             HStack(spacing: 10) {
                 SheetActionButton(title: tr("Quitar"), tint: Color.orange, selected: pad.gamepadConnected && selected == 2, enabled: info != nil) {
                     removeFile()
@@ -485,9 +501,11 @@ struct PairingFileSheet: View {
                     openStikDebug()
                 }
             }
+            .padAnchor(1)
             SheetActionButton(title: tr("Listo"), tint: Color.white.opacity(0.85), selected: pad.gamepadConnected && selected == 4) {
                 dismiss()
             }
+            .padAnchor(2)
         }
     }
 

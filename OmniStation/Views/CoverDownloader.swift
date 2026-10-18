@@ -72,6 +72,20 @@ enum CoverDownloader {
         UserDefaults.standard.set(Array(ids), forKey: attemptedKey)
     }
 
+    static func unmarkAttempted(_ id: String) {
+        var ids: Set<String> = Set(UserDefaults.standard.stringArray(forKey: attemptedKey) ?? [])
+        ids.remove(id)
+        UserDefaults.standard.set(Array(ids), forKey: attemptedKey)
+    }
+
+    /// Busca y descarga la carátula de un juego (nil si no hay ninguna que encaje).
+    static func findCover(for gameName: String, platform: String, fileName: String?) async -> Data? {
+        guard let repository = repository(for: platform) else { return nil }
+        let names: [String] = (try? await boxartNames(repository)) ?? []
+        guard !names.isEmpty, let name = bestMatch(for: gameName, fileName: fileName, in: names) else { return nil }
+        return try? await download(repository, name: name)
+    }
+
     static func resetAttempts() {
         UserDefaults.standard.removeObject(forKey: attemptedKey)
     }

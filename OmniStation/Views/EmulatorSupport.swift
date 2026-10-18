@@ -411,3 +411,48 @@ enum MeloNXLibrary {
         return bestScore >= 0.5 ? best : nil
     }
 }
+
+// MARK: - Biblioteca de ARMSX2
+
+/// Un juego de la lista que exporta ARMSX2 (`armsx2://library`).
+struct ARMSX2Game: Decodable {
+    let title: String
+    let fileName: String
+    let serial: String?
+}
+
+/// ARMSX2 abre sus juegos por el nombre del archivo, pero conoce su título de verdad (por su base
+/// de datos). OmniStation le pide la lista y usa ese título como nombre del juego.
+enum ARMSX2Library {
+    private struct Export: Decodable {
+        let schema: String?
+        let games: [ARMSX2Game]
+    }
+
+    /// ARMSX2 pide confirmación y responde con "omnistation://armsx2?source=armsx2-ios&payload=…".
+    static var requestURL: URL? {
+        var components = URLComponents()
+        components.scheme = "armsx2"
+        components.host = "library"
+        components.queryItems = [URLQueryItem(name: "callback", value: "omnistation://armsx2")]
+        return components.url
+    }
+
+    /// Lee la respuesta de ARMSX2 (JSON en base64url sin relleno).
+    static func games(from url: URL) -> [ARMSX2Game]? {
+        guard url.scheme?.lowercased() == "omnistation", url.host?.lowercased() == "armsx2",
+              let components = URLComponents(url: url, resolvingAgainstBaseURL: false),
+              let text = components.queryItems?.first(where: { $0.name == "payload" })?.value else { return nil }
+        var base64: String = text.replacingOccurrences(of: "-", with: "+").replacingOccurrences(of: "_", with: "/")
+        while base64.count % 4 != 0 { base64.append("=") }
+        guard let data = Data(base64Encoded: base64),
+              let export = try? JSONDecoder().decode(Export.self, from: data) else { return nil }
+        return export.games
+    }
+
+    /// El juego de ARMSX2 con ese nombre de archivo (igual, o sin distinguir mayúsculas).
+    static func match(fileName: String, in games: [ARMSX2Game]) -> ARMSX2Game? {
+        if let exact = games.first(where: { $0.fileName == fileName }) { return exact }
+        return games.first { $0.fileName.caseInsensitiveCompare(fileName) == .orderedSame }
+    }
+}

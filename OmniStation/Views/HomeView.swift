@@ -51,6 +51,7 @@ private enum SettingsDialog {
     case language, staticBackground, videoBackground, clearFavorites, clearLibrary, gameOptions
     case assignPlatform, externalFolder
     case jitEnabler, jitScript, emulatorLocation, emulatorBundle, emulatorUpdate, emulatorFolder, emulatorHelp
+    case coverOptions
 }
 
 private struct Toast: Identifiable {
@@ -102,6 +103,7 @@ struct HomeView: View {
     @AppStorage("clock24h") private var clock24h = true
     @AppStorage("dockFullWidth") private var dockFullWidth = true
     @AppStorage("customPlatforms") private var customPlatformsRaw = ""
+    @AppStorage(Platforms.hiddenKey) private var hiddenPlatformsRaw = ""
     @AppStorage("volumeNavigate") private var volumeNavigate = 0.5
     @AppStorage("volumeSelect") private var volumeSelect = 0.7
     @AppStorage("volumeAmbient") private var volumeAmbient = 0.3
@@ -157,6 +159,15 @@ struct HomeView: View {
     @State private var emulatorRevision = 0
     @State private var checkingEmulators: Set<String> = []
     @State private var downloadingCovers = false
+    /// Juego al que se le pone una carátula desde Archivos (nil: el selector es de carpetas).
+    @State private var coverFilePick: String?
+    /// Juegos de Switch cuya carátula se pidió a MeloNX a mano: se sustituye aunque fuera propia.
+    @State private var forcedCoverIDs: Set<String> = []
+    /// Ya hay una petición de biblioteca (MeloNX o ARMSX2) a punto de abrirse.
+    @State private var libraryRequestScheduled = false
+    /// Pantalla del juego abierta (antes de jugar) y qué marca en ella el mando.
+    @State private var detailGameID: String?
+    @State private var detailFocus: GameDetailFocus = .play
     @State private var jitLaunching = false
     @State private var pendingReturnMessage: String?
     @State private var photoPurpose: PhotoPurpose = .staticBackground
@@ -260,8 +271,9 @@ struct HomeView: View {
     private var platforms: [(name: String, symbol: String)] {
         let present: Set<String> = Set(games.map { $0.platform })
         let ordered: [String] = Platforms.ordered(platformOrderRaw, customRaw: customPlatformsRaw)
+        let hidden: Set<String> = Platforms.hidden(hiddenPlatformsRaw)
         let names: [String] = ordered.filter { name in
-            !Platforms.isExtended(name) || present.contains(name)
+            !hidden.contains(name) && (!Platforms.isExtended(name) || present.contains(name))
         }
         let entries: [(name: String, symbol: String)] = names.map { name in
             (name: name, symbol: Platforms.symbol(for: name))
@@ -351,6 +363,7 @@ struct HomeView: View {
             background
             screenContent(landscape: landscape, dock: dock)
             topChrome(landscape: landscape, dock: dock)
+            detailOverlay(landscape: landscape, dock: dock)
             padMenuOverlay
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -392,7 +405,7 @@ struct HomeView: View {
 
     @ViewBuilder
     private func dockBottomOverlay(_ dock: Bool) -> some View {
-        if dock {
+        if dock && detailGame == nil {
             dockBottomBar
         }
     }
@@ -408,7 +421,7 @@ struct HomeView: View {
     private func withPresentations<V: View>(_ view: V) -> some View {
         view
             .photosPicker(isPresented: $showPhotoPicker, selection: $photoItem, matching: pickerFilter)
-            .fileImporter(isPresented: $showFolderImporter, allowedContentTypes: [.folder], allowsMultipleSelection: false) { result in
+            .fileImporter(isPresented: $showFolderImporter, allowedContentTypes: importerTypes, allowsMultipleSelection: false) { result in
                 handleFolderPick(result)
             }
             .sheet(item: $sheet) { kind in
@@ -539,24 +552,30 @@ struct HomeView: View {
         }
     }
 
+    /// Solo informa del método detectado. La primera vez, al continuar sigue la configuración.
     private func installMethodSheet() -> some View {
-        let firstTime: Bool = installMethodRaw.isEmpty
-        let current: InstallMethod? = InstallMethod(rawValue: installMethodRaw)
-        return InstallMethodSheet(lang: appLanguage, pad: sheetPad, firstTime: firstTime, current: current) { method in
-            chooseInstallMethod(method, firstTime: firstTime)
+        let firstTime: Bool = !emulatorSetupDone
+        return InstallMethodSheet(lang: appLanguage, pad: sheetPad, firstTime: firstTime) {
+            continueAfterInstallInfo(firstTime: firstTime)
         }
     }
 
-    private func chooseInstallMethod(_ method: InstallMethod, firstTime: Bool) {
-        installMethodRaw = method.rawValue
-        showToast(tr("Método de instalación: %@", installMethodTitle(method)))
-        if usesBuiltInJIT { jitStatus.autoPrepare() }
+    private func continueAfterInstallInfo(firstTime: Bool) {
         // Con SideStore/AltStore, la primera vez se ofrece importar el archivo de emparejamiento.
         guard firstTime else { return }
+        let method: InstallMethod = InstallMethod.detected
         let next: HomeSheet = method == .sideStore && !PairingFile.exists ? .pairing : .emulatorSetup
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.7) {
             if sheet == nil { sheet = next }
         }
+    }
+
+    /// El método de instalación lo decide la app: se guarda siempre el detectado.
+    private func syncInstallMethod() {
+        let detected: String = InstallMethod.detected.rawValue
+        guard installMethodRaw != detected else { return }
+        installMethodRaw = detected
+        if usesBuiltInJIT { jitStatus.autoPrepare() }
     }
 
     private func installMethodTitle(_ method: InstallMethod?) -> String {
@@ -642,6 +661,15 @@ struct HomeView: View {
             .onChange(of: controllers.controllers.count) { _, count in handleControllerCountChange(count) }
             .onChange(of: searchText) { _, _ in handleSearchTextChange() }
             .onChange(of: volumeAmbient) { _, value in SoundManager.shared.updateAmbient(volume: value) }
+            .onChange(of: hiddenPlatformsRaw) { _, _ in handleHiddenPlatformsChange() }
+    }
+
+    /// Si se oculta la plataforma elegida, la barra vuelve a «Todos».
+    private func handleHiddenPlatformsChange() {
+        guard selectedPlatform != "Todos" else { return }
+        if Platforms.hidden(hiddenPlatformsRaw).contains(selectedPlatform) {
+            selectedPlatform = "Todos"
+        }
     }
 
     // MARK: - Reacciones a cambios
@@ -712,6 +740,55 @@ struct HomeView: View {
         backgroundVideo = url
         backgroundMode = "video"
         showToast(tr("Fondo animado actualizado"))
+    }
+
+    /// Carátula elegida en Archivos.
+    private func applyCoverFile(_ result: Result<[URL], Error>, id: String) {
+        guard case .success(let urls) = result, let url = urls.first else { return }
+        let accessing: Bool = url.startAccessingSecurityScopedResource()
+        defer { if accessing { url.stopAccessingSecurityScopedResource() } }
+        guard let data = try? Data(contentsOf: url), CoverStore.shared.save(data, for: id) else {
+            showToast(tr("No se pudo usar esa imagen"))
+            return
+        }
+        AutoCovers.unmark(id)
+        coverVersion += 1
+        showToast(tr("Carátula actualizada"))
+    }
+
+    /// «Descargar» en Cambiar carátula: busca la carátula de ese juego ahora mismo.
+    private func downloadCover(for game: Game) {
+        if game.platform == Emulator.melonx.platform {
+            // Las de Switch salen de MeloNX (su icono de cada juego).
+            guard EmulatorStore.isEnabled(.melonx),
+                  EmulatorStore.location(.melonx, installMethod: installMethodRaw) == .native else {
+                showToast(tr("Las carátulas de Switch vienen de MeloNX instalado con SideStore. Importa una foto o un archivo."), seconds: 4)
+                return
+            }
+            forcedCoverIDs.insert(game.id)
+            requestMeloNXLibrary()
+            return
+        }
+        guard CoverDownloader.repository(for: game.platform) != nil else {
+            showToast(tr("No hay carátulas para descargar de esta plataforma"), seconds: 3)
+            return
+        }
+        let id: String = game.id
+        let name: String = game.name
+        let platform: String = game.platform
+        let file: String? = libraryGames.first(where: { $0.id == id })?.fileName
+        showToast(tr("Buscando carátula…"), seconds: 2)
+        Task {
+            let data: Data? = await CoverDownloader.findCover(for: name, platform: platform, fileName: file)
+            CoverDownloader.markAttempted(id)
+            guard let data, CoverStore.shared.save(data, for: id) else {
+                showToast(tr("No se encontró carátula para este juego"), seconds: 3)
+                return
+            }
+            AutoCovers.mark(id)
+            coverVersion += 1
+            showToast(tr("Carátula descargada"))
+        }
     }
 
     private func applyCover(from item: PhotosPickerItem, id: String) async {
@@ -815,16 +892,19 @@ struct HomeView: View {
 
     /// La primera vez se pregunta cómo se instaló la app (decide cómo se activa el JIT).
     private func askInstallMethodIfNeeded() {
-        if !installMethodRaw.isEmpty {
-            // Después de elegir la instalación, una vez: qué emuladores tienes y sus carpetas.
+        let firstTime: Bool = installMethodRaw.isEmpty
+        syncInstallMethod()
+        if !firstTime {
+            // Una vez: qué emuladores tienes y sus carpetas.
             guard !emulatorSetupDone else { return }
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) {
                 if !emulatorSetupDone && sheet == nil { sheet = .emulatorSetup }
             }
             return
         }
+        // Primera vez: se informa del método detectado y sigue la configuración.
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) {
-            if installMethodRaw.isEmpty && sheet == nil { sheet = .installMethod }
+            if sheet == nil { sheet = .installMethod }
         }
     }
 
@@ -861,6 +941,11 @@ struct HomeView: View {
 
     /// Cuadrado/X: en el teclado de Búsqueda borra la última letra.
     private func handleSquare() {
+        // Con una ventana con teclado abierta, □ borra la última letra en ella.
+        if sheet != nil {
+            if sheetPad.sendDelete() { feedback() }
+            return
+        }
         guard !modalActive, selectedSection == .busqueda, controllerSelectedArea == "alphabet" else { return }
         guard !controllerAlphabetSearchText.isEmpty else { return }
         controllerAlphabetSearchText.removeLast()
@@ -869,6 +954,11 @@ struct HomeView: View {
     }
 
     private func handleOptions() {
+        // En la pantalla del juego, △ abre sus opciones (como el botón «Opciones»).
+        if let game = detailGame, dialog == nil, sheet == nil, !showAbout, !systemPickerOpen {
+            openGameOptions(game.id)
+            return
+        }
         guard !modalActive else { return }
         handleOptionsButton()
     }
@@ -1011,7 +1101,7 @@ struct HomeView: View {
 
     /// Hay una ventana encima: la interfaz de detrás no debe recibir el mando.
     private var modalActive: Bool {
-        dialog != nil || showAbout || sheet != nil || systemPickerOpen
+        dialog != nil || showAbout || sheet != nil || systemPickerOpen || detailGame != nil
     }
 
     private func closePadMenu() {
@@ -1057,6 +1147,8 @@ struct HomeView: View {
             ])
         case .gameOptions:
             return gameOptionsMenu(cancel)
+        case .coverOptions:
+            return coverOptionsMenu(cancel)
         case .jitEnabler:
             return jitEnablerMenu(cancel)
         case .jitScript:
@@ -1160,7 +1252,7 @@ struct HomeView: View {
         items.append(PadMenuItem(title: name.isEmpty ? tr("Elegir carpeta") : tr("Cambiar carpeta")) {
             closePadMenu()
             folderPickEmulator = emulator
-            showFolderImporter = true
+            openFolderImporter()
         })
         if !name.isEmpty {
             items.append(PadMenuItem(title: tr("Volver a escanear")) {
@@ -1271,7 +1363,7 @@ struct HomeView: View {
         })
         items.append(PadMenuItem(title: tr("Cambiar carpeta")) {
             closePadMenu()
-            showFolderImporter = true
+            openFolderImporter()
         })
         items.append(PadMenuItem(title: tr("Desvincular carpeta"), kind: .destructive) {
             closePadMenu()
@@ -1291,8 +1383,7 @@ struct HomeView: View {
             sheet = .renameGame
         })
         items.append(PadMenuItem(title: tr("Cambiar carátula")) {
-            closePadMenu()
-            pickPhoto(.cover(id))
+            dialog = .coverOptions
         })
         if cover(for: id) != nil {
             items.append(PadMenuItem(title: tr("Quitar carátula"), kind: .destructive) {
@@ -1349,6 +1440,28 @@ struct HomeView: View {
         return (game.name, game.platform, items)
     }
 
+    /// Cambiar carátula: descargarla, o importarla de Fotos o de Archivos.
+    private func coverOptionsMenu(_ cancel: PadMenuItem) -> PadMenuContent? {
+        guard let game = editingGame else { return nil }
+        let id: String = game.id
+        var items: [PadMenuItem] = []
+        items.append(PadMenuItem(title: tr("Descargar")) {
+            closePadMenu()
+            downloadCover(for: game)
+        })
+        items.append(PadMenuItem(title: tr("Importar foto")) {
+            closePadMenu()
+            pickPhoto(.cover(id))
+        })
+        items.append(PadMenuItem(title: tr("Importar archivo")) {
+            closePadMenu()
+            coverFilePick = id
+            showFolderImporter = true
+        })
+        items.append(cancel)
+        return (tr("Cambiar carátula"), game.name, items)
+    }
+
     private func assignPlatformMenu(_ cancel: PadMenuItem) -> PadMenuContent? {
         guard let game = editingGame else { return nil }
         let id: String = game.id
@@ -1373,6 +1486,65 @@ struct HomeView: View {
         editingGameID = id
         feedback()
         dialog = .gameOptions
+    }
+
+    // MARK: - Pantalla del juego
+
+    /// El juego de la pantalla abierta (nil si se cerró o si se quitó de la biblioteca).
+    private var detailGame: Game? {
+        guard let id = detailGameID else { return nil }
+        return games.first { $0.id == id }
+    }
+
+    @ViewBuilder
+    private func detailOverlay(landscape: Bool, dock: Bool) -> some View {
+        if let game = detailGame {
+            GameDetailView(
+                game: game,
+                cover: cover(for: game.id),
+                isFavorite: favoriteNames.contains(game.id),
+                lang: appLanguage,
+                landscape: landscape,
+                dock: dock,
+                gamepadConnected: gamepadConnected,
+                focus: detailFocus,
+                onPlay: { launch(game) },
+                onOptions: { openGameOptions(game.id) },
+                onFavorite: { toggleFavorite(game.id) },
+                onBack: { closeDetail() }
+            )
+            .transition(.opacity)
+            .zIndex(5)
+        }
+    }
+
+    /// ←→ entre «Jugar» y «Opciones»; ↑ a los botones de arriba (volver y favorito).
+    private func moveDetailFocus(_ direction: ControllerMonitor.Direction) {
+        let next: GameDetailFocus
+        switch (detailFocus, direction) {
+        case (.play, .right): next = .options
+        case (.options, .left): next = .play
+        case (.play, .up): next = .back
+        case (.options, .up): next = .favorite
+        case (.back, .right): next = .favorite
+        case (.favorite, .left): next = .back
+        case (.back, .down): next = .play
+        case (.favorite, .down): next = .options
+        default: next = detailFocus
+        }
+        guard next != detailFocus else { return }
+        detailFocus = next
+        feedback(.navigate)
+    }
+
+    private func activateDetailFocus() {
+        guard let game = detailGame else { return }
+        switch detailFocus {
+        case .play: launch(game)
+        case .options: openGameOptions(game.id)
+        case .favorite: toggleFavorite(game.id)
+        case .back: closeDetail()
+        }
     }
 
     @ViewBuilder
@@ -1504,6 +1676,10 @@ struct HomeView: View {
             case .left: sheetPad.send(.left)
             case .right: sheetPad.send(.right)
             }
+            return
+        }
+        if detailGame != nil && !systemPickerOpen {
+            moveDetailFocus(direction)
         }
         // Los selectores del sistema (fotos, carpetas) no se pueden mover con el mando.
     }
@@ -1515,7 +1691,13 @@ struct HomeView: View {
             menu.items[index].action()
             return
         }
-        if sheet != nil { sheetPad.send(.accept) }
+        if sheet != nil {
+            sheetPad.send(.accept)
+            return
+        }
+        if detailGame != nil && !systemPickerOpen {
+            activateDetailFocus()
+        }
     }
 
     // MARK: - HDMI y orientación
@@ -1741,6 +1923,11 @@ struct HomeView: View {
             if !sheetPad.send(.cancel) { sheet = nil }
             return
         }
+        // 1b) Pantalla del juego: vuelve a la lista.
+        if detailGame != nil {
+            closeDetail()
+            return
+        }
         // 2) Giro a horizontal por HDMI en cuenta atrás.
         if hdmiPending {
             hdmiTask?.cancel()
@@ -1886,7 +2073,21 @@ struct HomeView: View {
 
     // MARK: - Biblioteca: abrir, favoritos, escaneo
 
+    /// Elegir un juego (✕ o toque) abre su pantalla; desde ella, «Jugar» lo lanza.
     private func open(_ game: Game) {
+        feedback()
+        optionsExpanded = false
+        detailFocus = .play
+        withAnimation(.easeOut(duration: 0.22)) { detailGameID = game.id }
+    }
+
+    private func closeDetail() {
+        feedback(.navigate)
+        withAnimation(.easeIn(duration: 0.18)) { detailGameID = nil }
+    }
+
+    /// Abre el juego en su emulador o app.
+    private func launch(_ game: Game) {
         feedback()
         playCounts[game.id, default: 0] += 1
         UserDefaults.standard.set(playCounts, forKey: "playCounts")
@@ -2027,17 +2228,24 @@ struct HomeView: View {
         showToast(text, seconds: 3.5)
     }
 
-    // MARK: - Enlaces que llegan (MeloNX)
+    // MARK: - Enlaces que llegan (MeloNX y ARMSX2)
 
     private func handleIncomingLink(_ url: URL) {
+        if let list = ARMSX2Library.games(from: url) {
+            applyARMSX2Library(list)
+            return
+        }
         guard let list = MeloNXLibrary.games(from: url) else { return }
         applyMeloNXLibrary(list)
+        // Después, si hace falta, la de ARMSX2 (nunca las dos a la vez).
+        _ = requestARMSX2LibraryIfNeeded()
     }
 
     /// Empareja los juegos de Switch con los títulos de MeloNX: guarda su Title ID, usa el título
     /// de MeloNX como nombre en OmniStation y su icono como carátula (salvo carátulas elegidas a mano).
     private func applyMeloNXLibrary(_ list: [MeloNXGame]) {
         var matched: Int = 0
+        var forcedSaved: Set<String> = []
         let switchGames: [Game] = games.filter { $0.isCustom && $0.platform == Emulator.melonx.platform }
         for game in switchGames {
             let file: String = libraryGames.first(where: { $0.id == game.id })?.fileName ?? ""
@@ -2058,31 +2266,125 @@ struct HomeView: View {
                 meta.emulatorGameID = match.titleId
                 if !match.titleName.isEmpty { meta.name = match.titleName }
             }
-            if let icon = match.iconData, CoverStore.shared.image(for: game.id) == nil || AutoCovers.contains(game.id) {
-                if CoverStore.shared.save(icon, for: game.id) { AutoCovers.mark(game.id) }
+            let replaceable: Bool = CoverStore.shared.image(for: game.id) == nil || AutoCovers.contains(game.id) || forcedCoverIDs.contains(game.id)
+            if let icon = match.iconData, replaceable, CoverStore.shared.save(icon, for: game.id) {
+                AutoCovers.mark(game.id)
+                forcedSaved.insert(game.id)
             }
             matched += 1
         }
+        let forcedMissing: Bool = !forcedCoverIDs.subtracting(forcedSaved).isEmpty
+        forcedCoverIDs = []
         coverVersion += 1
+        if forcedMissing {
+            showToast(tr("MeloNX no tiene carátula para ese juego"), seconds: 3)
+            return
+        }
         showToast(tr("MeloNX: %ld de %ld juegos reconocidos", matched, switchGames.count), seconds: 4)
+    }
+
+    /// Pide la lista de juegos al emulador que tenga juegos nuevos sin reconocer: primero MeloNX
+    /// y, cuando vuelva, ARMSX2. Nunca abre los dos a la vez.
+    private func requestEmulatorLibrariesIfNeeded() {
+        if !requestMeloNXLibraryIfNeeded() {
+            _ = requestARMSX2LibraryIfNeeded()
+        }
     }
 
     /// Si hay juegos de MeloNX nuevos sin reconocer, se le pide su lista (una vez por cada
     /// grupo de juegos nuevos, para no abrir MeloNX cada vez que se abre la app).
-    private func requestMeloNXLibraryIfNeeded() {
+    private func requestMeloNXLibraryIfNeeded() -> Bool {
         guard EmulatorStore.isEnabled(.melonx),
-              EmulatorStore.location(.melonx, installMethod: installMethodRaw) == .native else { return }
+              EmulatorStore.location(.melonx, installMethod: installMethodRaw) == .native else { return false }
         let pending: [String] = libraryGames
             .filter { $0.source == "emu:" + Emulator.melonx.rawValue && gameMeta[$0.id]?.emulatorGameID == nil }
             .map(\.id)
             .sorted()
-        guard !pending.isEmpty else { return }
-        let signature: String = pending.joined(separator: "|")
-        guard UserDefaults.standard.string(forKey: "melonxLibraryAskedFor") != signature else { return }
-        UserDefaults.standard.set(signature, forKey: "melonxLibraryAskedFor")
-        DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) {
-            guard UIApplication.shared.applicationState == .active, sheet == nil, dialog == nil else { return }
+        return scheduleLibraryRequest(pending: pending, key: "melonxLibraryAskedFor", perform: {
             requestMeloNXLibrary()
+        })
+    }
+
+    /// Lo mismo con ARMSX2: sus juegos sin nombre reconocido.
+    private func requestARMSX2LibraryIfNeeded() -> Bool {
+        guard EmulatorStore.isEnabled(.armsx2),
+              EmulatorStore.location(.armsx2, installMethod: installMethodRaw) == .native else { return false }
+        let pending: [String] = libraryGames
+            .filter { $0.source == "emu:" + Emulator.armsx2.rawValue && gameMeta[$0.id]?.name == nil }
+            .map(\.id)
+            .sorted()
+        return scheduleLibraryRequest(pending: pending, key: "armsx2LibraryAskedFor", perform: {
+            requestARMSX2Library()
+        })
+    }
+
+    /// Abre el emulador para pedir su lista si hay juegos nuevos. El grupo de juegos se apunta
+    /// solo cuando de verdad se abre (si la app no está delante, se pedirá la próxima vez).
+    private func scheduleLibraryRequest(pending: [String], key: String, perform: @escaping () -> Void) -> Bool {
+        guard !pending.isEmpty, !libraryRequestScheduled else { return false }
+        let signature: String = pending.joined(separator: "|")
+        guard UserDefaults.standard.string(forKey: key) != signature else { return false }
+        libraryRequestScheduled = true
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) {
+            libraryRequestScheduled = false
+            guard UIApplication.shared.applicationState == .active, sheet == nil, dialog == nil, detailGame == nil else { return }
+            UserDefaults.standard.set(signature, forKey: key)
+            perform()
+        }
+        return true
+    }
+
+    /// Pide a ARMSX2 su lista de juegos (ARMSX2 pide confirmación antes de mandarla).
+    private func requestARMSX2Library() {
+        openExternal(ARMSX2Library.requestURL, failure: tr("No se pudo abrir %@. ¿Está instalado?", Emulator.armsx2.name))
+    }
+
+    /// Usa el título que conoce ARMSX2 como nombre de cada juego (salvo los renombrados a mano)
+    /// y busca de nuevo su carátula con ese nombre.
+    private func applyARMSX2Library(_ list: [ARMSX2Game]) {
+        let items: [LibraryGame] = libraryGames.filter { $0.source == "emu:" + Emulator.armsx2.rawValue }
+        var matched: Int = 0
+        var renamed: [String] = []
+        for item in items {
+            guard let file = item.fileName, let match = ARMSX2Library.match(fileName: file, in: list) else { continue }
+            matched += 1
+            let title: String = match.title.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !title.isEmpty, gameMeta[item.id]?.name == nil else { continue }
+            updateMeta(item.id) { meta in meta.name = title }
+            renamed.append(item.id)
+        }
+        showToast(tr("ARMSX2: %ld de %ld juegos reconocidos", matched, items.count), seconds: 4)
+        refreshCovers(renamed)
+        // Si MeloNX también tenía juegos nuevos, ahora le toca a él.
+        _ = requestMeloNXLibraryIfNeeded()
+    }
+
+    /// Vuelve a buscar la carátula de estos juegos con su nombre nuevo. Solo cambia las que no
+    /// tenían o las puestas por la app; las elegidas a mano se quedan.
+    private func refreshCovers(_ ids: [String]) {
+        guard autoCoversEnabled, !ids.isEmpty else { return }
+        let targets: [Game] = games.filter { game in
+            ids.contains(game.id) && (CoverStore.shared.image(for: game.id) == nil || AutoCovers.contains(game.id))
+        }
+        guard !targets.isEmpty else { return }
+        let files: [String: String] = Dictionary(libraryGames.compactMap { item in
+            item.fileName.map { (item.id, $0) }
+        }, uniquingKeysWith: { first, _ in first })
+        Task {
+            var added: Int = 0
+            for game in targets {
+                CoverDownloader.markAttempted(game.id)
+                guard let data = await CoverDownloader.findCover(for: game.name, platform: game.platform, fileName: files[game.id]) else { continue }
+                let replaceable: Bool = CoverStore.shared.image(for: game.id) == nil || AutoCovers.contains(game.id)
+                if replaceable, CoverStore.shared.save(data, for: game.id) {
+                    AutoCovers.mark(game.id)
+                    added += 1
+                }
+            }
+            if added > 0 {
+                coverVersion += 1
+                showToast(tr("%ld carátulas descargadas", added), seconds: 3)
+            }
         }
     }
 
@@ -2279,7 +2581,7 @@ struct HomeView: View {
                 showToast(tr("%@: %ld juegos", emulator.name, found.count), seconds: 3)
             }
             // Juegos nuevos de MeloNX: se reconocen solos. Y carátulas para los que no tengan.
-            if emulator == .melonx { requestMeloNXLibraryIfNeeded() }
+            requestEmulatorLibrariesIfNeeded()
             downloadMissingCovers()
         }
     }
@@ -2384,6 +2686,7 @@ struct HomeView: View {
     }
 
     private func removeGame(_ game: Game) {
+        if detailGameID == game.id { detailGameID = nil }
         setLibrary(libraryGames.filter { $0.id != game.id })
     }
 
@@ -2423,7 +2726,23 @@ struct HomeView: View {
         showToast(tr("Acceso directo añadido"))
     }
 
+    /// Un solo selector de Archivos (iOS solo presenta uno por vista): carpetas o, para una
+    /// carátula, imágenes.
+    private var importerTypes: [UTType] {
+        coverFilePick == nil ? [.folder] : [.image]
+    }
+
+    private func openFolderImporter() {
+        coverFilePick = nil
+        showFolderImporter = true
+    }
+
     private func handleFolderPick(_ result: Result<[URL], Error>) {
+        if let coverID = coverFilePick {
+            coverFilePick = nil
+            applyCoverFile(result, id: coverID)
+            return
+        }
         let emulatorTarget: Emulator? = folderPickEmulator
         folderPickEmulator = nil
         guard case .success(let urls) = result, let url = urls.first else { return }
@@ -2446,7 +2765,7 @@ struct HomeView: View {
     private func scanLibrary() {
         guard !folderBookmark.isEmpty, let url = LibraryFolder.resolve(folderBookmark) else {
             showToast(tr("Primero vincula una carpeta de juegos"))
-            showFolderImporter = true
+            openFolderImporter()
             return
         }
         guard !isScanning else { return }
@@ -2522,7 +2841,11 @@ struct HomeView: View {
                         shape.strokeBorder(Color.cyan.opacity(0.9), lineWidth: 1.2)
                     }
                 }
-                .shadow(color: isSelected ? Color.cyan.opacity(0.42) : Color.clear, radius: 12, y: 0)
+                .background {
+                    if isSelected {
+                        shape.fill(Color.cyan.opacity(0.35)).blur(radius: 12).allowsHitTesting(false)
+                    }
+                }
         }
         .buttonStyle(ControllerFocusableButtonStyle())
         .accessibilityLabel(tr(section.rawValue))
@@ -2586,10 +2909,11 @@ struct HomeView: View {
         }
     }
 
-    /// En horizontal el teclado del mando no cabe entero: se sigue la tecla marcada.
+    /// En horizontal se enseña el teclado entero y la pantalla se queda fija mientras se escribe
+    /// (antes seguía cada tecla y la pantalla se movía al bajar de fila).
     private func scrollToLetter(_ proxy: ScrollViewProxy) {
         if isLandscapeNow {
-            proxy.scrollTo("alphabet-\(controllerSelectedLetterIndex)", anchor: .center)
+            proxy.scrollTo("alphabet-bar", anchor: .center)
         } else {
             scrollToTop(proxy)
         }
@@ -2886,7 +3210,7 @@ struct HomeView: View {
                 .font(AppFont.text(12, .medium))
                 .foregroundStyle(.white.opacity(0.68))
             Button {
-                self.open(game)
+                launch(game)
             } label: {
                 HStack(spacing: 6) {
                     Image(systemName: "play.fill")
@@ -2985,7 +3309,12 @@ struct HomeView: View {
                     Capsule().strokeBorder(Color.cyan.opacity(0.7), lineWidth: 1)
                 }
             }
-            .shadow(color: isSelected ? Color.cyan.opacity(0.30) : Color.clear, radius: 8)
+            // Brillo solo en la elegida (una sombra en cada filtro se calculaba siempre).
+            .background {
+                if isSelected {
+                    Capsule().fill(Color.cyan.opacity(0.25)).blur(radius: 8).allowsHitTesting(false)
+                }
+            }
         }
         .buttonStyle(ControllerFocusableButtonStyle())
     }
@@ -3274,7 +3603,7 @@ struct HomeView: View {
             scanIOSGames()
         }))
         items.append(SettingItem(id: "folder", title: tr("Carpeta externa"), subtitle: linked ? folderName : tr("ROMs de todas las plataformas"), symbol: "externaldrive.fill", tint: SettingTint.periwinkle, control: folderControl, action: {
-            if folderName.isEmpty { showFolderImporter = true } else { dialog = .externalFolder }
+            if folderName.isEmpty { openFolderImporter() } else { dialog = .externalFolder }
         }))
         items.append(SettingItem(id: "shortcut", title: tr("Acceso directo (URL)"), subtitle: tr("Abre un juego, app o emulador"), symbol: "link.badge.plus", tint: SettingTint.blue, control: .symbol("plus"), action: {
             shortcutMode = 0
@@ -3351,9 +3680,9 @@ struct HomeView: View {
                 dialog = .emulatorHelp
             }))
         }
-        if emulator == .melonx && location == .native {
-            items.append(SettingItem(id: key + "Library", title: tr("Leer biblioteca de MeloNX"), subtitle: tr("Reconoce títulos y carátulas"), symbol: "books.vertical.fill", tint: SettingTint.blue, control: .symbol("arrow.up.forward"), action: {
-                requestMeloNXLibrary()
+        if location == .native {
+            items.append(SettingItem(id: key + "Library", title: tr("Leer biblioteca de %@", emulator.name), subtitle: tr("Reconoce títulos y carátulas"), symbol: "books.vertical.fill", tint: SettingTint.blue, control: .symbol("arrow.up.forward"), action: {
+                if emulator == .melonx { requestMeloNXLibrary() } else { requestARMSX2Library() }
             }))
         }
         items.append(SettingItem(id: key + "Version", title: tr("Versión"), subtitle: emulatorVersionSubtitle(emulator), symbol: "arrow.triangle.2.circlepath", tint: SettingTint.blue, control: emulatorVersionControl(emulator), action: {
@@ -3483,9 +3812,6 @@ struct HomeView: View {
         items.append(SettingItem(id: "lcStatus", title: tr("Estado"), subtitle: statusText, symbol: "shippingbox.fill", tint: SettingTint.aqua, control: statusControl, action: {
             showToast(statusText)
         }))
-        items.append(SettingItem(id: "lcOpen", title: tr("Abrir LiveContainer"), subtitle: tr("Abre la app de LiveContainer"), symbol: "square.stack.3d.up.fill", tint: SettingTint.aqua, control: .symbol("arrow.up.forward"), action: {
-            openExternal(DebugSupport.liveContainerURL, failure: tr("No se pudo abrir LiveContainer. ¿Está instalado?"))
-        }))
         items.append(SettingItem(id: "lcGame", title: tr("Juego de LiveContainer"), subtitle: tr("Acceso directo a una app de LiveContainer"), symbol: "plus.app.fill", tint: SettingTint.aqua, control: .symbol("plus"), action: {
             shortcutMode = 2
             sheet = .addShortcut
@@ -3605,66 +3931,14 @@ struct HomeView: View {
         return Button {
             runSetting(item)
         } label: {
-            settingCardLabel(item)
+            // Vista aparte y comparable: al mover la selección solo se repintan las tarjetas que cambian.
+            SettingCardLabel(title: item.title, subtitle: item.subtitle, symbol: item.symbol, tint: item.tint, control: item.control)
+                .equatable()
                 .contentShape(shape)
         }
         .buttonStyle(TapHighlightButtonStyle(cornerRadius: 18))
         .id("setting-\(index)")
         .padRing(isSettingSelected(index), cornerRadius: 18)
-    }
-
-    /// Tarjeta de ajuste: icono arriba, control a la derecha (interruptor, etiqueta...) y texto debajo.
-    private func settingCardLabel(_ item: SettingItem) -> some View {
-        VStack(alignment: .leading, spacing: 10) {
-            HStack(alignment: .center) {
-                Image(systemName: item.symbol)
-                    .font(.system(size: 17, weight: .semibold))
-                    .foregroundStyle(item.tint)
-                    .frame(width: 40, height: 40)
-                    .background(item.tint.opacity(0.14), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
-                Spacer(minLength: 4)
-                settingControl(item.control)
-            }
-            VStack(alignment: .leading, spacing: 4) {
-                Text(item.title)
-                    .font(AppFont.text(14, .semibold))
-                    .foregroundStyle(.white)
-                    .lineLimit(1)
-                    .minimumScaleFactor(0.8)
-                Text(item.subtitle)
-                    .font(AppFont.text(11))
-                    .foregroundStyle(.white.opacity(0.5))
-                    .lineLimit(2)
-                    .multilineTextAlignment(.leading)
-            }
-            Spacer(minLength: 0)
-        }
-        .padding(13)
-        .frame(maxWidth: .infinity, minHeight: 132, alignment: .topLeading)
-        .glassCard(interactive: true)
-    }
-
-    @ViewBuilder
-    private func settingControl(_ control: SettingControl) -> some View {
-        switch control {
-        case .toggle(let isOn):
-            Toggle("", isOn: .constant(isOn))
-                .labelsHidden()
-                .tint(Color.cyan)
-                .fixedSize()
-                .allowsHitTesting(false)
-        case .badge(let text, let color):
-            settingBadge(text, tint: color)
-        case .symbol(let name):
-            Image(systemName: name)
-                .font(.system(size: 11, weight: .bold))
-                .foregroundStyle(Color.white.opacity(0.45))
-        case .progress:
-            ProgressView()
-                .tint(Color.cyan)
-        case .plain:
-            EmptyView()
-        }
     }
 
     private var controllersSubtitle: String {
@@ -3690,16 +3964,6 @@ struct HomeView: View {
             .foregroundStyle(Color.cyan.opacity(subsection ? 0.6 : 0.85))
             .padding(.top, subsection ? 2 : 8)
             .padding(.leading, 2)
-    }
-
-    private func settingBadge(_ text: String, tint: Color = Color.cyan) -> some View {
-        Text(text)
-            .font(AppFont.text(9, .bold))
-            .tracking(0.6)
-            .foregroundStyle(tint)
-            .padding(.horizontal, 8)
-            .padding(.vertical, 4)
-            .background(tint.opacity(0.14), in: Capsule())
     }
 
     // MARK: - Modo Dock: pantallas y barras
@@ -4176,7 +4440,7 @@ private struct HeaderPlanet: View {
 // MARK: - Tipos de los Ajustes
 
 /// Lo que se ve a la derecha del icono en cada tarjeta de ajuste.
-private enum SettingControl {
+private enum SettingControl: Equatable {
     case toggle(Bool)
     case badge(String, Color)
     case symbol(String)
@@ -4211,4 +4475,77 @@ private enum SettingTint {
 
 #Preview {
     HomeView()
+}
+
+/// Tarjeta de un ajuste (solo el dibujo; el botón y su acción los pone HomeView).
+private struct SettingCardLabel: View, Equatable {
+    let title: String
+    let subtitle: String
+    let symbol: String
+    let tint: Color
+    let control: SettingControl
+
+    /// Tarjeta de ajuste: icono arriba, control a la derecha (interruptor, etiqueta...) y texto debajo.
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack(alignment: .center) {
+                Image(systemName: symbol)
+                    .font(.system(size: 17, weight: .semibold))
+                    .foregroundStyle(tint)
+                    .frame(width: 40, height: 40)
+                    .background(tint.opacity(0.14), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+                Spacer(minLength: 4)
+                settingControl(control)
+            }
+            VStack(alignment: .leading, spacing: 4) {
+                Text(title)
+                    .font(AppFont.text(14, .semibold))
+                    .foregroundStyle(.white)
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.8)
+                Text(subtitle)
+                    .font(AppFont.text(11))
+                    .foregroundStyle(.white.opacity(0.5))
+                    .lineLimit(2)
+                    .multilineTextAlignment(.leading)
+            }
+            Spacer(minLength: 0)
+        }
+        .padding(13)
+        .frame(maxWidth: .infinity, minHeight: 132, alignment: .topLeading)
+        .glassCard(interactive: true)
+    }
+
+    @ViewBuilder
+    private func settingControl(_ control: SettingControl) -> some View {
+        switch control {
+        case .toggle(let isOn):
+            Toggle("", isOn: .constant(isOn))
+                .labelsHidden()
+                .tint(Color.cyan)
+                .fixedSize()
+                .allowsHitTesting(false)
+        case .badge(let text, let color):
+            settingBadge(text, tint: color)
+        case .symbol(let name):
+            Image(systemName: name)
+                .font(.system(size: 11, weight: .bold))
+                .foregroundStyle(Color.white.opacity(0.45))
+        case .progress:
+            ProgressView()
+                .tint(Color.cyan)
+        case .plain:
+            EmptyView()
+        }
+    }
+
+    private func settingBadge(_ text: String, tint: Color = Color.cyan) -> some View {
+        Text(text)
+            .font(AppFont.text(9, .bold))
+            .tracking(0.6)
+            .foregroundStyle(tint)
+            .padding(.horizontal, 8)
+            .padding(.vertical, 4)
+            .background(tint.opacity(0.14), in: Capsule())
+    }
 }

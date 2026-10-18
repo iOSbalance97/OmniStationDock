@@ -138,7 +138,7 @@ struct DockCarousel: View {
         }
         .onChange(of: selectedID) { _, id in
             if let id, id != scrollID {
-                withAnimation(.easeInOut(duration: 0.28)) { scrollID = id }
+                withAnimation(.easeOut(duration: 0.2)) { scrollID = id }
             }
         }
         .onChange(of: games.map(\.id)) { _, _ in
@@ -181,7 +181,7 @@ struct DockCarousel: View {
         }
         .scaleEffect(isSelected ? 1 : Self.sideScale)
         .opacity(isSelected ? 1 : 0.62)
-        .animation(.spring(response: 0.32, dampingFraction: 0.82), value: selectedID)
+        .animation(.smooth(duration: 0.22), value: isSelected)
         .contentShape(Rectangle())
         .onTapGesture {
             if isSelected { onOpen(game) } else { selectedID = game.id }
@@ -198,7 +198,16 @@ struct DockCarousel: View {
         .clipShape(shape)
         .glassRim(in: shape)
         .padRing(selected && focused, cornerRadius: 18)
-        .shadow(color: selected ? Color.cyan.opacity(0.45) : Color.clear, radius: 14)
+        // Brillo solo detrás de la seleccionada: una sombra en cada tarjeta (aunque fuera
+        // transparente) se calculaba en todas y daba tirones al deslizar.
+        .background {
+            if selected {
+                shape
+                    .fill(Color.cyan.opacity(0.4))
+                    .blur(radius: 14)
+                    .allowsHitTesting(false)
+            }
+        }
     }
 
     @ViewBuilder

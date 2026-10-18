@@ -46,6 +46,16 @@ enum Platforms {
     ]
 
     static let customKey = "customPlatforms"
+    /// Plataformas ocultas en la barra (nombres separados por "|").
+    static let hiddenKey = "hiddenPlatforms"
+
+    static func hidden(_ raw: String) -> Set<String> {
+        Set(raw.split(separator: "|").map(String.init))
+    }
+
+    static func encodeHidden(_ names: Set<String>) -> String {
+        names.sorted().joined(separator: "|")
+    }
 
     /// Plataformas creadas por el usuario, guardadas como "Nombre::icono|Nombre::icono".
     static func parse(_ raw: String) -> [Entry] {
@@ -82,6 +92,31 @@ enum Platforms {
 
     static func isExtended(_ name: String) -> Bool {
         extended.contains { $0.name == name }
+    }
+
+    /// Nombre completo de la plataforma (para la pantalla del juego).
+    static func fullName(for name: String) -> String {
+        switch name {
+        case "PS1": return "PlayStation"
+        case "PS2": return "PlayStation 2"
+        case "PS3": return "PlayStation 3"
+        case "PSP": return "PlayStation Portable"
+        case "GameCube": return "Nintendo GameCube"
+        case "Wii": return "Nintendo Wii"
+        case "Switch": return "Nintendo Switch"
+        case "3DS": return "Nintendo 3DS"
+        case "NDS": return "Nintendo DS"
+        case "GBA": return "Game Boy Advance"
+        case "N64": return "Nintendo 64"
+        case "SNES": return "Super Nintendo"
+        case "NES": return "Nintendo Entertainment System"
+        case "Mega Drive": return "Sega Mega Drive"
+        case "Master System": return "Sega Master System"
+        case "Game Gear": return "Sega Game Gear"
+        case "Dreamcast": return "Sega Dreamcast"
+        case "Saturn": return "Sega Saturn"
+        default: return name
+        }
     }
 
     static func symbol(for name: String) -> String {
@@ -171,10 +206,12 @@ final class CoverStore {
     func image(for id: String) -> UIImage? {
         if let cached = cache.object(forKey: id as NSString) { return cached }
         if missing.contains(id) { return nil }
-        guard let image = UIImage(contentsOfFile: fileURL(for: id).path) else {
+        guard let file = UIImage(contentsOfFile: fileURL(for: id).path) else {
             missing.insert(id)
             return nil
         }
+        // Se descomprime una vez aquí y no cada vez que se dibuja (daba tirones al mover el carrusel).
+        let image: UIImage = file.preparingForDisplay() ?? file
         cache.setObject(image, forKey: id as NSString)
         return image
     }
