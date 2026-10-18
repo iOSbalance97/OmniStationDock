@@ -327,3 +327,65 @@ final class JITKeepAlive {
         return data
     }()
 }
+
+// MARK: - Preparación automática
+
+/// Estado del JIT integrado, compartido por toda la app. Se prepara solo al abrir la app y al
+/// volver a ella; la imagen de desarrollador queda montada hasta reiniciar el iPhone, así que
+/// las siguientes veces solo se comprueba la VPN (un instante).
+final class JITStatusCenter: ObservableObject {
+    static let shared = JITStatusCenter()
+
+    enum State: Equatable {
+        case idle
+        case preparing(String)
+        case ready
+        case unreachable(String)
+        case failed(String)
+    }
+
+    @Published private(set) var state: State = .idle
+    private var lastReady: Date?
+
+    var isReady: Bool { state == .ready }
+    var isPreparing: Bool {
+        if case .preparing = state { return true }
+        return false
+    }
+
+    /// Prepara sin preguntar. Con `force` repite aunque esté listo hace poco.
+    func autoPrepare(force: Bool = false) {
+        guard BuiltInJIT.isAvailable, PairingFile.info()?.kind == .remotePairing else { return }
+        guard !isPreparing else { return }
+        if !force, state == .ready, let lastReady, Date().timeIntervalSince(lastReady) < 120 { return }
+        state = .preparing("")
+        BuiltInJIT.prepare(progress: { [weak self] text in
+            guard let self, self.isPreparing else { return }
+            self.state = .preparing(text)
+        }, completion: { [weak self] readiness in
+            guard let self else { return }
+            switch readiness {
+            case .ready:
+                self.state = .ready
+                self.lastReady = Date()
+            case .unreachable(let reason):
+                self.state = .unreachable(reason)
+            case .notReady(let reason):
+                self.state = .failed(reason)
+            }
+        })
+    }
+
+    /// Tras abrir una app con JIT correctamente, el dispositivo está listo.
+    func markReady() {
+        state = .ready
+        lastReady = Date()
+    }
+
+    /// Al cambiar el archivo de emparejamiento o borrar la imagen, hay que volver a comprobar.
+    func invalidate() {
+        guard !isPreparing else { return }
+        state = .idle
+        lastReady = nil
+    }
+}
