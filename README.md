@@ -1,16 +1,18 @@
-# OmniStation Dock — versión 0.3.2
+# OmniStation Dock — versión 0.3.3
 
 Lanzador de juegos y emuladores para iPhone con interfaz espacial/Liquid Glass, control completo con mando y **Modo Dock** (carrusel en horizontal, también al conectar HDMI).
 
 ## Funciones
 - Inicio, Favoritos, Búsqueda y Ajustes, con filtros por plataforma (incluidas Juegos iOS, Ports y las tuyas).
 - Biblioteca: carpeta externa con ROMs de todas las plataformas, accesos directos (URL, app iOS por Bundle ID con StikDebug, o LiveContainer) y carátulas.
-- Por juego: cambiar nombre, carátula y plataforma, favoritos, logros de RetroAchievements, mapa de botones y **abrir con JIT**.
-- Mando (DualSense, Xbox…): cruceta (mantener = repetir), ✕ jugar, △ opciones, ○ atrás, L1/R1 plataforma, L2/R2 pestaña.
+- **Pantalla del juego**: al elegir un juego (✕ o toque) se abre su ficha con carátula, nombre, plataforma y descripción (de Wikipedia, en tu idioma, guardada en el iPhone), y los botones **Jugar** y **Opciones**. Arriba, volver (también ○) y favorito. Vertical y horizontal, con y sin Dock.
+- Por juego: cambiar nombre, carátula (Descargar, Importar foto o Importar archivo) y plataforma, favoritos, logros de RetroAchievements, mapa de botones y **abrir con JIT**.
+- Mando (DualSense, Xbox…): cruceta (mantener = repetir), ✕ elegir, △ opciones, ○ atrás, □ borrar letra en los teclados, L1/R1 plataforma, L2/R2 pestaña.
+- Reorganizar plataformas: orden y un interruptor por plataforma para mostrarla u ocultarla en la barra.
 - Fondo: animado predeterminado, original estático, imagen propia o vídeo propio. Sonidos con volumen propio.
 
 ## JIT
-La primera vez la app pregunta **cómo se instaló** (Ajustes → Depuración → Método de instalación).
+La app **detecta sola** cómo se instaló (dentro de LiveContainer o con SideStore/AltStore). Ajustes → Depuración → Método de instalación solo informa del método detectado y de lo que ofrece frente al otro.
 
 ### LiveContainer + StikDebug
 1. En LiveContainer → Ajustes, elige **StikDebug** como activador de JIT.
@@ -39,13 +41,14 @@ La primera vez (y en Ajustes → Juegos → Emuladores) la app pregunta qué emu
 | MeloNX | Switch | `melonx://game?id=<Title ID>` o `?name=<título>` | `com.stossy11.MeloNX.app` |
 
 - **MeloNX** abre un juego por su Title ID o por su título exacto (con tildes y todo). OmniStation usa, por orden: lo que pongas en *Nombre en MeloNX* (opciones del juego), el Title ID si el archivo lo lleva entre corchetes (`Juego [0100XXXXXXXXXXXX].nsp`) o el nombre del juego. Con MeloNX instalado aparte, *Leer biblioteca de MeloNX* (y al vincular su carpeta) le pide su lista de juegos (`melonx://gameInfo`), empareja cada archivo con su título aunque se escriba distinto (por ejemplo «Super Mario Wonder» con «Super Mario Bros. Wonder») y usa sus iconos como carátulas. Dentro de LiveContainer MeloNX no puede devolver esa lista: usa *Nombre en MeloNX* si un juego no arranca.
+- **ARMSX2** abre un juego por su nombre de archivo. Con ARMSX2 instalado aparte, *Leer biblioteca de ARMSX2* (y automáticamente al encontrar juegos nuevos) le pide su lista (`armsx2://library`, ARMSX2 pide confirmación), usa el título real de cada juego como nombre (salvo los renombrados a mano) y vuelve a buscar su carátula con ese nombre. Nunca se piden las dos bibliotecas a la vez: primero MeloNX y, al volver, ARMSX2.
 - **En LiveContainer**: un toque abre el emulador con JIT (pidiéndolo como hace LiveContainer) y arranca el juego.
 - **SideStore/AltStore + JIT integrado**: MeloNX se abre con el juego y espera al JIT; OmniStation se lo da en segundo plano y el juego arranca solo. ARMSX2 no espera al JIT: la primera vez se abre con JIT y hay que volver y pulsar el juego otra vez (mientras siga abierto, arranca al momento).
 - **Con la app StikDebug**: OmniStation abre el juego y el emulador pide el JIT a StikDebug por su cuenta.
 - **Versiones nuevas** (cada emulador por separado, como mucho cada 6 h): ARMSX2 desde GitHub (solo las *nightly* traen IPA de iOS) y MeloNX desde su servidor Forgejo. La IPA se manda a LiveContainer o a SideStore/AltStore, que la instalan tras confirmar.
 
 ## Carátulas automáticas
-Para los juegos sin carátula, OmniStation busca la suya en la colección pública **libretro-thumbnails** (PS1, PS2, PSP, GB/GBC/GBA, NDS, 3DS, NES, SNES, N64, GameCube, Wii, Mega Drive, Master System, Game Gear, Dreamcast y Saturn) y la descarga sola, emparejando por nombre y prefiriendo la región de tu idioma. En Switch usa los iconos de MeloNX. Las carátulas que elijas a mano nunca se sustituyen. Se activa o desactiva en Ajustes → Juegos → Carátulas automáticas.
+Para los juegos sin carátula, OmniStation busca la suya en la colección pública **libretro-thumbnails** (PS1, PS2, PSP, GB/GBC/GBA, NDS, 3DS, NES, SNES, N64, GameCube, Wii, Mega Drive, Master System, Game Gear, Dreamcast y Saturn) y la descarga sola, emparejando por nombre y prefiriendo la región de tu idioma. En Switch usa los iconos de MeloNX. Las carátulas que elijas a mano nunca se sustituyen. En las opciones del juego, *Cambiar carátula* → **Descargar** la busca en ese momento (en Switch, se la pide a MeloNX), **Importar foto** abre la galería e **Importar archivo** abre Archivos. Se activa o desactiva en Ajustes → Juegos → Carátulas automáticas.
 
 ## Cerrar al abrir un juego
 Con *Cerrar al abrir un juego* (Ajustes → General, activado por defecto), OmniStation se cierra en cuanto el juego está abierto (con el JIT integrado, cuando ha terminado de dárselo), para que no se quede detrás.
@@ -79,6 +82,6 @@ El workflow `.github/workflows/ios-build.yml` compila una IPA sin firmar y la pu
 Orbitron y Space Grotesk (Google Fonts), licencia SIL Open Font License 1.1, en `OmniStation/Resources/Fonts`.
 
 ## Versión
-- Marketing version: `0.3.2`
-- Build: `32`
+- Marketing version: `0.3.3`
+- Build: `33`
 - Bundle ID: `com.omnistation.dock`
