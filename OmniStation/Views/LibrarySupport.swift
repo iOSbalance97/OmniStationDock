@@ -57,6 +57,17 @@ enum Platforms {
         names.sorted().joined(separator: "|")
     }
 
+    /// Plataformas encendidas a mano (las de la carpeta externa salen aunque no tengan juegos).
+    static let shownKey = "shownPlatforms"
+
+    /// ¿Sale en la barra? Manda el interruptor; si nunca se tocó: las fijas y las tuyas siempre,
+    /// las de la carpeta externa solo cuando tienen juegos.
+    static func isVisible(_ name: String, hidden: Set<String>, shown: Set<String>, present: Set<String>) -> Bool {
+        if hidden.contains(name) { return false }
+        if shown.contains(name) { return true }
+        return !isExtended(name) || present.contains(name)
+    }
+
     /// Plataformas creadas por el usuario, guardadas como "Nombre::icono|Nombre::icono".
     static func parse(_ raw: String) -> [Entry] {
         var result: [Entry] = []

@@ -1,4 +1,5 @@
 import Foundation
+import UIKit
 
 // MARK: - Carátulas automáticas
 
@@ -79,11 +80,21 @@ enum CoverDownloader {
     }
 
     /// Busca y descarga la carátula de un juego (nil si no hay ninguna que encaje).
-    static func findCover(for gameName: String, platform: String, fileName: String?) async -> Data? {
-        guard let repository = repository(for: platform) else { return nil }
-        let names: [String] = (try? await boxartNames(repository)) ?? []
-        guard !names.isEmpty, let name = bestMatch(for: gameName, fileName: fileName, in: names) else { return nil }
-        return try? await download(repository, name: name)
+    /// Orden: libretro-thumbnails; en Switch, el icono de la eShop por su Title ID; y si nada
+    /// encaja, la portada de su artículo en Wikipedia.
+    static func findCover(for gameName: String, platform: String, fileName: String?, titleID: String? = nil) async -> Data? {
+        if let repository = repository(for: platform) {
+            let names: [String] = (try? await boxartNames(repository)) ?? []
+            if let name = bestMatch(for: gameName, fileName: fileName, in: names),
+               let data = try? await download(repository, name: name) {
+                return data
+            }
+        }
+        if platform == "Switch", let titleID, let url = SwitchArtwork.iconURL(titleID: titleID),
+           let data = try? await fetch(url) {
+            return data
+        }
+        return await WikipediaArtwork.cover(for: gameName, platform: platform)
     }
 
     static func resetAttempts() {
@@ -101,8 +112,9 @@ enum CoverDownloader {
         let tree: [Entry]
     }
 
-    private static func cacheURL(_ repository: String) -> URL {
-        AppFolders.folder("CoverIndex").appendingPathComponent(repository + ".json")
+    private static func cacheURL(_ repository: String, folder: String) -> URL {
+        let name: String = folder == "Named_Boxarts" ? repository : repository + "-" + folder
+        return AppFolders.folder("CoverIndex").appendingPathComponent(name + ".json")
     }
 
     private static func fetchTree(_ url: URL) async throws -> Tree {
@@ -119,7 +131,13 @@ enum CoverDownloader {
 
     /// Nombres de las carátulas ("Juego (Europe).png") del sistema.
     static func boxartNames(_ repository: String) async throws -> [String] {
-        let cache: URL = cacheURL(repository)
+        try await imageNames(repository, folder: "Named_Boxarts")
+    }
+
+    /// Nombres de las imágenes de una carpeta del sistema: Named_Boxarts (carátulas),
+    /// Named_Snaps (capturas del juego) o Named_Titles (pantalla de título).
+    static func imageNames(_ repository: String, folder: String) async throws -> [String] {
+        let cache: URL = cacheURL(repository, folder: folder)
         if let attributes = try? FileManager.default.attributesOfItem(atPath: cache.path),
            let date = attributes[.modificationDate] as? Date,
            Date().timeIntervalSince(date) < 7 * 24 * 3600,
@@ -130,8 +148,8 @@ enum CoverDownloader {
         let base: String = "https://api.github.com/repos/libretro-thumbnails/" + repository + "/git/trees/"
         guard let rootURL = URL(string: base + "master") else { return [] }
         let root: Tree = try await fetchTree(rootURL)
-        guard let folder = root.tree.first(where: { $0.path == "Named_Boxarts" && $0.type == "tree" }),
-              let folderURL = URL(string: base + folder.sha) else { return [] }
+        guard let entry = root.tree.first(where: { $0.path == folder && $0.type == "tree" }),
+              let folderURL = URL(string: base + entry.sha) else { return [] }
         let list: Tree = try await fetchTree(folderURL)
         let names: [String] = list.tree.filter { $0.type == "blob" && $0.path.lowercased().hasSuffix(".png") }.map(\.path)
         if let data = try? JSONEncoder().encode(names) {
@@ -204,17 +222,149 @@ enum CoverDownloader {
 
     // MARK: Descargar
 
-    static func download(_ repository: String, name: String) async throws -> Data {
+    static func download(_ repository: String, name: String, folder: String = "Named_Boxarts") async throws -> Data {
         let encoded: String = name.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? name
-        guard let url = URL(string: "https://raw.githubusercontent.com/libretro-thumbnails/" + repository + "/master/Named_Boxarts/" + encoded) else {
+        guard let url = URL(string: "https://raw.githubusercontent.com/libretro-thumbnails/" + repository + "/master/" + folder + "/" + encoded) else {
             throw URLError(.badURL)
         }
+        return try await fetch(url)
+    }
+
+    /// Descarga sencilla (falla si el servidor no responde 2xx o no es una imagen).
+    static func fetch(_ url: URL) async throws -> Data {
         var request = URLRequest(url: url)
         request.timeoutInterval = 30
+        request.setValue("OmniStationDock/0.3 (iOS)", forHTTPHeaderField: "User-Agent")
         let result: (Data, URLResponse) = try await URLSession.shared.data(for: request)
         if let http = result.1 as? HTTPURLResponse, !(200..<300).contains(http.statusCode) {
             throw URLError(.badServerResponse)
         }
+        guard UIImage(data: result.0) != nil else { throw URLError(.cannotDecodeContentData) }
         return result.0
+    }
+}
+
+// MARK: - Switch: imágenes de la eShop (api.nlib.cc)
+
+/// Icono y banner de cada juego de Switch por su Title ID (0100…).
+enum SwitchArtwork {
+    static func iconURL(titleID: String) -> URL? {
+        URL(string: "https://api.nlib.cc/nx/" + titleID.uppercased() + "/icon/1024/1024")
+    }
+
+    /// Imagen horizontal 1920×1080.
+    static func bannerURL(titleID: String) -> URL? {
+        URL(string: "https://api.nlib.cc/nx/" + titleID.uppercased() + "/banner/1080")
+    }
+}
+
+// MARK: - Wikipedia: portada del artículo del juego
+
+/// Si ninguna colección la tiene, la portada sale de la imagen principal del artículo del juego
+/// en la Wikipedia en inglés (la que lleva las portadas de los videojuegos).
+enum WikipediaArtwork {
+    private struct Response: Decodable {
+        struct Query: Decodable {
+            let pages: [Page]?
+        }
+        struct Page: Decodable {
+            let title: String
+            let thumbnail: Thumbnail?
+        }
+        struct Thumbnail: Decodable {
+            let source: String
+        }
+        let query: Query?
+    }
+
+    static func cover(for gameName: String, platform: String) async -> Data? {
+        let words: [String] = MeloNXLibrary.normalized(gameName)
+        guard !words.isEmpty else { return nil }
+        var components = URLComponents()
+        components.scheme = "https"
+        components.host = "en.wikipedia.org"
+        components.path = "/w/api.php"
+        components.queryItems = [
+            URLQueryItem(name: "action", value: "query"),
+            URLQueryItem(name: "format", value: "json"),
+            URLQueryItem(name: "formatversion", value: "2"),
+            URLQueryItem(name: "generator", value: "search"),
+            URLQueryItem(name: "gsrsearch", value: words.joined(separator: " ") + " video game"),
+            URLQueryItem(name: "gsrlimit", value: "1"),
+            URLQueryItem(name: "prop", value: "pageimages"),
+            URLQueryItem(name: "piprop", value: "thumbnail"),
+            URLQueryItem(name: "pithumbsize", value: "900"),
+            URLQueryItem(name: "redirects", value: "1")
+        ]
+        guard let url = components.url else { return nil }
+        var request = URLRequest(url: url)
+        request.timeoutInterval = 15
+        request.setValue("OmniStationDock/0.3 (iOS)", forHTTPHeaderField: "User-Agent")
+        guard let result = try? await URLSession.shared.data(for: request),
+              let response = try? JSONDecoder().decode(Response.self, from: result.0),
+              let page = response.query?.pages?.first,
+              titleMatches(page.title, gameName),
+              let source = page.thumbnail?.source,
+              let imageURL = URL(string: source) else { return nil }
+        return try? await CoverDownloader.fetch(imageURL)
+    }
+
+    /// El artículo tiene que ser de ese juego: casi todas las palabras del nombre en su título.
+    static func titleMatches(_ title: String, _ name: String) -> Bool {
+        let a: Set<String> = Set(MeloNXLibrary.normalized(title))
+        let b: Set<String> = Set(MeloNXLibrary.normalized(name))
+        guard !a.isEmpty, !b.isEmpty else { return false }
+        return Double(a.intersection(b).count) / Double(b.count) >= 0.6
+    }
+}
+
+// MARK: - Fondos horizontales (pantalla del juego)
+
+/// Imagen horizontal de cada juego para el fondo de su pantalla: banner de la eShop en Switch;
+/// en el resto, una captura del juego (o su pantalla de título) de libretro-thumbnails.
+final class BackdropStore {
+    static let shared = BackdropStore()
+
+    private let cache = NSCache<NSString, UIImage>()
+    private var tried = Set<String>()
+
+    private func fileURL(for id: String) -> URL {
+        AppFolders.folder("Backdrops").appendingPathComponent(AppFolders.safeName(id) + ".jpg")
+    }
+
+    func cached(for id: String) -> UIImage? {
+        if let image = cache.object(forKey: id as NSString) { return image }
+        guard let file = UIImage(contentsOfFile: fileURL(for: id).path) else { return nil }
+        let image: UIImage = file.preparingForDisplay() ?? file
+        cache.setObject(image, forKey: id as NSString)
+        return image
+    }
+
+    /// La guardada o, si no hay, la busca y la guarda (una vez por sesión y juego).
+    @MainActor
+    func image(id: String, name: String, platform: String, fileName: String?, titleID: String?) async -> UIImage? {
+        if let image = cached(for: id) { return image }
+        guard !tried.contains(id) else { return nil }
+        tried.insert(id)
+        guard let data = await Self.find(name: name, platform: platform, fileName: fileName, titleID: titleID),
+              let jpeg = ImageResizer.jpeg(from: data, maxSide: 1920) else { return nil }
+        try? jpeg.write(to: fileURL(for: id), options: .atomic)
+        return cached(for: id)
+    }
+
+    private static func find(name: String, platform: String, fileName: String?, titleID: String?) async -> Data? {
+        if platform == "Switch", let titleID, let url = SwitchArtwork.bannerURL(titleID: titleID),
+           let data = try? await CoverDownloader.fetch(url) {
+            return data
+        }
+        guard let repository = CoverDownloader.repository(for: platform) else { return nil }
+        for folder in ["Named_Snaps", "Named_Titles"] {
+            let names: [String] = (try? await CoverDownloader.imageNames(repository, folder: folder)) ?? []
+            if let match = CoverDownloader.bestMatch(for: name, fileName: fileName, in: names),
+               let data = try? await CoverDownloader.download(repository, name: match, folder: folder) {
+                return data
+            }
+        }
+        return nil
     }
 }

@@ -530,6 +530,7 @@ enum L10n {
         "Para usar el otro método, instala OmniStation Dock de esa forma: la app lo detecta sola al abrirse.": "To use the other method, install OmniStation Dock that way: the app detects it by itself when it opens.",
         "Sin descripción disponible.": "No description available.",
         "Volver": "Back",
+        "Descripción": "Description",
         "Listo": "Done"
     ]
 }

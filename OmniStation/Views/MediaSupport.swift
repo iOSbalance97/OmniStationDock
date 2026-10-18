@@ -307,16 +307,39 @@ final class SoundManager {
     }
 
     /// Efecto corto (navegación o selección). Sin archivo de sonido, suena el clic del sistema.
+    /// Los efectos van por un motor de audio aparte, ya descomprimidos y fuera del hilo de la
+    /// interfaz: con AVAudioPlayer, rebobinar un mp3 en cada movimiento daba tirones al carrusel.
     func play(_ kind: SoundKind, volume: Double) {
         guard volume > 0 else { return }
         prepareSession()
-        guard let player = player(for: kind) else {
+        // Con el mando muy rápido no hace falta sonar más de unas 20 veces por segundo.
+        let now: CFTimeInterval = CACurrentMediaTime()
+        if now - (lastPlayed[kind] ?? 0) < 0.05 { return }
+        lastPlayed[kind] = now
+        guard let url = effectURL(for: kind) else {
             AudioServicesPlaySystemSound(kind == .navigate ? 1105 : 1104)
             return
         }
-        player.volume = Float(volume)
-        player.currentTime = 0
-        player.play()
+        effects.play(kind, url: url, volume: Float(volume)) { [weak self] name in
+            DispatchQueue.main.async { self?.unreadable[kind] = name }
+        }
+    }
+
+    private let effects = SoundEffects()
+    private var lastPlayed: [SoundKind: CFTimeInterval] = [:]
+    /// Archivo de cada efecto (se busca una vez; nil dentro = no hay archivo).
+    private var effectURLs: [SoundKind: URL?] = [:]
+
+    private func effectURL(for kind: SoundKind) -> URL? {
+        if let known = effectURLs[kind] { return known }
+        let url: URL? = customURL(for: kind) ?? bundledURL(for: kind)
+        effectURLs[kind] = .some(url)
+        return url
+    }
+
+    private func forgetEffect(_ kind: SoundKind) {
+        effectURLs[kind] = nil
+        effects.invalidate(kind)
     }
 
     /// Música de ambiente en bucle: con volumen 0 (o sin archivo) se para.
@@ -345,6 +368,7 @@ final class SoundManager {
         }
         players[kind] = nil
         unreadable[kind] = nil
+        forgetEffect(kind)
         return true
     }
 
@@ -355,6 +379,107 @@ final class SoundManager {
         }
         players[kind] = nil
         unreadable[kind] = nil
+        forgetEffect(kind)
+    }
+}
+
+/// Motor de los efectos cortos: cada sonido se descomprime una vez (como mucho sus primeros
+/// 2 segundos) y suena desde memoria, con varias voces para que no se corten entre sí.
+/// Todo pasa en su propia cola, nunca en el hilo de la interfaz.
+private final class SoundEffects {
+    private let queue = DispatchQueue(label: "omnistation.sound-effects", qos: .userInteractive)
+    private let engine = AVAudioEngine()
+    private var buffers: [SoundKind: AVAudioPCMBuffer] = [:]
+    private var sources: [SoundKind: URL] = [:]
+    private var voices: [SoundKind: [AVAudioPlayerNode]] = [:]
+    private var nextVoice: [SoundKind: Int] = [:]
+    private static let maxSeconds: Double = 2.0
+    private static let voiceCount: Int = 3
+
+    func play(_ kind: SoundKind, url: URL, volume: Float, onFailure: @escaping (String) -> Void) {
+        queue.async {
+            self.playNow(kind, url: url, volume: volume, onFailure: onFailure)
+        }
+    }
+
+    func invalidate(_ kind: SoundKind) {
+        queue.async {
+            self.drop(kind)
+        }
+    }
+
+    private func drop(_ kind: SoundKind) {
+        for node in voices[kind] ?? [] {
+            node.stop()
+            engine.detach(node)
+        }
+        voices[kind] = nil
+        buffers[kind] = nil
+        sources[kind] = nil
+        nextVoice[kind] = nil
+    }
+
+    private func playNow(_ kind: SoundKind, url: URL, volume: Float, onFailure: (String) -> Void) {
+        if let source = sources[kind], source != url { drop(kind) }
+        guard let buffer = loadBuffer(kind, url: url) else {
+            onFailure(url.lastPathComponent)
+            AudioServicesPlaySystemSound(kind == .navigate ? 1105 : 1104)
+            return
+        }
+        let pool: [AVAudioPlayerNode] = voicePool(kind, format: buffer.format)
+        guard !pool.isEmpty, startEngine() else {
+            AudioServicesPlaySystemSound(kind == .navigate ? 1105 : 1104)
+            return
+        }
+        let index: Int = (nextVoice[kind] ?? 0) % pool.count
+        nextVoice[kind] = index + 1
+        let node: AVAudioPlayerNode = pool[index]
+        node.stop()
+        node.volume = volume
+        node.scheduleBuffer(buffer, at: nil, options: [], completionHandler: nil)
+        node.play()
+    }
+
+    private func loadBuffer(_ kind: SoundKind, url: URL) -> AVAudioPCMBuffer? {
+        if let buffer = buffers[kind] { return buffer }
+        guard let file = try? AVAudioFile(forReading: url) else { return nil }
+        let format: AVAudioFormat = file.processingFormat
+        let limit: AVAudioFramePosition = AVAudioFramePosition(format.sampleRate * Self.maxSeconds)
+        let frames: AVAudioFrameCount = AVAudioFrameCount(max(0, min(file.length, limit)))
+        guard frames > 0, let buffer = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: frames) else { return nil }
+        do {
+            try file.read(into: buffer, frameCount: frames)
+        } catch {
+            return nil
+        }
+        buffers[kind] = buffer
+        sources[kind] = url
+        return buffer
+    }
+
+    private func voicePool(_ kind: SoundKind, format: AVAudioFormat) -> [AVAudioPlayerNode] {
+        if let pool = voices[kind] { return pool }
+        var pool: [AVAudioPlayerNode] = []
+        for _ in 0..<Self.voiceCount {
+            let node = AVAudioPlayerNode()
+            engine.attach(node)
+            engine.connect(node, to: engine.mainMixerNode, format: format)
+            pool.append(node)
+        }
+        voices[kind] = pool
+        return pool
+    }
+
+    /// El sistema para el motor al cambiar de salida (auriculares, HDMI…): se vuelve a arrancar.
+    private func startEngine() -> Bool {
+        if engine.isRunning { return true }
+        engine.prepare()
+        do {
+            try engine.start()
+            return true
+        } catch {
+            return false
+        }
     }
 }
 

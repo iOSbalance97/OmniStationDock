@@ -8,10 +8,14 @@ enum GameDetailFocus: Int {
     case options = 1
     case favorite = 2
     case back = 3
+    /// Botón de la descripción (solo en horizontal).
+    case info = 4
 }
 
-/// Pantalla intermedia al elegir un juego: carátula, nombre, plataforma y descripción,
-/// con «Jugar» y «Opciones». Arriba, volver (también ○) y favorito.
+/// Pantalla intermedia al elegir un juego, con «Jugar» y «Opciones».
+/// Vertical: carátula, nombre, plataforma y descripción. Horizontal: una imagen del juego de
+/// fondo a pantalla completa, el nombre en el centro y los botones debajo; la descripción
+/// se abre con su botón (al lado del de favorito). Arriba, volver (también ○).
 struct GameDetailView: View {
     let game: Game
     let cover: UIImage?
@@ -22,13 +26,20 @@ struct GameDetailView: View {
     let dock: Bool
     let gamepadConnected: Bool
     let focus: GameDetailFocus
+    /// Descripción abierta (en horizontal).
+    let showDescription: Bool
+    /// Para buscar la imagen de fondo: archivo del juego y, en Switch, su Title ID.
+    var fileName: String? = nil
+    var titleID: String? = nil
     var onPlay: () -> Void
     var onOptions: () -> Void
     var onFavorite: () -> Void
     var onBack: () -> Void
+    var onToggleDescription: () -> Void
 
     @State private var summary: String?
     @State private var loading = true
+    @State private var backdropImage: UIImage?
 
     private func tr(_ key: String) -> String { L10n.tr(key, lang) }
 
@@ -54,11 +65,67 @@ struct GameDetailView: View {
             summary = await GameDescriptions.text(name: game.name, platform: game.platform, language: language)
             loading = false
         }
+        .task(id: game.id) {
+            backdropImage = BackdropStore.shared.cached(for: game.id)
+            guard backdropImage == nil else { return }
+            backdropImage = await BackdropStore.shared.image(id: game.id, name: game.name, platform: game.platform, fileName: fileName, titleID: titleID)
+        }
     }
 
     // MARK: Fondo
 
+    @ViewBuilder
     private func backdrop(_ size: CGSize) -> some View {
+        if landscape {
+            landscapeBackdrop
+        } else {
+            blurredBackdrop
+        }
+    }
+
+    /// Horizontal: imagen del juego a pantalla completa (si aún no hay, la carátula difuminada).
+    private var landscapeBackdrop: some View {
+        ZStack {
+            Color(red: 0.01, green: 0.02, blue: 0.06)
+            if let backdropImage {
+                Image(uiImage: backdropImage)
+                    .resizable()
+                    .scaledToFill()
+                    .frame(minWidth: 0, maxWidth: .infinity, minHeight: 0, maxHeight: .infinity)
+                    .clipped()
+                    .transition(.opacity)
+            } else if let cover {
+                Image(uiImage: cover)
+                    .resizable()
+                    .scaledToFill()
+                    .frame(minWidth: 0, maxWidth: .infinity, minHeight: 0, maxHeight: .infinity)
+                    .blur(radius: 30)
+                    .opacity(0.6)
+                    .clipped()
+            } else {
+                LinearGradient(colors: [game.tint.opacity(0.55), Color.clear], startPoint: .topLeading, endPoint: .bottomTrailing)
+            }
+            // Oscurece el centro y los bordes para que se lean el nombre y los botones.
+            RadialGradient(
+                colors: [Color.black.opacity(0.55), Color.black.opacity(0.25), Color.black.opacity(0.6)],
+                center: .center,
+                startRadius: 10,
+                endRadius: 700
+            )
+            LinearGradient(
+                colors: [Color.black.opacity(0.45), Color.clear, Color.black.opacity(0.55)],
+                startPoint: .top,
+                endPoint: .bottom
+            )
+        }
+        .animation(.easeOut(duration: 0.35), value: backdropImage != nil)
+        .ignoresSafeArea()
+        // Recoge los toques: lo de detrás de la pantalla del juego no debe responder.
+        .contentShape(Rectangle())
+        .onTapGesture {}
+    }
+
+    private var blurredBackdrop: some View {
         ZStack {
             Color(red: 0.01, green: 0.02, blue: 0.06)
             if let cover {
@@ -79,7 +146,6 @@ struct GameDetailView: View {
             )
         }
         .ignoresSafeArea()
-        // Recoge los toques: lo de detrás de la pantalla del juego no debe responder.
         .contentShape(Rectangle())
         .onTapGesture {}
     }
@@ -87,10 +153,18 @@ struct GameDetailView: View {
     // MARK: Barra de arriba
 
     private var topBar: some View {
-        HStack {
+        let infoSymbol: String = showDescription ? "text.alignleft" : "text.justify.left"
+        let infoColor: Color = showDescription ? Color.cyan : Color.white
+        let starSymbol: String = isFavorite ? "star.fill" : "star"
+        let starColor: Color = isFavorite ? Color.yellow : Color.white
+        let starLabel: String = isFavorite ? tr("Quitar de favoritos") : tr("Añadir a favoritos")
+        return HStack(spacing: 12) {
             circleButton("chevron.left", color: Color.white, selected: focus == .back, label: tr("Volver"), action: onBack)
             Spacer()
-            circleButton(isFavorite ? "star.fill" : "star", color: isFavorite ? Color.yellow : Color.white, selected: focus == .favorite, label: isFavorite ? tr("Quitar de favoritos") : tr("Añadir a favoritos"), action: onFavorite)
+            if landscape {
+                circleButton(infoSymbol, color: infoColor, selected: focus == .info, label: tr("Descripción"), action: onToggleDescription)
+            }
+            circleButton(starSymbol, color: starColor, selected: focus == .favorite, label: starLabel, action: onFavorite)
         }
         .padding(.horizontal, landscape ? 28 : 18)
         .padding(.top, landscape ? 14 : 8)
@@ -135,26 +209,62 @@ struct GameDetailView: View {
 
     // MARK: Horizontal (con y sin Dock)
 
+    /// Nombre centrado, un poco por encima de la mitad, y los botones debajo.
     private func landscapeLayout(_ size: CGSize) -> some View {
-        let coverHeight: CGFloat = min(size.height * (dock ? 0.72 : 0.66), dock ? 460 : 360)
-        let coverWidth: CGFloat = coverHeight / Self.coverRatio
-        return HStack(alignment: .center, spacing: dock ? 40 : 28) {
-            coverView(width: coverWidth)
-            VStack(alignment: .leading, spacing: 12) {
-                titleBlock(centered: false)
-                ScrollView(showsIndicators: false) {
-                    descriptionBlock
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                }
+        VStack(spacing: 0) {
+            Spacer(minLength: 64)
+            VStack(spacing: dock ? 18 : 14) {
+                landscapeTitle
                 buttons
-                    .frame(maxWidth: dock ? 520 : 420)
+                    .frame(maxWidth: dock ? 520 : 440)
+                if showDescription {
+                    descriptionPanel(maxHeight: size.height * 0.34)
+                        .transition(.opacity.combined(with: .move(edge: .bottom)))
+                }
             }
-            .frame(maxHeight: coverHeight + 40)
+            .padding(.horizontal, dock ? 64 : 44)
+            Spacer(minLength: 12)
+            Color.clear
+                .frame(height: showDescription ? 8 : size.height * 0.12)
         }
-        .padding(.horizontal, dock ? 64 : 44)
-        .padding(.top, 64)
-        .padding(.bottom, 18)
         .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .animation(.easeOut(duration: 0.22), value: showDescription)
+    }
+
+    private var landscapeTitle: some View {
+        VStack(spacing: 8) {
+            Text(game.name)
+                .font(AppFont.text(dock ? 38 : 30, .bold))
+                .foregroundStyle(.white)
+                .multilineTextAlignment(.center)
+                .lineLimit(2)
+                .minimumScaleFactor(0.6)
+                .shadow(color: Color.black.opacity(0.7), radius: 12)
+            HStack(spacing: 6) {
+                Image(systemName: Platforms.symbol(for: game.platform))
+                    .font(.system(size: dock ? 15 : 13, weight: .semibold))
+                Text(Platforms.fullName(for: game.platform))
+                    .font(AppFont.text(dock ? 16 : 14, .semibold))
+            }
+            .foregroundStyle(Color.cyan)
+            .shadow(color: Color.black.opacity(0.7), radius: 8)
+        }
+        .frame(maxWidth: .infinity)
+    }
+
+    private func descriptionPanel(maxHeight: CGFloat) -> some View {
+        let shape = RoundedRectangle(cornerRadius: 18, style: .continuous)
+        // Alto fijo: con texto, el máximo (se desliza dentro); mientras busca o sin texto, una línea.
+        let height: CGFloat = summary == nil ? 60 : maxHeight
+        return ScrollView(showsIndicators: false) {
+            descriptionBlock
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(14)
+        }
+        .frame(maxWidth: dock ? 720 : 620)
+        .frame(height: height)
+        .background(Color.black.opacity(0.35), in: shape)
+        .liquidGlass(in: shape)
     }
 
     // MARK: Piezas

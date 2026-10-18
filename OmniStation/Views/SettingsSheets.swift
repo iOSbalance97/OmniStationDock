@@ -205,8 +205,11 @@ struct PlatformOrderSheet: View {
     let lang: String
     @Binding var orderRaw: String
     @ObservedObject var pad: SheetPad
+    /// Plataformas que tienen algún juego (para saber si sale una de la carpeta externa).
+    var present: Set<String> = []
     @Environment(\.dismiss) private var dismiss
     @AppStorage(Platforms.hiddenKey) private var hiddenRaw = ""
+    @AppStorage(Platforms.shownKey) private var shownRaw = ""
     @State private var items: [String] = []
     // Con el mando: 0..<items.count = plataformas, luego «Restablecer» y «Listo».
     @State private var selected = 0
@@ -265,7 +268,6 @@ struct PlatformOrderSheet: View {
                 VStack(alignment: .leading, spacing: 4) {
                     Text(tr("Arrastra para cambiar el orden de los filtros. El interruptor decide si la plataforma sale en la barra."))
                     Text(tr("Con el mando: X agarra y suelta, ↑↓ mueve, ←→ muestra u oculta."))
-                    Text(tr("Las plataformas de la carpeta externa solo salen si tienen juegos."))
                 }
                 .font(AppFont.text(12))
             }
@@ -274,8 +276,12 @@ struct PlatformOrderSheet: View {
         .scrollContentBackground(.hidden)
     }
 
+    private func isVisible(_ name: String) -> Bool {
+        Platforms.isVisible(name, hidden: Platforms.hidden(hiddenRaw), shown: Platforms.hidden(shownRaw), present: present)
+    }
+
     private func platformRow(_ name: String) -> some View {
-        let visible: Bool = !Platforms.hidden(hiddenRaw).contains(name)
+        let visible: Bool = isVisible(name)
         return HStack(spacing: 10) {
             Label(name, systemImage: Platforms.symbol(for: name))
                 .font(AppFont.text(15, .semibold))
@@ -289,21 +295,30 @@ struct PlatformOrderSheet: View {
 
     private func visibilityBinding(_ name: String) -> Binding<Bool> {
         Binding<Bool>(
-            get: { !Platforms.hidden(hiddenRaw).contains(name) },
+            get: { isVisible(name) },
             set: { value in setVisible(name, value) }
         )
     }
 
+    /// El interruptor manda: encendida sale siempre en la barra y apagada nunca.
     private func setVisible(_ name: String, _ visible: Bool) {
         var hidden: Set<String> = Platforms.hidden(hiddenRaw)
-        if visible { hidden.remove(name) } else { hidden.insert(name) }
+        var shown: Set<String> = Platforms.hidden(shownRaw)
+        if visible {
+            hidden.remove(name)
+            shown.insert(name)
+        } else {
+            shown.remove(name)
+            hidden.insert(name)
+        }
         hiddenRaw = Platforms.encodeHidden(hidden)
+        shownRaw = Platforms.encodeHidden(shown)
     }
 
     private func toggleSelected() {
         guard items.indices.contains(selected) else { return }
         let name: String = items[selected]
-        setVisible(name, Platforms.hidden(hiddenRaw).contains(name))
+        setVisible(name, !isVisible(name))
     }
 
     private func rowBackground(_ index: Int) -> some View {
@@ -335,6 +350,7 @@ struct PlatformOrderSheet: View {
     private func reset() {
         orderRaw = ""
         hiddenRaw = ""
+        shownRaw = ""
         items = Platforms.ordered("")
         grabbed = false
         selected = 0

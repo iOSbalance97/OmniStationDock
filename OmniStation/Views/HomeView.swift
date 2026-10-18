@@ -104,6 +104,7 @@ struct HomeView: View {
     @AppStorage("dockFullWidth") private var dockFullWidth = true
     @AppStorage("customPlatforms") private var customPlatformsRaw = ""
     @AppStorage(Platforms.hiddenKey) private var hiddenPlatformsRaw = ""
+    @AppStorage(Platforms.shownKey) private var shownPlatformsRaw = ""
     @AppStorage("volumeNavigate") private var volumeNavigate = 0.5
     @AppStorage("volumeSelect") private var volumeSelect = 0.7
     @AppStorage("volumeAmbient") private var volumeAmbient = 0.3
@@ -168,6 +169,7 @@ struct HomeView: View {
     /// Pantalla del juego abierta (antes de jugar) y qué marca en ella el mando.
     @State private var detailGameID: String?
     @State private var detailFocus: GameDetailFocus = .play
+    @State private var detailShowDescription = false
     @State private var jitLaunching = false
     @State private var pendingReturnMessage: String?
     @State private var photoPurpose: PhotoPurpose = .staticBackground
@@ -257,9 +259,12 @@ struct HomeView: View {
     }
 
     /// Vibración y sonido: `.navigate` al moverse por los menús, `.select` al elegir.
+    /// Un solo generador de vibración (crear uno en cada movimiento también costaba).
+    private static let haptic = UIImpactFeedbackGenerator(style: .light)
+
     private func feedback(_ kind: SoundKind = .select) {
         if hapticsEnabled {
-            UIImpactFeedbackGenerator(style: .light).impactOccurred()
+            Self.haptic.impactOccurred()
         }
         guard clickSound else { return }
         let volume: Double = kind == .navigate ? volumeNavigate : volumeSelect
@@ -272,8 +277,9 @@ struct HomeView: View {
         let present: Set<String> = Set(games.map { $0.platform })
         let ordered: [String] = Platforms.ordered(platformOrderRaw, customRaw: customPlatformsRaw)
         let hidden: Set<String> = Platforms.hidden(hiddenPlatformsRaw)
+        let shown: Set<String> = Platforms.hidden(shownPlatformsRaw)
         let names: [String] = ordered.filter { name in
-            !hidden.contains(name) && (!Platforms.isExtended(name) || present.contains(name))
+            Platforms.isVisible(name, hidden: hidden, shown: shown, present: present)
         }
         let entries: [(name: String, symbol: String)] = names.map { name in
             (name: name, symbol: Platforms.symbol(for: name))
@@ -364,7 +370,9 @@ struct HomeView: View {
             screenContent(landscape: landscape, dock: dock)
             topChrome(landscape: landscape, dock: dock)
             detailOverlay(landscape: landscape, dock: dock)
+            // Los menús (opciones del juego…) siempre por encima de la pantalla del juego.
             padMenuOverlay
+                .zIndex(10)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .ignoresSafeArea(.container, edges: stretch)
@@ -435,7 +443,7 @@ struct HomeView: View {
         case .controllers:
             ControllersSheet(lang: appLanguage, monitor: controllers, pad: sheetPad)
         case .platformOrder:
-            PlatformOrderSheet(lang: appLanguage, orderRaw: $platformOrderRaw, pad: sheetPad)
+            PlatformOrderSheet(lang: appLanguage, orderRaw: $platformOrderRaw, pad: sheetPad, present: Set(games.map(\.platform)))
         case .addShortcut:
             addShortcutSheet()
         case .renameGame:
@@ -756,30 +764,33 @@ struct HomeView: View {
         showToast(tr("Carátula actualizada"))
     }
 
+    /// Title ID de un juego de Switch: el del nombre del archivo ([0100…]) o el emparejado con MeloNX.
+    private func switchTitleID(_ id: String) -> String? {
+        let file: String = libraryGames.first(where: { $0.id == id })?.fileName ?? ""
+        if let titleID = Emulator.titleID(in: file) { return titleID }
+        if let saved = gameMeta[id]?.emulatorGameID, Emulator.isTitleID(saved) { return saved }
+        return nil
+    }
+
     /// «Descargar» en Cambiar carátula: busca la carátula de ese juego ahora mismo.
     private func downloadCover(for game: Game) {
-        if game.platform == Emulator.melonx.platform {
-            // Las de Switch salen de MeloNX (su icono de cada juego).
-            guard EmulatorStore.isEnabled(.melonx),
-                  EmulatorStore.location(.melonx, installMethod: installMethodRaw) == .native else {
-                showToast(tr("Las carátulas de Switch vienen de MeloNX instalado con SideStore. Importa una foto o un archivo."), seconds: 4)
-                return
-            }
+        // Switch con MeloNX instalado aparte: su icono sale de la lista de MeloNX.
+        if game.platform == Emulator.melonx.platform, EmulatorStore.isEnabled(.melonx),
+           EmulatorStore.location(.melonx, installMethod: installMethodRaw) == .native {
             forcedCoverIDs.insert(game.id)
             requestMeloNXLibrary()
             return
         }
-        guard CoverDownloader.repository(for: game.platform) != nil else {
-            showToast(tr("No hay carátulas para descargar de esta plataforma"), seconds: 3)
-            return
-        }
+        // El resto (también Switch dentro de LiveContainer): libretro, la eShop por el Title ID
+        // o la portada de Wikipedia.
         let id: String = game.id
         let name: String = game.name
         let platform: String = game.platform
         let file: String? = libraryGames.first(where: { $0.id == id })?.fileName
+        let titleID: String? = switchTitleID(id)
         showToast(tr("Buscando carátula…"), seconds: 2)
         Task {
-            let data: Data? = await CoverDownloader.findCover(for: name, platform: platform, fileName: file)
+            let data: Data? = await CoverDownloader.findCover(for: name, platform: platform, fileName: file, titleID: titleID)
             CoverDownloader.markAttempted(id)
             guard let data, CoverStore.shared.save(data, for: id) else {
                 showToast(tr("No se encontró carátula para este juego"), seconds: 3)
@@ -1508,27 +1519,40 @@ struct HomeView: View {
                 dock: dock,
                 gamepadConnected: gamepadConnected,
                 focus: detailFocus,
+                showDescription: detailShowDescription,
+                fileName: libraryGames.first(where: { $0.id == game.id })?.fileName,
+                titleID: game.platform == Emulator.melonx.platform ? switchTitleID(game.id) : nil,
                 onPlay: { launch(game) },
                 onOptions: { openGameOptions(game.id) },
                 onFavorite: { toggleFavorite(game.id) },
-                onBack: { closeDetail() }
+                onBack: { closeDetail() },
+                onToggleDescription: { toggleDetailDescription() }
             )
             .transition(.opacity)
             .zIndex(5)
         }
     }
 
-    /// ←→ entre «Jugar» y «Opciones»; ↑ a los botones de arriba (volver y favorito).
+    private func toggleDetailDescription() {
+        feedback()
+        withAnimation(.easeOut(duration: 0.22)) { detailShowDescription.toggle() }
+    }
+
+    /// ←→ entre «Jugar» y «Opciones»; ↑ a los botones de arriba: volver, descripción (en
+    /// horizontal) y favorito.
     private func moveDetailFocus(_ direction: ControllerMonitor.Direction) {
+        let hasInfo: Bool = isLandscapeNow
         let next: GameDetailFocus
         switch (detailFocus, direction) {
         case (.play, .right): next = .options
         case (.options, .left): next = .play
         case (.play, .up): next = .back
         case (.options, .up): next = .favorite
-        case (.back, .right): next = .favorite
-        case (.favorite, .left): next = .back
-        case (.back, .down): next = .play
+        case (.back, .right): next = hasInfo ? .info : .favorite
+        case (.info, .left): next = .back
+        case (.info, .right): next = .favorite
+        case (.favorite, .left): next = hasInfo ? .info : .back
+        case (.back, .down), (.info, .down): next = .play
         case (.favorite, .down): next = .options
         default: next = detailFocus
         }
@@ -1544,6 +1568,7 @@ struct HomeView: View {
         case .options: openGameOptions(game.id)
         case .favorite: toggleFavorite(game.id)
         case .back: closeDetail()
+        case .info: toggleDetailDescription()
         }
     }
 
@@ -1925,7 +1950,11 @@ struct HomeView: View {
         }
         // 1b) Pantalla del juego: vuelve a la lista.
         if detailGame != nil {
-            closeDetail()
+            if detailShowDescription {
+                toggleDetailDescription()
+            } else {
+                closeDetail()
+            }
             return
         }
         // 2) Giro a horizontal por HDMI en cuenta atrás.
@@ -2078,6 +2107,7 @@ struct HomeView: View {
         feedback()
         optionsExpanded = false
         detailFocus = .play
+        detailShowDescription = false
         withAnimation(.easeOut(duration: 0.22)) { detailGameID = game.id }
     }
 
@@ -2398,19 +2428,36 @@ struct HomeView: View {
     /// Busca y descarga carátulas para los juegos que no tengan (una vez por juego).
     private func downloadMissingCovers() {
         guard autoCoversEnabled, !downloadingCovers else { return }
+        // Switch sin MeloNX aparte (por ejemplo, dentro de LiveContainer): eShop o Wikipedia.
+        let switchByWeb: Bool = !(EmulatorStore.isEnabled(.melonx) && EmulatorStore.location(.melonx, installMethod: installMethodRaw) == .native)
         let pending: [Game] = games.filter { game in
-            game.isCustom && CoverDownloader.repository(for: game.platform) != nil
+            let hasSource: Bool = CoverDownloader.repository(for: game.platform) != nil || (switchByWeb && game.platform == Emulator.melonx.platform)
+            return game.isCustom && hasSource
                 && CoverStore.shared.image(for: game.id) == nil && !CoverDownloader.wasAttempted(game.id)
         }
         guard !pending.isEmpty else { return }
         let files: [String: String] = Dictionary(libraryGames.compactMap { item in
             item.fileName.map { (item.id, $0) }
         }, uniquingKeysWith: { first, _ in first })
+        var titleIDs: [String: String] = [:]
+        for game in pending where game.platform == Emulator.melonx.platform {
+            if let titleID = switchTitleID(game.id) { titleIDs[game.id] = titleID }
+        }
         downloadingCovers = true
         Task {
             var lists: [String: [String]] = [:]
             var added: Int = 0
             for game in pending {
+                if game.platform == Emulator.melonx.platform {
+                    CoverDownloader.markAttempted(game.id)
+                    if let data = await CoverDownloader.findCover(for: game.name, platform: game.platform, fileName: files[game.id], titleID: titleIDs[game.id]),
+                       CoverStore.shared.image(for: game.id) == nil, CoverStore.shared.save(data, for: game.id) {
+                        AutoCovers.mark(game.id)
+                        added += 1
+                        coverVersion += 1
+                    }
+                    continue
+                }
                 guard let repository = CoverDownloader.repository(for: game.platform) else { continue }
                 if lists[repository] == nil {
                     lists[repository] = (try? await CoverDownloader.boxartNames(repository)) ?? []
