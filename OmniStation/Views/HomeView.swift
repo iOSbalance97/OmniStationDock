@@ -1748,6 +1748,11 @@ struct HomeView: View {
     private func openWithJIT(_ game: Game) {
         // Juego de LiveContainer: su enlace con jit=true (LiveContainer se lo pide a StikDebug).
         if let liveContainerURL = JITLauncher.liveContainerJITURL(game.launchURL) {
+            // Desde dentro de LiveContainer, el JIT se pide como lo hace LiveContainer.
+            if DebugSupport.isInsideLiveContainer, let link = game.launchURL {
+                let request: LiveContainerJIT.Request = LiveContainerJIT.request(forLaunchLink: link)
+                if requestLiveContainerJIT(request, name: game.name) { return }
+            }
             showToast(tr("Abriendo con JIT…"))
             openExternal(liveContainerURL, failure: tr("No se pudo abrir LiveContainer. ¿Está instalado?"))
             return
@@ -1768,6 +1773,27 @@ struct HomeView: View {
             showToast(tr("Abriendo con JIT…"))
         }
         openExternal(url, failure: tr("No se pudo abrir StikDebug. ¿Está instalado?"))
+    }
+
+    /// Pide el JIT a StikDebug para una app de LiveContainer. Devuelve false si hay que usar
+    /// el enlace normal (por ejemplo, si el activador de LiveContainer no es StikDebug ni SideStore).
+    private func requestLiveContainerJIT(_ request: LiveContainerJIT.Request, name: String) -> Bool {
+        switch request {
+        case .ready(let url):
+            showToast(tr("Pidiendo JIT para %@…", name))
+            UIApplication.shared.open(url) { success in
+                if !success {
+                    LiveContainerJIT.cancel()
+                    DispatchQueue.main.async { showToast(tr("No se pudo abrir StikDebug. ¿Está instalado?")) }
+                }
+            }
+            return true
+        case .appNotFound:
+            showToast(tr("LiveContainer no encuentra %@. Revisa el nombre de su carpeta.", name), seconds: 4)
+            return true
+        case .unsupported:
+            return false
+        }
     }
 
     private func jitBundleID(_ game: Game) -> String? {
@@ -1838,6 +1864,10 @@ struct HomeView: View {
         }
         switch armsx2Location {
         case .liveContainer:
+            if DebugSupport.isInsideLiveContainer {
+                let request: LiveContainerJIT.Request = LiveContainerJIT.request(folder: armsx2FolderName, openURL: ARMSX2.gameURL(fileName: file))
+                if requestLiveContainerJIT(request, name: "ARMSX2") { return }
+            }
             showToast(tr("Abriendo en ARMSX2 con JIT…"))
             openExternal(ARMSX2.liveContainerURL(appFolder: armsx2FolderName, fileName: file), failure: tr("No se pudo abrir LiveContainer. ¿Está instalado?"))
         case .native:

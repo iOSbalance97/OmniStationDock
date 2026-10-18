@@ -437,6 +437,8 @@ enum L10n {
         "sin comprobar": "not checked",
         "sin marcar": "not set",
         "Última: %@": "Latest: %@",
+        "Pidiendo JIT para %@…": "Requesting JIT for %@…",
+        "LiveContainer no encuentra %@. Revisa el nombre de su carpeta.": "LiveContainer cannot find %@. Check its folder name.",
         "Listo": "Done"
     ]
 }
