@@ -15,8 +15,8 @@ targets:
     settings:
       base:
         
-        MARKETING_VERSION: "0.1.9"
-        CURRENT_PROJECT_VERSION: "19"
+        MARKETING_VERSION: "0.2.0"
+        CURRENT_PROJECT_VERSION: "20"
         PRODUCT_BUNDLE_IDENTIFIER: com.omnistation.dock
         PRODUCT_NAME: OmniStationDock
         SWIFT_VERSION: "5.0"
@@ -29,3 +29,15 @@ targets:
         INFOPLIST_KEY_UISupportedInterfaceOrientations_iPhone: "UIInterfaceOrientationPortrait UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight"
         ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
         IPHONEOS_DEPLOYMENT_TARGET: "17.0"
+        # JIT integrado (StikJIT): idevice se descarga en el workflow a Vendor/idevice.
+        SWIFT_INCLUDE_PATHS: "$(inherited) $(SRCROOT)/Vendor/idevice"
+        HEADER_SEARCH_PATHS: "$(inherited) $(SRCROOT)/Vendor/idevice"
+        LIBRARY_SEARCH_PATHS: "$(inherited) $(SRCROOT)/Vendor/idevice"
+        OTHER_LDFLAGS: "$(inherited) -lidevice_ffi"
+        DEAD_CODE_STRIPPING: YES
+    dependencies:
+      - sdk: JavaScriptCore.framework
+      - sdk: Network.framework
+      - sdk: Security.framework
+      - sdk: CFNetwork.framework
+      - sdk: SystemConfiguration.framework
