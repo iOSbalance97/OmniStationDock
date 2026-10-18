@@ -1,5 +1,6 @@
 // Copiado de StikJIT (https://github.com/StikDebug/StikJIT, commit 32287268), licencia MPL-2.0.
-// Cambio: «@_implementationOnly import» → «import» porque aquí forma parte de la app.
+// Cambios: «@_implementationOnly import» → «import» (aquí forma parte de la app) y el script
+// se corta si se pierde la conexión con el depurador.
 import Foundation
 import JavaScriptCore
 import idevice
@@ -38,7 +39,13 @@ final class ScriptRunner {
         let getPID: @convention(block) () -> Int = { [targetPID] in Int(targetPID) }
         let send: @convention(block) (String?) -> String = { [weak self] command in
             guard let self, let command else { return "" }
-            return self.sendCommand(command) ?? ""
+            let response: String = self.sendCommand(command) ?? ""
+            // Cambio de OmniStation: si la conexión con el depurador falla (por ejemplo, la app
+            // se cerró), se corta el script; si no, sus bucles seguirían pidiendo datos sin fin.
+            if self.executionError != nil, let current = JSContext.current() {
+                current.exception = JSValue(newErrorFromMessage: "debugserver connection lost", in: current)
+            }
+            return response
         }
         let prepare: @convention(block) (Double, Double) -> String = { [weak self] address, length in
             guard let self else { return "" }
