@@ -312,7 +312,7 @@ enum L10n {
         "Iniciar sesión": "Log in",
         "Iniciar sesión en RetroAchievements": "Log in to RetroAchievements",
         "JIT al abrir juegos": "JIT when opening games",
-        "La app está instalada directamente. El JIT lo activa StikDebug con tu archivo de emparejamiento, que puedes gestionar desde aquí.": "The app is installed directly. StikDebug enables JIT using your pairing file, which you can manage from here.",
+        "La app está instalada directamente. El JIT lo activa OmniStation por sí misma (StikJIT integrado) o la app StikDebug, con tu archivo de emparejamiento.": "The app is installed directly. OmniStation enables JIT by itself (built-in StikJIT) or through the StikDebug app, using your pairing file.",
         "La app y tus juegos están dentro de LiveContainer. El JIT lo activa LiveContainer con StikDebug (elige StikDebug como activador de JIT en los ajustes de LiveContainer).": "The app and your games are inside LiveContainer. LiveContainer enables JIT with StikDebug (choose StikDebug as the JIT enabler in LiveContainer settings).",
         "La clave web tiene 32 caracteres. ¿Has puesto tu contraseña?": "The web key has 32 characters. Did you enter your password?",
         "La sesión de RetroAchievements no es válida. Vuelve a iniciarla en Ajustes.": "The RetroAchievements session is not valid. Log in again in Settings.",
@@ -349,6 +349,94 @@ enum L10n {
         "Vídeo propio quitado": "Custom video removed",
         "¿Cuál es este juego en RetroAchievements?": "Which game is this on RetroAchievements?",
         "¿Cómo has instalado OmniStation Dock?": "How did you install OmniStation Dock?",
+        "ARMSX2 %@ disponible": "ARMSX2 %@ available",
+        "ARMSX2 está al día (%@)": "ARMSX2 is up to date (%@)",
+        "ARMSX2 instalado en": "ARMSX2 installed in",
+        "ARMSX2 ya tiene JIT. Vuelve aquí y pulsa %@ otra vez para arrancarlo.": "ARMSX2 now has JIT. Come back here and tap %@ again to boot it.",
+        "Abre el instalador al detectarla": "Opens the installer when found",
+        "Abre los juegos de PS2 escaneados": "Opens your scanned PS2 games",
+        "Abriendo en ARMSX2 con JIT…": "Opening in ARMSX2 with JIT…",
+        "Activa la VPN LocalDevVPN y abre tus juegos con JIT desde OmniStation.": "Turn on the LocalDevVPN VPN and open your games with JIT from OmniStation.",
+        "Activador de JIT": "JIT enabler",
+        "Activando JIT para %@…": "Enabling JIT for %@…",
+        "Al abrir la app": "When the app opens",
+        "Al día: %@": "Up to date: %@",
+        "Antes del primer uso": "Before first use",
+        "App StikDebug": "StikDebug app",
+        "Apps instaladas": "Installed apps",
+        "Archivo de emparejamiento RPPairing creado con iloader.": "RPPairing pairing file created with iloader.",
+        "Automático": "Automatic",
+        "Bundle ID de ARMSX2": "ARMSX2 Bundle ID",
+        "Bundle ID: %@": "Bundle ID: %@",
+        "Buscando apps con la VPN…": "Looking for apps through the VPN…",
+        "Buscar actualizaciones": "Check for updates",
+        "Buscar versiones nuevas": "Check for new versions",
+        "Carpeta en LiveContainer": "LiveContainer folder",
+        "Comprobando…": "Checking…",
+        "Con el JIT integrado no hace falta nada más. Si usas la app StikDebug, pulsa «Exportar a StikDebug» y guárdalo en su carpeta.": "With built-in JIT nothing else is needed. If you use the StikDebug app, tap “Export to StikDebug” and save it in its folder.",
+        "Crea el archivo con iloader en un ordenador (Manage Pairing File) con el iPhone conectado por cable. Es del tipo RPPairing, el que usan StikJIT y StikDebug.": "Create the file with iloader on a computer (Manage Pairing File) with the iPhone connected by cable. It is an RPPairing file, the kind StikJIT and StikDebug use.",
+        "Dentro de LiveContainer el JIT lo activa LiveContainer.": "Inside LiveContainer, LiveContainer enables JIT.",
+        "Desconocido": "Unknown",
+        "El JIT integrado necesita iOS 17.4 o posterior.": "Built-in JIT needs iOS 17.4 or later.",
+        "El integrado no necesita otras apps: solo la VPN LocalDevVPN y tu archivo de emparejamiento.": "The built-in one needs no other apps: just the LocalDevVPN VPN and your pairing file.",
+        "Elegir app instalada": "Choose installed app",
+        "Emparejamiento": "Pairing",
+        "Escribir Bundle ID": "Type Bundle ID",
+        "Falta": "Missing",
+        "Forzar script: NO": "Force script: NO",
+        "Forzar script: SÍ": "Force script: YES",
+        "Imagen de desarrollador borrada. Se descargará de nuevo al preparar el JIT.": "Developer disk image removed. It will be downloaded again when preparing JIT.",
+        "Importa tu archivo de emparejamiento en Ajustes → Depuración.": "Import your pairing file in Settings → Debugging.",
+        "Inalcanzable: ": "Unreachable: ",
+        "Instalada: %@": "Installed: %@",
+        "Instalar %@": "Install %@",
+        "Instalar sin preguntar": "Install without asking",
+        "JIT activado en %@": "JIT enabled in %@",
+        "JIT integrado": "Built-in JIT",
+        "JIT integrado (StikJIT)": "Built-in JIT (StikJIT)",
+        "La primera vez se descarga la imagen de desarrollador (unos 20 MB). Si falla varias veces, reinicia el iPhone o pulsa «Restablecer imagen».": "The first time, the developer disk image is downloaded (about 20 MB). If it keeps failing, restart the iPhone or tap “Reset image”.",
+        "Modo desarrollador activado en Ajustes → Privacidad y seguridad.": "Developer Mode turned on in Settings → Privacy & Security.",
+        "NUEVA": "NEW",
+        "No hay apps instaladas con SideStore o AltStore.": "No apps installed with SideStore or AltStore.",
+        "No hay versiones de iOS publicadas": "No iOS versions published",
+        "No listo: ": "Not ready: ",
+        "No presente: basta con conectar": "Not present: attaching is enough",
+        "No se pudo abrir ARMSX2. ¿Está instalado?": "Could not open ARMSX2. Is it installed?",
+        "No se pudo abrir el instalador. ¿Está instalado LiveContainer o SideStore?": "Could not open the installer. Is LiveContainer or SideStore installed?",
+        "No se pudo activar el JIT: %@": "Could not enable JIT: %@",
+        "No se pudo conectar. ¿Está activa la VPN LocalDevVPN?": "Could not connect. Is the LocalDevVPN VPN on?",
+        "No se pudo consultar GitHub. ¿Hay conexión?": "Could not reach GitHub. Are you online?",
+        "Nueva: %@": "New: %@",
+        "OmniStation y tus juegos instalados con SideStore o AltStore (no dentro de LiveContainer).": "OmniStation and your games installed with SideStore or AltStore (not inside LiveContainer).",
+        "PS2 con ARMSX2": "PS2 with ARMSX2",
+        "Preparando…": "Preparing…",
+        "Preparar JIT": "Prepare JIT",
+        "Preparar y comprobar": "Prepare and check",
+        "Presente: se usa el script de cada app": "Present: each app’s script is used",
+        "Pásalo al iPhone e impórtalo aquí: la app comprueba que es válido. También puedes dejarlo en Archivos → En mi iPhone → OmniStation Dock y se importa solo.": "Copy it to the iPhone and import it here: the app checks that it is valid. You can also drop it in Files → On My iPhone → OmniStation Dock and it is imported automatically.",
+        "Reinstalar": "Reinstall",
+        "Reintentar": "Retry",
+        "Restablecer imagen": "Reset image",
+        "Script JIT": "JIT script",
+        "Script JIT: %@": "JIT script: %@",
+        "SideStore / AltStore": "SideStore / AltStore",
+        "Sin comprobar": "Not checked",
+        "Sin script": "No script",
+        "Solo cuenta en iPhone con TXM (iOS 26). Automático usa el que necesita cada emulador conocido.": "Only matters on iPhones with TXM (iOS 26). Automatic uses the one each known emulator needs.",
+        "TXM (iOS 26)": "TXM (iOS 26)",
+        "Tipo antiguo: crea uno nuevo con iloader": "Old type: create a new one with iloader",
+        "Tipo: RPPairing (StikJIT y StikDebug)": "Type: RPPairing (StikJIT and StikDebug)",
+        "Tipo: clásico (StikDebug actual necesita uno nuevo de iloader)": "Type: classic (current StikDebug needs a new one from iloader)",
+        "Tu archivo de emparejamiento es del tipo antiguo. Crea uno nuevo con iloader.": "Your pairing file is the old type. Create a new one with iloader.",
+        "VPN LocalDevVPN conectada. Mejor con Wi‑Fi; sin Wi‑Fi: datos móviles, conectar la VPN y después modo avión.": "LocalDevVPN connected. Wi‑Fi works best; without Wi‑Fi: mobile data, connect the VPN, then airplane mode.",
+        "VPN e imagen de desarrollador": "VPN and developer disk image",
+        "Versión de ARMSX2": "ARMSX2 version",
+        "Vuelve a escanear la carpeta para abrir este juego en ARMSX2": "Scan the folder again to open this game in ARMSX2",
+        "Ya la tengo: marcar como instalada": "I have it: mark as installed",
+        "iOS 17.4 o posterior": "iOS 17.4 or later",
+        "sin comprobar": "not checked",
+        "sin marcar": "not set",
+        "Última: %@": "Latest: %@",
         "Listo": "Done"
     ]
 }
@@ -381,6 +469,8 @@ struct LibraryGame: Codable, Identifiable, Equatable {
     var platform: String
     var launchURL: String?
     var source: String   // "scan" o "url"
+    /// Nombre del archivo escaneado (con extensión), para abrirlo en emuladores como ARMSX2.
+    var fileName: String? = nil
 
     var asGame: Game {
         Game(
@@ -752,8 +842,16 @@ enum DebugSupport {
     }
 
     /// Pide a StikDebug que active JIT en esta app ya abierta (por su número de proceso).
+    /// StikDebug: JIT para esta app (su guía pide siempre el Bundle ID y el PID).
     static var enableJITURL: URL? {
-        URL(string: "stikjit://enable-jit?pid=\(getpid())")
+        var components = URLComponents()
+        components.scheme = "stikdebug"
+        components.host = "enable-jit"
+        components.queryItems = [
+            URLQueryItem(name: "bundle-id", value: bundleID),
+            URLQueryItem(name: "pid", value: String(getpid()))
+        ]
+        return components.url
     }
 
     static let stikDebugURL: URL? = URL(string: "stikjit://")

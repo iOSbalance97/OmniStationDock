@@ -211,6 +211,8 @@ struct GameMeta: Codable, Equatable {
     var useJIT: Bool?
     /// Bundle ID del juego para pedir el JIT a StikDebug (SideStore/AltStore).
     var bundleID: String?
+    /// Script de JIT con TXM: "auto", "universal", "legacy" o "none" (nil = automático).
+    var jitScript: String?
 }
 
 enum GameMetaStore {
@@ -324,7 +326,7 @@ enum LibraryScanner {
             let name: String = url.deletingPathExtension().lastPathComponent
             let id = "\(platform)/\(name)"
             if found[id] == nil {
-                found[id] = LibraryGame(id: id, name: name, platform: platform, launchURL: nil, source: "scan")
+                found[id] = LibraryGame(id: id, name: name, platform: platform, launchURL: nil, source: "scan", fileName: url.lastPathComponent)
             }
         }
         return found.values.sorted { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }

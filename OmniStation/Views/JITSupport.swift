@@ -65,7 +65,7 @@ enum JITLauncher {
         let clean: String = bundleID.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !clean.isEmpty else { return nil }
         var components = URLComponents()
-        components.scheme = "stikjit"
+        components.scheme = "stikdebug"
         components.host = "enable-jit"
         components.queryItems = [URLQueryItem(name: "bundle-id", value: clean)]
         return components.url
@@ -74,8 +74,10 @@ enum JITLauncher {
     /// ¿Está instalado StikDebug? (iOS solo deja comprobarlo por su enlace).
     @MainActor
     static var stikDebugInstalled: Bool {
-        guard let url = URL(string: "stikjit://") else { return false }
-        return UIApplication.shared.canOpenURL(url)
+        for scheme in ["stikdebug://", "stikjit://"] {
+            if let url = URL(string: scheme), UIApplication.shared.canOpenURL(url) { return true }
+        }
+        return false
     }
 
     /// Bundle ID válido: letras, números, puntos, guiones y guiones bajos.
@@ -87,10 +89,18 @@ enum JITLauncher {
 
 // MARK: - Archivo de emparejamiento (SideStore / AltStore)
 
+/// Tipo de archivo de emparejamiento.
+enum PairingKind {
+    /// RPPairing (claves Ed25519): el que usan StikDebug actual y StikJIT. Se crea con iloader.
+    case remotePairing
+    /// El clásico de SideStore/jitterbugpair (certificados): StikDebug actual ya no lo usa.
+    case legacy
+}
+
 struct PairingInfo {
+    let kind: PairingKind
+    /// Identificador del emparejamiento (identifier o HostID).
     let hostID: String
-    let systemBUID: String
-    let udid: String?
     let importedAt: Date?
 }
 
@@ -115,19 +125,26 @@ enum PairingFile {
     /// Comprueba que los datos son un archivo de emparejamiento de verdad.
     static func validate(_ data: Data) -> PairingInfo? {
         guard let plist = try? PropertyListSerialization.propertyList(from: data, options: [], format: nil),
-              let dict = plist as? [String: Any],
-              let hostID = dict["HostID"] as? String, !hostID.isEmpty,
+              let dict = plist as? [String: Any] else { return nil }
+        // RPPairing: public_key y private_key de 32 bytes e identifier.
+        if let publicKey = dict["public_key"] as? Data, publicKey.count == 32,
+           let privateKey = dict["private_key"] as? Data, privateKey.count == 32,
+           let identifier = dict["identifier"] as? String, !identifier.isEmpty {
+            return PairingInfo(kind: .remotePairing, hostID: identifier, importedAt: nil)
+        }
+        // Clásico: HostID, SystemBUID y certificados.
+        guard let hostID = dict["HostID"] as? String, !hostID.isEmpty,
               let buid = dict["SystemBUID"] as? String, !buid.isEmpty else { return nil }
         let hasCertificate: Bool = dict["HostCertificate"] != nil || dict["DeviceCertificate"] != nil
         guard hasCertificate else { return nil }
-        return PairingInfo(hostID: hostID, systemBUID: buid, udid: dict["UDID"] as? String, importedAt: nil)
+        return PairingInfo(kind: .legacy, hostID: hostID, importedAt: nil)
     }
 
     static func info() -> PairingInfo? {
         guard let data = try? Data(contentsOf: url), let base = validate(data) else { return nil }
         let attributes = try? FileManager.default.attributesOfItem(atPath: url.path)
         let date: Date? = attributes?[.modificationDate] as? Date
-        return PairingInfo(hostID: base.hostID, systemBUID: base.systemBUID, udid: base.udid, importedAt: date)
+        return PairingInfo(kind: base.kind, hostID: base.hostID, importedAt: date)
     }
 
     static func data() -> Data? {
@@ -150,10 +167,14 @@ enum PairingFile {
     /// Busca un archivo de emparejamiento dejado en la carpeta de la app en Archivos.
     static func importFromDocuments() -> PairingInfo? {
         let documents: URL = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
-        guard let files = try? FileManager.default.contentsOfDirectory(at: documents, includingPropertiesForKeys: nil) else { return nil }
+        // También donde lo deja la guía de StikJIT: Documents/StikJIT/pairingFile.plist.
+        let folders: [URL] = [documents.appendingPathComponent("StikJIT"), documents]
         let extensions: [String] = ["mobiledevicepairing", "mobiledevicepair", "plist"]
-        for file in files where extensions.contains(file.pathExtension.lowercased()) {
-            if let found = importFile(from: file) { return found }
+        for folder in folders {
+            guard let files = try? FileManager.default.contentsOfDirectory(at: folder, includingPropertiesForKeys: nil) else { continue }
+            for file in files where extensions.contains(file.pathExtension.lowercased()) {
+                if let found = importFile(from: file) { return found }
+            }
         }
         return nil
     }
@@ -255,7 +276,7 @@ struct InstallMethodSheet: View {
         case .liveContainer:
             return tr("La app y tus juegos están dentro de LiveContainer. El JIT lo activa LiveContainer con StikDebug (elige StikDebug como activador de JIT en los ajustes de LiveContainer).")
         case .sideStore:
-            return tr("La app está instalada directamente. El JIT lo activa StikDebug con tu archivo de emparejamiento, que puedes gestionar desde aquí.")
+            return tr("La app está instalada directamente. El JIT lo activa OmniStation por sí misma (StikJIT integrado) o la app StikDebug, con tu archivo de emparejamiento.")
         }
     }
 
@@ -431,7 +452,10 @@ struct PairingFileSheet: View {
 
     @ViewBuilder
     private func pairingDetails(_ info: PairingInfo) -> some View {
-        Text("HostID: " + info.hostID)
+        Text(info.kind == .remotePairing ? tr("Tipo: RPPairing (StikJIT y StikDebug)") : tr("Tipo: clásico (StikDebug actual necesita uno nuevo de iloader)"))
+            .font(AppFont.text(10, .semibold))
+            .foregroundStyle(info.kind == .remotePairing ? Color.green : Color.orange)
+        Text("ID: " + info.hostID)
             .font(AppFont.text(10, .medium))
             .foregroundStyle(.white.opacity(0.6))
             .lineLimit(1)
@@ -470,10 +494,10 @@ struct PairingFileSheet: View {
     private var steps: some View {
         VStack(alignment: .leading, spacing: 8) {
             SheetCaption(text: tr("Cómo funciona"))
-            stepRow(1, tr("Consigue tu archivo de emparejamiento (SideStore lo guarda como ALTPairingFile.mobiledevicepairing en su carpeta de Archivos, o créalo con jitterbugpair en un ordenador)."))
-            stepRow(2, tr("Impórtalo aquí: la app comprueba que es válido. También puedes dejarlo en Archivos → En mi iPhone → OmniStation Dock y se importa solo."))
-            stepRow(3, tr("Pulsa «Exportar a StikDebug» y guárdalo en Archivos → En mi iPhone → StikDebug. StikDebug lo usa automáticamente."))
-            stepRow(4, tr("Activa la VPN de StikDebug (LocalDevVPN) y abre tus juegos con JIT desde OmniStation."))
+            stepRow(1, tr("Crea el archivo con iloader en un ordenador (Manage Pairing File) con el iPhone conectado por cable. Es del tipo RPPairing, el que usan StikJIT y StikDebug."))
+            stepRow(2, tr("Pásalo al iPhone e impórtalo aquí: la app comprueba que es válido. También puedes dejarlo en Archivos → En mi iPhone → OmniStation Dock y se importa solo."))
+            stepRow(3, tr("Con el JIT integrado no hace falta nada más. Si usas la app StikDebug, pulsa «Exportar a StikDebug» y guárdalo en su carpeta."))
+            stepRow(4, tr("Activa la VPN LocalDevVPN y abre tus juegos con JIT desde OmniStation."))
         }
         .padding(13)
         .glassCard()

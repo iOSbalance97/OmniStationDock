@@ -22,7 +22,20 @@ private enum HomeSheet: Identifiable {
     case controllers, platformOrder, addShortcut
     case renameGame, achievements, buttonMap, retroAccount, libraryList, platformManager, sounds
     case installMethod, pairing, bundleID
+    case jitSetup, installedApps, textEntry
     var id: Int { hashValue }
+}
+
+/// Para qué se elige una app instalada (lista de apps con JIT).
+private enum AppPickerTarget: Equatable {
+    case game(String)
+    case armsx2
+}
+
+/// Qué texto se escribe en la ventana de texto genérica.
+private enum TextEntryTarget {
+    case armsx2Folder
+    case armsx2Bundle
 }
 
 /// Para qué se abre el selector de fotos.
@@ -35,6 +48,7 @@ private enum PhotoPurpose: Equatable {
 private enum SettingsDialog {
     case language, staticBackground, videoBackground, clearFavorites, clearLibrary, gameOptions
     case assignPlatform, externalFolder
+    case jitEnabler, jitScript, armsx2Location, armsx2Bundle, armsx2Update
 }
 
 private struct Toast: Identifiable {
@@ -92,6 +106,16 @@ struct HomeView: View {
     @AppStorage("backgroundMode") private var backgroundMode = "default"
     @AppStorage(InstallMethod.storageKey) private var installMethodRaw = ""
     @AppStorage(JITLauncher.defaultKey) private var jitByDefault = false
+    @AppStorage(JITEnabler.storageKey) private var jitEnablerRaw = JITEnabler.builtIn.rawValue
+    @AppStorage(ARMSX2.enabledKey) private var armsx2Enabled = true
+    @AppStorage(ARMSX2.locationKey) private var armsx2LocationRaw = ""
+    @AppStorage(ARMSX2.lcNameKey) private var armsx2Folder = ""
+    @AppStorage(ARMSX2.bundleIDKey) private var armsx2Bundle = ""
+    @AppStorage(ARMSX2.installedKey) private var armsx2Installed = ""
+    @AppStorage(ARMSX2.autoCheckKey) private var armsx2AutoCheck = true
+    @AppStorage(ARMSX2.autoInstallKey) private var armsx2AutoInstall = false
+    @AppStorage(ARMSX2.latestTagKey) private var armsx2LatestTag = ""
+    @AppStorage(ARMSX2.latestURLKey) private var armsx2LatestURL = ""
 
     // Dispositivos
     @StateObject private var controllers = ControllerMonitor()
@@ -126,6 +150,12 @@ struct HomeView: View {
     @State private var coverVersion = 0
     // Juego sobre el que actúan las opciones (cambiar nombre, carátula, logros…).
     @State private var editingGameID: String?
+    // JIT integrado: para qué se elige una app, qué texto se escribe y avisos al volver a la app.
+    @State private var appPickerTarget: AppPickerTarget = .armsx2
+    @State private var textTarget: TextEntryTarget = .armsx2Folder
+    @State private var jitLaunching = false
+    @State private var pendingReturnMessage: String?
+    @State private var armsx2Checking = false
     @State private var photoPurpose: PhotoPurpose = .staticBackground
     @State private var backgroundVideo: URL?
     // Modo Dock: rueda de opciones desplegada (con △).
@@ -413,6 +443,46 @@ struct HomeView: View {
             }
         case .bundleID:
             bundleIDSheet()
+        case .jitSetup:
+            JITSetupSheet(lang: appLanguage, pad: sheetPad) {
+                sheet = .pairing
+            }
+        case .installedApps:
+            installedAppsSheet()
+        case .textEntry:
+            textEntrySheet()
+        }
+    }
+
+    private func installedAppsSheet() -> some View {
+        let target: AppPickerTarget = appPickerTarget
+        return InstalledAppsSheet(lang: appLanguage, pad: sheetPad, title: tr("Apps instaladas")) { app in
+            pickedApp(app, for: target)
+        }
+    }
+
+    private func pickedApp(_ app: DebuggableApp, for target: AppPickerTarget) {
+        switch target {
+        case .game(let id):
+            updateMeta(id) { meta in meta.bundleID = app.bundleID }
+        case .armsx2:
+            armsx2Bundle = app.bundleID
+        }
+        showToast(tr("Bundle ID: %@", app.bundleID))
+    }
+
+    private func textEntrySheet() -> some View {
+        let target: TextEntryTarget = textTarget
+        let folder: Bool = target == .armsx2Folder
+        let initial: String = folder ? armsx2FolderName : armsx2BundleID
+        let title: String = folder ? "Carpeta en LiveContainer" : "Bundle ID de ARMSX2"
+        let placeholder: String = folder ? ARMSX2.defaultLCName : ARMSX2.defaultBundleID
+        return RenameGameSheet(lang: appLanguage, pad: sheetPad, initialName: initial, title: title, placeholder: placeholder, bundleMode: true) { value in
+            if folder {
+                armsx2Folder = value
+            } else {
+                armsx2Bundle = value
+            }
         }
     }
 
@@ -499,6 +569,7 @@ struct HomeView: View {
             .onChange(of: hdmiAutoLandscape) { _, enabled in handleHDMIAutoChange(enabled) }
             .onReceive(NotificationCenter.default.publisher(for: UIApplication.didBecomeActiveNotification)) { _ in
                 refreshJITStatus(announce: false)
+                showPendingReturnMessage()
             }
     }
 
@@ -664,6 +735,9 @@ struct HomeView: View {
         if hdmi.isConnected { handleHDMI(true) }
         SoundManager.shared.updateAmbient(volume: volumeAmbient)
         askInstallMethodIfNeeded()
+        if armsx2Enabled && armsx2AutoCheck && ARMSX2Updater.shouldCheck {
+            checkARMSX2Update(manual: false)
+        }
     }
 
     /// La primera vez se pregunta cómo se instaló la app (decide cómo se activa el JIT).
@@ -894,7 +968,115 @@ struct HomeView: View {
             ])
         case .gameOptions:
             return gameOptionsMenu(cancel)
+        case .jitEnabler:
+            return jitEnablerMenu(cancel)
+        case .jitScript:
+            return jitScriptMenu(cancel)
+        case .armsx2Location:
+            return armsx2LocationMenu(cancel)
+        case .armsx2Bundle:
+            return armsx2BundleMenu(cancel)
+        case .armsx2Update:
+            return armsx2UpdateMenu(cancel)
         }
+    }
+
+    private func jitEnablerMenu(_ cancel: PadMenuItem) -> PadMenuContent {
+        let current: JITEnabler = JITEnabler(rawValue: jitEnablerRaw) ?? .builtIn
+        var items: [PadMenuItem] = []
+        items.append(PadMenuItem(title: checked(tr("JIT integrado (StikJIT)"), current == .builtIn)) {
+            jitEnablerRaw = JITEnabler.builtIn.rawValue
+            closePadMenu()
+        })
+        items.append(PadMenuItem(title: checked(tr("App StikDebug"), current == .stikDebug)) {
+            jitEnablerRaw = JITEnabler.stikDebug.rawValue
+            closePadMenu()
+        })
+        items.append(cancel)
+        return (tr("Activador de JIT"), tr("El integrado no necesita otras apps: solo la VPN LocalDevVPN y tu archivo de emparejamiento."), items)
+    }
+
+    private func jitScriptMenu(_ cancel: PadMenuItem) -> PadMenuContent? {
+        guard let game = editingGame else { return nil }
+        let id: String = game.id
+        let current: JITScriptChoice = JITScriptChoice(stored: gameMeta[id]?.jitScript)
+        var items: [PadMenuItem] = []
+        for choice in JITScriptChoice.allCases {
+            items.append(PadMenuItem(title: checked(jitScriptTitle(choice), choice == current)) {
+                updateMeta(id) { meta in meta.jitScript = choice == .automatic ? nil : choice.rawValue }
+                closePadMenu()
+            })
+        }
+        items.append(cancel)
+        return (tr("Script JIT"), tr("Solo cuenta en iPhone con TXM (iOS 26). Automático usa el que necesita cada emulador conocido."), items)
+    }
+
+    private func jitScriptTitle(_ choice: JITScriptChoice) -> String {
+        switch choice {
+        case .automatic: return tr("Automático")
+        case .universal: return "Universal"
+        case .legacy: return "Legacy"
+        case .noScript: return tr("Sin script")
+        }
+    }
+
+    private func armsx2LocationMenu(_ cancel: PadMenuItem) -> PadMenuContent {
+        let current: ARMSX2.Location = armsx2Location
+        var items: [PadMenuItem] = []
+        items.append(PadMenuItem(title: checked("LiveContainer", current == .liveContainer)) {
+            armsx2LocationRaw = ARMSX2.Location.liveContainer.rawValue
+            closePadMenu()
+        })
+        items.append(PadMenuItem(title: checked(tr("SideStore / AltStore"), current == .native)) {
+            armsx2LocationRaw = ARMSX2.Location.native.rawValue
+            closePadMenu()
+        })
+        items.append(cancel)
+        return (tr("ARMSX2 instalado en"), nil, items)
+    }
+
+    private func armsx2BundleMenu(_ cancel: PadMenuItem) -> PadMenuContent {
+        var items: [PadMenuItem] = []
+        if usesBuiltInJIT {
+            items.append(PadMenuItem(title: tr("Elegir app instalada")) {
+                closePadMenu()
+                appPickerTarget = .armsx2
+                sheet = .installedApps
+            })
+        }
+        items.append(PadMenuItem(title: tr("Escribir Bundle ID")) {
+            closePadMenu()
+            textTarget = .armsx2Bundle
+            sheet = .textEntry
+        })
+        items.append(cancel)
+        return (tr("Bundle ID de ARMSX2"), armsx2BundleID, items)
+    }
+
+    private func armsx2UpdateMenu(_ cancel: PadMenuItem) -> PadMenuContent {
+        let installed: String = armsx2Installed.isEmpty ? tr("sin marcar") : ARMSX2Updater.shortName(armsx2Installed)
+        let latest: String = armsx2LatestTag.isEmpty ? tr("sin comprobar") : ARMSX2Updater.shortName(armsx2LatestTag)
+        let message: String = tr("Instalada: %@", installed) + "\n" + tr("Última: %@", latest)
+        var items: [PadMenuItem] = []
+        if !armsx2LatestURL.isEmpty {
+            let title: String = armsx2LatestTag == armsx2Installed ? tr("Reinstalar") : tr("Instalar %@", latest)
+            items.append(PadMenuItem(title: title) {
+                closePadMenu()
+                installARMSX2()
+            })
+        }
+        items.append(PadMenuItem(title: tr("Buscar actualizaciones")) {
+            closePadMenu()
+            checkARMSX2Update(manual: true)
+        })
+        if !armsx2LatestTag.isEmpty && armsx2LatestTag != armsx2Installed {
+            items.append(PadMenuItem(title: tr("Ya la tengo: marcar como instalada")) {
+                armsx2Installed = armsx2LatestTag
+                closePadMenu()
+            })
+        }
+        items.append(cancel)
+        return ("ARMSX2", message, items)
     }
 
     private typealias PadMenuContent = (title: String, message: String?, items: [PadMenuItem])
@@ -1010,6 +1192,19 @@ struct HomeView: View {
             closePadMenu()
             sheet = .bundleID
         })
+        if installMethodRaw == InstallMethod.sideStore.rawValue {
+            if usesBuiltInJIT {
+                items.append(PadMenuItem(title: tr("Elegir app instalada")) {
+                    closePadMenu()
+                    appPickerTarget = .game(id)
+                    sheet = .installedApps
+                })
+            }
+            let script: JITScriptChoice = JITScriptChoice(stored: gameMeta[id]?.jitScript)
+            items.append(PadMenuItem(title: tr("Script JIT: %@", jitScriptTitle(script))) {
+                dialog = .jitScript
+            })
+        }
         if game.isCustom {
             items.append(PadMenuItem(title: tr("Quitar de la biblioteca"), kind: .destructive) {
                 removeGame(game)
@@ -1526,6 +1721,10 @@ struct HomeView: View {
         feedback()
         playCounts[game.id, default: 0] += 1
         UserDefaults.standard.set(playCounts, forKey: "playCounts")
+        if isARMSX2Game(game) {
+            openInARMSX2(game)
+            return
+        }
         if wantsJIT(game) {
             openWithJIT(game)
             return
@@ -1546,29 +1745,206 @@ struct HomeView: View {
         gameMeta[game.id]?.useJIT ?? jitByDefault
     }
 
-    /// Enlace para abrir el juego con JIT:
-    /// - Juego de LiveContainer: su enlace con jit=true (LiveContainer se lo pide a StikDebug).
-    /// - Resto: StikDebug abre la app por su Bundle ID con el JIT activado.
-    private func jitLaunchURL(_ game: Game) -> URL? {
-        if let url = JITLauncher.liveContainerJITURL(game.launchURL) { return url }
-        let saved: String? = gameMeta[game.id]?.bundleID
-        guard let bundle = saved ?? JITLauncher.bundleID(fromLink: game.launchURL) else { return nil }
-        return JITLauncher.stikDebugJITURL(bundleID: bundle)
-    }
-
     private func openWithJIT(_ game: Game) {
-        guard let url = jitLaunchURL(game) else {
+        // Juego de LiveContainer: su enlace con jit=true (LiveContainer se lo pide a StikDebug).
+        if let liveContainerURL = JITLauncher.liveContainerJITURL(game.launchURL) {
+            showToast(tr("Abriendo con JIT…"))
+            openExternal(liveContainerURL, failure: tr("No se pudo abrir LiveContainer. ¿Está instalado?"))
+            return
+        }
+        guard let bundle = jitBundleID(game) else {
             showToast(tr("Para abrirlo con JIT, añade su Bundle ID en las opciones del juego"))
             return
         }
-        let viaLiveContainer: Bool = JITLauncher.isLiveContainerLink(game.launchURL)
-        if !viaLiveContainer && installMethodRaw == InstallMethod.sideStore.rawValue && !PairingFile.exists {
+        if usesBuiltInJIT {
+            let script: JITScriptChoice = JITScriptChoice(stored: gameMeta[game.id]?.jitScript)
+            startBuiltInJIT(bundleID: bundle, script: script, name: game.name, afterMessage: nil)
+            return
+        }
+        guard let url = JITLauncher.stikDebugJITURL(bundleID: bundle) else { return }
+        if installMethodRaw == InstallMethod.sideStore.rawValue && !PairingFile.exists {
             showToast(tr("Recuerda: StikDebug necesita tu archivo de emparejamiento"))
         } else {
             showToast(tr("Abriendo con JIT…"))
         }
-        let failure: String = viaLiveContainer ? tr("No se pudo abrir LiveContainer. ¿Está instalado?") : tr("No se pudo abrir StikDebug. ¿Está instalado?")
-        openExternal(url, failure: failure)
+        openExternal(url, failure: tr("No se pudo abrir StikDebug. ¿Está instalado?"))
+    }
+
+    private func jitBundleID(_ game: Game) -> String? {
+        gameMeta[game.id]?.bundleID ?? JITLauncher.bundleID(fromLink: game.launchURL)
+    }
+
+    /// SideStore/AltStore con el activador integrado (StikJIT), si este iPhone lo admite.
+    private var usesBuiltInJIT: Bool {
+        guard installMethodRaw == InstallMethod.sideStore.rawValue else { return false }
+        let enabler: JITEnabler = JITEnabler(rawValue: jitEnablerRaw) ?? .builtIn
+        return enabler == .builtIn && BuiltInJIT.isAvailable
+    }
+
+    /// Abre una app con el JIT integrado. El aviso final se ve al volver a OmniStation.
+    private func startBuiltInJIT(bundleID: String, script: JITScriptChoice, name: String, afterMessage: String?) {
+        if let problem = BuiltInJIT.preflightProblem(lang: appLanguage) {
+            showToast(problem, seconds: 4.5)
+            return
+        }
+        guard !jitLaunching else { return }
+        jitLaunching = true
+        showToast(tr("Activando JIT para %@…", name), seconds: 8)
+        BuiltInJIT.launch(bundleID: bundleID, script: script, progress: { _ in }, completion: { result in
+            jitLaunching = false
+            switch result {
+            case .success:
+                pendingReturnMessage = afterMessage ?? tr("JIT activado en %@", name)
+            case .failure(let error):
+                let text: String = tr("No se pudo activar el JIT: %@", BuiltInJIT.message(for: error))
+                pendingReturnMessage = nil
+                showToast(text, seconds: 7)
+            }
+        })
+    }
+
+    private func showPendingReturnMessage() {
+        guard let text = pendingReturnMessage else { return }
+        pendingReturnMessage = nil
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) {
+            showToast(text, seconds: 5)
+        }
+    }
+
+    // MARK: - ARMSX2 (PS2)
+
+    private var armsx2Location: ARMSX2.Location {
+        if let location = ARMSX2.Location(rawValue: armsx2LocationRaw) { return location }
+        return installMethodRaw == InstallMethod.sideStore.rawValue ? .native : .liveContainer
+    }
+
+    private var armsx2FolderName: String {
+        armsx2Folder.isEmpty ? ARMSX2.defaultLCName : armsx2Folder
+    }
+
+    private var armsx2BundleID: String {
+        armsx2Bundle.isEmpty ? ARMSX2.defaultBundleID : armsx2Bundle
+    }
+
+    /// Juegos de PS2 escaneados (sin acceso directo propio): se abren en ARMSX2.
+    private func isARMSX2Game(_ game: Game) -> Bool {
+        armsx2Enabled && game.platform == ARMSX2.platform && game.launchURL == nil && game.isCustom
+    }
+
+    private func openInARMSX2(_ game: Game) {
+        guard let file = libraryGames.first(where: { $0.id == game.id })?.fileName else {
+            showToast(tr("Vuelve a escanear la carpeta para abrir este juego en ARMSX2"), seconds: 4)
+            return
+        }
+        switch armsx2Location {
+        case .liveContainer:
+            showToast(tr("Abriendo en ARMSX2 con JIT…"))
+            openExternal(ARMSX2.liveContainerURL(appFolder: armsx2FolderName, fileName: file), failure: tr("No se pudo abrir LiveContainer. ¿Está instalado?"))
+        case .native:
+            openARMSX2Natively(file: file, name: game.name)
+        }
+    }
+
+    private func openARMSX2Natively(file: String, name: String) {
+        let link: URL? = URL(string: ARMSX2.gameURL(fileName: file))
+        let failure: String = tr("No se pudo abrir ARMSX2. ¿Está instalado?")
+        // Con StikDebug, ARMSX2 pide el JIT por su cuenta cuando no lo tiene.
+        guard usesBuiltInJIT else {
+            openExternal(link, failure: failure)
+            return
+        }
+        let bundle: String = armsx2BundleID
+        BuiltInJIT.isStillRunningWithJIT(bundleID: bundle) { running in
+            if running {
+                openExternal(link, failure: failure)
+            } else {
+                let after: String = tr("ARMSX2 ya tiene JIT. Vuelve aquí y pulsa %@ otra vez para arrancarlo.", name)
+                startBuiltInJIT(bundleID: bundle, script: .automatic, name: "ARMSX2", afterMessage: after)
+            }
+        }
+    }
+
+    private func checkARMSX2Update(manual: Bool) {
+        guard !armsx2Checking else { return }
+        armsx2Checking = true
+        Task {
+            var found: ARMSX2Release? = nil
+            var failed: Bool = false
+            do {
+                found = try await ARMSX2Updater.latest()
+            } catch {
+                failed = true
+            }
+            armsx2Checking = false
+            if failed {
+                if manual { showToast(tr("No se pudo consultar GitHub. ¿Hay conexión?")) }
+                return
+            }
+            guard let release = found else {
+                if manual { showToast(tr("No hay versiones de iOS publicadas")) }
+                return
+            }
+            ARMSX2Updater.remember(release)
+            armsx2LatestTag = release.tag
+            armsx2LatestURL = release.ipaURL
+            handleARMSX2Release(release, manual: manual)
+        }
+    }
+
+    private func handleARMSX2Release(_ release: ARMSX2Release, manual: Bool) {
+        let short: String = ARMSX2Updater.shortName(release.tag)
+        if armsx2Installed.isEmpty {
+            if manual { dialog = .armsx2Update }
+            return
+        }
+        guard release.tag != armsx2Installed else {
+            if manual { showToast(tr("ARMSX2 está al día (%@)", short)) }
+            return
+        }
+        if armsx2AutoInstall && !manual {
+            installARMSX2()
+            return
+        }
+        if sheet == nil && dialog == nil {
+            dialog = .armsx2Update
+        } else {
+            showToast(tr("ARMSX2 %@ disponible", short), seconds: 4)
+        }
+    }
+
+    /// Manda la IPA de ARMSX2 a LiveContainer o a SideStore/AltStore para instalarla.
+    private func installARMSX2() {
+        guard !armsx2LatestURL.isEmpty else {
+            checkARMSX2Update(manual: true)
+            return
+        }
+        let urls: [URL] = ARMSX2.installURLs(ipa: armsx2LatestURL, location: armsx2Location)
+        let tag: String = armsx2LatestTag
+        openFirst(urls) { success in
+            if success {
+                armsx2Installed = tag
+            } else {
+                showToast(tr("No se pudo abrir el instalador. ¿Está instalado LiveContainer o SideStore?"), seconds: 4)
+            }
+        }
+    }
+
+    /// Prueba los enlaces en orden hasta que uno se abra.
+    private func openFirst(_ urls: [URL], completion: @escaping (Bool) -> Void) {
+        guard let first = urls.first else {
+            completion(false)
+            return
+        }
+        let rest: [URL] = Array(urls.dropFirst())
+        UIApplication.shared.open(first) { success in
+            DispatchQueue.main.async {
+                if success {
+                    completion(true)
+                } else {
+                    openFirst(rest, completion: completion)
+                }
+            }
+        }
     }
 
     private func toggleFavorite(_ id: String) {
@@ -2357,7 +2733,7 @@ struct HomeView: View {
     // así no pueden desincronizarse al añadir o quitar ajustes.
 
     private var settingGroups: [SettingGroup] {
-        [generalSettings, appearanceSettings, gameSettings, debugSettings, liveContainerSettings]
+        [generalSettings, appearanceSettings, gameSettings, armsx2Settings, debugSettings, liveContainerSettings]
     }
 
     private var allSettingItems: [SettingItem] {
@@ -2471,6 +2847,47 @@ struct HomeView: View {
         return SettingControl.plain
     }
 
+    private var armsx2Settings: SettingGroup {
+        let location: ARMSX2.Location = armsx2Location
+        let hasUpdate: Bool = !armsx2LatestTag.isEmpty && armsx2LatestTag != armsx2Installed && !armsx2Installed.isEmpty
+        var items: [SettingItem] = []
+        items.append(toggleSetting("armsx2On", tr("PS2 con ARMSX2"), tr("Abre los juegos de PS2 escaneados"), "playstation.logo", SettingTint.blue, $armsx2Enabled))
+        let whereText: String = location == .liveContainer ? "LiveContainer" : tr("SideStore / AltStore")
+        items.append(SettingItem(id: "armsx2Where", title: tr("ARMSX2 instalado en"), subtitle: whereText, symbol: "shippingbox.fill", tint: SettingTint.blue, control: .symbol("chevron.right"), action: {
+            dialog = .armsx2Location
+        }))
+        if location == .liveContainer {
+            items.append(SettingItem(id: "armsx2Folder", title: tr("Carpeta en LiveContainer"), subtitle: armsx2FolderName, symbol: "folder.fill", tint: SettingTint.blue, control: .symbol("pencil"), action: {
+                textTarget = .armsx2Folder
+                sheet = .textEntry
+            }))
+        } else {
+            items.append(SettingItem(id: "armsx2Bundle", title: tr("Bundle ID de ARMSX2"), subtitle: armsx2BundleID, symbol: "number", tint: SettingTint.blue, control: .symbol("pencil"), action: {
+                dialog = .armsx2Bundle
+            }))
+        }
+        items.append(SettingItem(id: "armsx2Version", title: tr("Versión de ARMSX2"), subtitle: armsx2VersionSubtitle, symbol: "arrow.triangle.2.circlepath", tint: SettingTint.blue, control: armsx2VersionControl(hasUpdate), action: {
+            dialog = .armsx2Update
+        }))
+        items.append(toggleSetting("armsx2Check", tr("Buscar versiones nuevas"), tr("Al abrir la app"), "bell.badge.fill", SettingTint.blue, $armsx2AutoCheck))
+        items.append(toggleSetting("armsx2AutoInstall", tr("Instalar sin preguntar"), tr("Abre el instalador al detectarla"), "square.and.arrow.down.fill", SettingTint.blue, $armsx2AutoInstall))
+        return SettingGroup(id: "armsx2", title: "ARMSX2 (PS2)", isSubsection: true, items: items)
+    }
+
+    private var armsx2VersionSubtitle: String {
+        if armsx2LatestTag.isEmpty { return tr("Sin comprobar") }
+        let latest: String = ARMSX2Updater.shortName(armsx2LatestTag)
+        if armsx2Installed.isEmpty { return tr("Última: %@", latest) }
+        if armsx2Installed == armsx2LatestTag { return tr("Al día: %@", latest) }
+        return tr("Nueva: %@", latest)
+    }
+
+    private func armsx2VersionControl(_ hasUpdate: Bool) -> SettingControl {
+        if armsx2Checking { return SettingControl.progress }
+        if hasUpdate { return SettingControl.badge(tr("NUEVA"), Color.green) }
+        return SettingControl.symbol("chevron.right")
+    }
+
     private var debugSettings: SettingGroup {
         let method: InstallMethod? = InstallMethod(rawValue: installMethodRaw)
         let jitControl: SettingControl = jitEnabled ? .badge("ON", Color.green) : .badge("OFF", Color.gray)
@@ -2481,6 +2898,12 @@ struct HomeView: View {
         }))
         items.append(toggleSetting("jitDefault", tr("JIT al abrir juegos"), tr("Para los juegos sin ajuste propio"), "bolt.circle.fill", SettingTint.violet, $jitByDefault))
         if method == .sideStore {
+            items.append(jitEnablerSettingItem())
+            if usesBuiltInJIT {
+                items.append(SettingItem(id: "jitSetup", title: tr("JIT integrado"), subtitle: tr("Preparar y comprobar"), symbol: "bolt.shield.fill", tint: SettingTint.violet, control: .symbol("chevron.right"), action: {
+                    sheet = .jitSetup
+                }))
+            }
             items.append(pairingSettingItem())
         }
         items.append(SettingItem(id: "jitStatus", title: tr("Estado JIT"), subtitle: jitEnabled ? tr("Activo en esta app") : tr("No activo en esta app"), symbol: "cpu", tint: SettingTint.violet, control: jitControl, action: {
@@ -2497,6 +2920,16 @@ struct HomeView: View {
             showToast(tr("Bundle ID copiado"))
         }))
         return SettingGroup(id: "debug", title: tr("Depuración"), items: items)
+    }
+
+    private func jitEnablerSettingItem() -> SettingItem {
+        let current: JITEnabler = JITEnabler(rawValue: jitEnablerRaw) ?? .builtIn
+        let subtitle: String = current == .builtIn ? tr("JIT integrado (StikJIT)") : tr("App StikDebug")
+        let unavailable: Bool = current == .builtIn && !BuiltInJIT.isAvailable
+        let control: SettingControl = unavailable ? .badge(tr("NO"), Color.orange) : .symbol("chevron.right")
+        return SettingItem(id: "jitEnabler", title: tr("Activador de JIT"), subtitle: subtitle, symbol: "bolt.horizontal.fill", tint: SettingTint.violet, control: control, action: {
+            dialog = .jitEnabler
+        })
     }
 
     private func pairingSettingItem() -> SettingItem {
