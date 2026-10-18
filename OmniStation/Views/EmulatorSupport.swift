@@ -1,0 +1,319 @@
+import Foundation
+
+// MARK: - Emuladores externos
+
+/// Emuladores que OmniStation sabe abrir directamente en un juego, con JIT.
+enum Emulator: String, CaseIterable, Identifiable {
+    case armsx2
+    case melonx
+
+    enum Location: String {
+        case liveContainer = "livecontainer"
+        case native = "native"
+    }
+
+    var id: String { rawValue }
+
+    var name: String {
+        switch self {
+        case .armsx2: return "ARMSX2"
+        case .melonx: return "MeloNX"
+        }
+    }
+
+    /// Plataforma de OmniStation cuyos juegos abre.
+    var platform: String {
+        switch self {
+        case .armsx2: return "PS2"
+        case .melonx: return "Switch"
+        }
+    }
+
+    var symbol: String {
+        switch self {
+        case .armsx2: return "opticaldisc.fill"
+        case .melonx: return "gamecontroller.fill"
+        }
+    }
+
+    /// Archivos de juego que se buscan en su carpeta.
+    var extensions: [String] {
+        switch self {
+        case .armsx2: return ["iso", "chd", "cso", "zso", "gz"]
+        case .melonx: return ["nsp", "xci", "nro"]
+        }
+    }
+
+    /// LiveContainer guarda cada app en una carpeta "<Bundle ID>.app".
+    var defaultLCFolder: String { defaultBundleID + ".app" }
+
+    var defaultBundleID: String {
+        switch self {
+        case .armsx2: return "com.armsx2.ios"
+        case .melonx: return "com.stossy11.MeloNX"
+        }
+    }
+
+    /// Nombre de la app (decide su script de JIT con TXM).
+    var appName: String {
+        switch self {
+        case .armsx2: return "ARMSX2 iOS"
+        case .melonx: return "MeloNX"
+        }
+    }
+
+    /// MeloNX abre el juego y espera él solo a tener JIT («Waiting for JIT»), así que con el JIT
+    /// integrado se le puede dar después de abrirlo. ARMSX2 no espera: necesita el JIT antes.
+    var waitsForJIT: Bool {
+        self == .melonx
+    }
+
+    /// Enlace oficial del emulador para arrancar un juego.
+    /// - ARMSX2: por el nombre del archivo en su biblioteca.
+    /// - MeloNX: por el Title ID si el archivo lo lleva entre corchetes; si no, por el título.
+    func gameLink(fileName: String, title: String) -> String {
+        var allowed = CharacterSet.urlQueryAllowed
+        allowed.remove(charactersIn: "&=+")
+        switch self {
+        case .armsx2:
+            let encoded: String = fileName.addingPercentEncoding(withAllowedCharacters: allowed) ?? fileName
+            return "armsx2://launch?game=" + encoded
+        case .melonx:
+            if let titleID = Self.titleID(in: fileName) {
+                return "melonx://game?id=" + titleID
+            }
+            let encoded: String = title.addingPercentEncoding(withAllowedCharacters: allowed) ?? title
+            return "melonx://game?name=" + encoded
+        }
+    }
+
+    /// Title ID de Switch escrito en el nombre del archivo, por ejemplo "Juego [0100ABCD12340000].nsp".
+    static func titleID(in fileName: String) -> String? {
+        let hex = CharacterSet(charactersIn: "0123456789abcdefABCDEF")
+        var current: String = ""
+        var inside = false
+        for character in fileName {
+            if character == "[" {
+                inside = true
+                current = ""
+            } else if character == "]" {
+                if inside, current.count == 16, current.hasPrefix("01"),
+                   current.unicodeScalars.allSatisfy({ hex.contains($0) }) {
+                    return current.lowercased()
+                }
+                inside = false
+            } else if inside {
+                current.append(character)
+            }
+        }
+        return nil
+    }
+
+    /// Versiones publicadas (API de GitHub o de Forgejo, que responden igual).
+    var releasesURL: URL? {
+        switch self {
+        case .armsx2: return URL(string: "https://api.github.com/repos/ARMSX2/ARMSX2/releases?per_page=20")
+        case .melonx: return URL(string: "https://starforgejo.dev/api/v1/repos/projects/MeloNX/releases?limit=10")
+        }
+    }
+
+    /// ¿Este archivo publicado es la IPA de iOS?
+    func isIOSPackage(_ assetName: String) -> Bool {
+        let name: String = assetName.lowercased()
+        guard name.hasSuffix(".ipa") else { return false }
+        return self == .armsx2 ? name.contains("ios") : true
+    }
+
+    /// Emulador que abre los juegos de una plataforma.
+    static func handling(platform: String) -> Emulator? {
+        allCases.first { $0.platform == platform }
+    }
+}
+
+// MARK: - Ajustes de cada emulador
+
+/// Ajustes guardados por emulador ("armsx2Enabled", "melonxLocation"…; los de ARMSX2 son los de antes).
+enum EmulatorStore {
+    private static var defaults: UserDefaults { .standard }
+
+    private static func key(_ emulator: Emulator, _ suffix: String) -> String {
+        emulator.rawValue + suffix
+    }
+
+    static func isEnabled(_ emulator: Emulator) -> Bool {
+        defaults.object(forKey: key(emulator, "Enabled")) as? Bool ?? true
+    }
+
+    static func setEnabled(_ value: Bool, _ emulator: Emulator) {
+        defaults.set(value, forKey: key(emulator, "Enabled"))
+    }
+
+    /// Dónde está instalado; si no se ha elegido, lo mismo que OmniStation.
+    static func location(_ emulator: Emulator, installMethod: String) -> Emulator.Location {
+        if let raw = defaults.string(forKey: key(emulator, "Location")), let location = Emulator.Location(rawValue: raw) {
+            return location
+        }
+        return installMethod == InstallMethod.sideStore.rawValue ? .native : .liveContainer
+    }
+
+    static func setLocation(_ location: Emulator.Location, _ emulator: Emulator) {
+        defaults.set(location.rawValue, forKey: key(emulator, "Location"))
+    }
+
+    static func lcFolder(_ emulator: Emulator) -> String {
+        let value: String = defaults.string(forKey: key(emulator, "LCName")) ?? ""
+        return value.isEmpty ? emulator.defaultLCFolder : value
+    }
+
+    static func setLCFolder(_ value: String, _ emulator: Emulator) {
+        defaults.set(value, forKey: key(emulator, "LCName"))
+    }
+
+    static func bundleID(_ emulator: Emulator) -> String {
+        let value: String = defaults.string(forKey: key(emulator, "BundleID")) ?? ""
+        return value.isEmpty ? emulator.defaultBundleID : value
+    }
+
+    static func setBundleID(_ value: String, _ emulator: Emulator) {
+        defaults.set(value, forKey: key(emulator, "BundleID"))
+    }
+
+    // Carpeta de juegos propia del emulador.
+
+    static func folderBookmark(_ emulator: Emulator) -> Data? {
+        defaults.data(forKey: key(emulator, "FolderBookmark"))
+    }
+
+    static func folderName(_ emulator: Emulator) -> String {
+        defaults.string(forKey: key(emulator, "FolderName")) ?? ""
+    }
+
+    static func setFolder(bookmark: Data?, name: String, _ emulator: Emulator) {
+        defaults.set(bookmark, forKey: key(emulator, "FolderBookmark"))
+        defaults.set(name, forKey: key(emulator, "FolderName"))
+    }
+
+    // Versiones.
+
+    static func installedVersion(_ emulator: Emulator) -> String {
+        defaults.string(forKey: key(emulator, "InstalledVersion")) ?? ""
+    }
+
+    static func setInstalledVersion(_ value: String, _ emulator: Emulator) {
+        defaults.set(value, forKey: key(emulator, "InstalledVersion"))
+    }
+
+    static func latestTag(_ emulator: Emulator) -> String {
+        defaults.string(forKey: key(emulator, "LatestTag")) ?? ""
+    }
+
+    static func latestURL(_ emulator: Emulator) -> String {
+        defaults.string(forKey: key(emulator, "LatestURL")) ?? ""
+    }
+
+    static func autoCheck(_ emulator: Emulator) -> Bool {
+        defaults.object(forKey: key(emulator, "AutoCheck")) as? Bool ?? true
+    }
+
+    static func setAutoCheck(_ value: Bool, _ emulator: Emulator) {
+        defaults.set(value, forKey: key(emulator, "AutoCheck"))
+    }
+
+    static func autoInstall(_ emulator: Emulator) -> Bool {
+        defaults.bool(forKey: key(emulator, "AutoInstall"))
+    }
+
+    static func setAutoInstall(_ value: Bool, _ emulator: Emulator) {
+        defaults.set(value, forKey: key(emulator, "AutoInstall"))
+    }
+
+    /// ¿Toca mirar otra vez? (como mucho cada 6 horas).
+    static func shouldCheck(_ emulator: Emulator) -> Bool {
+        let last: Double = defaults.double(forKey: key(emulator, "LastCheck"))
+        return Date().timeIntervalSince1970 - last > 6 * 3600
+    }
+
+    static func remember(_ release: EmulatorRelease, _ emulator: Emulator) {
+        defaults.set(Date().timeIntervalSince1970, forKey: key(emulator, "LastCheck"))
+        defaults.set(release.tag, forKey: key(emulator, "LatestTag"))
+        defaults.set(release.ipaURL, forKey: key(emulator, "LatestURL"))
+    }
+}
+
+// MARK: - Enlaces de LiveContainer e instalación
+
+enum EmulatorLinks {
+    /// LiveContainer: abre la app con JIT y le pasa el enlace del juego (open-url en base64).
+    static func liveContainerURL(appFolder: String, gameLink: String?) -> URL? {
+        var components = URLComponents()
+        components.scheme = "livecontainer"
+        components.host = "livecontainer-launch"
+        var items: [URLQueryItem] = [
+            URLQueryItem(name: "bundle-name", value: appFolder),
+            URLQueryItem(name: "jit", value: "true")
+        ]
+        if let gameLink {
+            items.append(URLQueryItem(name: "open-url", value: Data(gameLink.utf8).base64EncodedString()))
+        }
+        components.queryItems = items
+        return components.url
+    }
+
+    /// Instalar o actualizar una IPA: LiveContainer, SideStore o AltStore la descargan e instalan.
+    static func installURLs(ipa: String, location: Emulator.Location) -> [URL] {
+        let schemes: [String] = location == .liveContainer ? ["livecontainer"] : ["sidestore", "altstore"]
+        return schemes.compactMap { scheme in
+            var components = URLComponents()
+            components.scheme = scheme
+            components.host = "install"
+            components.queryItems = [URLQueryItem(name: "url", value: ipa)]
+            return components.url
+        }
+    }
+}
+
+// MARK: - Versiones nuevas
+
+struct EmulatorRelease: Equatable {
+    let tag: String
+    let name: String
+    let ipaURL: String
+}
+
+enum EmulatorUpdater {
+    private struct Release: Decodable {
+        let tag_name: String
+        let name: String?
+        let draft: Bool?
+        let assets: [Asset]
+    }
+
+    private struct Asset: Decodable {
+        let name: String
+        let browser_download_url: String
+    }
+
+    /// La versión más reciente que trae IPA de iOS.
+    static func latest(_ emulator: Emulator) async throws -> EmulatorRelease? {
+        guard let url = emulator.releasesURL else { return nil }
+        var request = URLRequest(url: url)
+        request.timeoutInterval = 20
+        request.setValue("application/json", forHTTPHeaderField: "Accept")
+        request.setValue("OmniStationDock", forHTTPHeaderField: "User-Agent")
+        let result: (Data, URLResponse) = try await URLSession.shared.data(for: request)
+        if let http = result.1 as? HTTPURLResponse, !(200..<300).contains(http.statusCode) {
+            throw URLError(.badServerResponse)
+        }
+        let releases: [Release] = try JSONDecoder().decode([Release].self, from: result.0)
+        for release in releases where release.draft != true {
+            guard let asset = release.assets.first(where: { emulator.isIOSPackage($0.name) }) else { continue }
+            return EmulatorRelease(tag: release.tag_name, name: release.name ?? release.tag_name, ipaURL: asset.browser_download_url)
+        }
+        return nil
+    }
+
+    /// Nombre corto de una versión: "nightly-20261016" → "20261016".
+    static func shortName(_ tag: String) -> String {
+        tag.hasPrefix("nightly-") ? String(tag.dropFirst("nightly-".count)) : tag
+    }
+}

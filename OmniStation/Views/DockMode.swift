@@ -4,12 +4,19 @@ import SwiftUI
 
 struct DockStatus: View {
     var use24h: Bool
+    /// Indicador de JIT entre la batería y la hora (nil = no se muestra).
+    var jitActive: Bool? = nil
+    var onJITTap: () -> Void = {}
     @StateObject private var battery = BatteryMonitor()
 
     var body: some View {
         HStack(spacing: 12) {
             if battery.level >= 0 {
                 batteryView
+            }
+            if let jitActive {
+                JITIndicatorDot(active: jitActive)
+                    .onTapGesture { onJITTap() }
             }
             TimelineView(.everyMinute) { context in
                 Text(Self.text(for: context.date, use24h: use24h))
@@ -39,6 +46,24 @@ struct DockStatus: View {
         formatter.locale = Locale.current
         formatter.dateFormat = use24h ? "HH:mm" : "h:mm a"
         return formatter.string(from: date)
+    }
+}
+
+// MARK: - Indicador de JIT
+
+/// Punto verde (JIT disponible) o rojo (no disponible), con un brillo suave.
+struct JITIndicatorDot: View {
+    var active: Bool
+
+    var body: some View {
+        let color: Color = active ? Color.green : Color.red
+        return Circle()
+            .fill(color)
+            .frame(width: 9, height: 9)
+            .shadow(color: color.opacity(0.8), radius: 4)
+            .padding(6)
+            .contentShape(Rectangle())
+            .accessibilityLabel(active ? "JIT ON" : "JIT OFF")
     }
 }
 

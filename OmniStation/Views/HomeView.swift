@@ -22,20 +22,20 @@ private enum HomeSheet: Identifiable {
     case controllers, platformOrder, addShortcut
     case renameGame, achievements, buttonMap, retroAccount, libraryList, platformManager, sounds
     case installMethod, pairing, bundleID
-    case jitSetup, installedApps, textEntry
+    case jitSetup, installedApps, textEntry, emulatorSetup
     var id: Int { hashValue }
 }
 
 /// Para qué se elige una app instalada (lista de apps con JIT).
 private enum AppPickerTarget: Equatable {
     case game(String)
-    case armsx2
+    case emulator(Emulator)
 }
 
 /// Qué texto se escribe en la ventana de texto genérica.
-private enum TextEntryTarget {
-    case armsx2Folder
-    case armsx2Bundle
+private enum TextEntryTarget: Equatable {
+    case lcFolder(Emulator)
+    case bundle(Emulator)
 }
 
 /// Para qué se abre el selector de fotos.
@@ -48,7 +48,7 @@ private enum PhotoPurpose: Equatable {
 private enum SettingsDialog {
     case language, staticBackground, videoBackground, clearFavorites, clearLibrary, gameOptions
     case assignPlatform, externalFolder
-    case jitEnabler, jitScript, armsx2Location, armsx2Bundle, armsx2Update
+    case jitEnabler, jitScript, emulatorLocation, emulatorBundle, emulatorUpdate, emulatorFolder
 }
 
 private struct Toast: Identifiable {
@@ -107,15 +107,7 @@ struct HomeView: View {
     @AppStorage(InstallMethod.storageKey) private var installMethodRaw = ""
     @AppStorage(JITLauncher.defaultKey) private var jitByDefault = false
     @AppStorage(JITEnabler.storageKey) private var jitEnablerRaw = JITEnabler.builtIn.rawValue
-    @AppStorage(ARMSX2.enabledKey) private var armsx2Enabled = true
-    @AppStorage(ARMSX2.locationKey) private var armsx2LocationRaw = ""
-    @AppStorage(ARMSX2.lcNameKey) private var armsx2Folder = ""
-    @AppStorage(ARMSX2.bundleIDKey) private var armsx2Bundle = ""
-    @AppStorage(ARMSX2.installedKey) private var armsx2Installed = ""
-    @AppStorage(ARMSX2.autoCheckKey) private var armsx2AutoCheck = true
-    @AppStorage(ARMSX2.autoInstallKey) private var armsx2AutoInstall = false
-    @AppStorage(ARMSX2.latestTagKey) private var armsx2LatestTag = ""
-    @AppStorage(ARMSX2.latestURLKey) private var armsx2LatestURL = ""
+    @AppStorage("emulatorSetupDone") private var emulatorSetupDone = false
 
     // Dispositivos
     @StateObject private var controllers = ControllerMonitor()
@@ -152,11 +144,16 @@ struct HomeView: View {
     // Juego sobre el que actúan las opciones (cambiar nombre, carátula, logros…).
     @State private var editingGameID: String?
     // JIT integrado: para qué se elige una app, qué texto se escribe y avisos al volver a la app.
-    @State private var appPickerTarget: AppPickerTarget = .armsx2
-    @State private var textTarget: TextEntryTarget = .armsx2Folder
+    @State private var appPickerTarget: AppPickerTarget = .emulator(.armsx2)
+    @State private var textTarget: TextEntryTarget = .lcFolder(.armsx2)
+    // Emulador sobre el que actúan los menús de Ajustes y carpeta que se está eligiendo.
+    @State private var activeEmulator: Emulator = .armsx2
+    @State private var folderPickEmulator: Emulator?
+    // Cambia al tocar los ajustes de un emulador, para repintar Ajustes.
+    @State private var emulatorRevision = 0
+    @State private var checkingEmulators: Set<String> = []
     @State private var jitLaunching = false
     @State private var pendingReturnMessage: String?
-    @State private var armsx2Checking = false
     @State private var photoPurpose: PhotoPurpose = .staticBackground
     @State private var backgroundVideo: URL?
     // Modo Dock: rueda de opciones desplegada (con △).
@@ -182,7 +179,10 @@ struct HomeView: View {
     // MARK: - Datos derivados
 
     private static func makeLibrary(library: [LibraryGame], samples: Bool, counts: [String: Int], meta: [String: GameMeta]) -> (games: [Game], featured: [Game]) {
-        let base: [Game] = (samples ? Game.samples : []) + library.map(\.asGame)
+        let combined: [Game] = (samples ? Game.samples : []) + library.map(\.asGame)
+        // Un mismo juego puede venir de dos carpetas: se queda solo una vez.
+        var seen: Set<String> = []
+        let base: [Game] = combined.filter { seen.insert($0.id).inserted }
         // Los cambios del usuario (nombre, plataforma) se aplican aquí; el id no cambia nunca.
         let all: [Game] = base.map { game in GameMetaStore.apply(meta[game.id], to: game) }
         let ranked = all.enumerated().sorted { a, b in
@@ -452,6 +452,13 @@ struct HomeView: View {
             installedAppsSheet()
         case .textEntry:
             textEntrySheet()
+        case .emulatorSetup:
+            EmulatorSetupSheet(lang: appLanguage, pad: sheetPad, installMethod: installMethodRaw, onFolder: { emulator, url in
+                linkEmulatorFolder(emulator, url: url)
+            }, onFinish: {
+                emulatorSetupDone = true
+                emulatorRevision += 1
+            })
         }
     }
 
@@ -466,24 +473,37 @@ struct HomeView: View {
         switch target {
         case .game(let id):
             updateMeta(id) { meta in meta.bundleID = app.bundleID }
-        case .armsx2:
-            armsx2Bundle = app.bundleID
+        case .emulator(let emulator):
+            EmulatorStore.setBundleID(app.bundleID, emulator)
+            emulatorRevision += 1
         }
         showToast(tr("Bundle ID: %@", app.bundleID))
     }
 
     private func textEntrySheet() -> some View {
         let target: TextEntryTarget = textTarget
-        let folder: Bool = target == .armsx2Folder
-        let initial: String = folder ? armsx2FolderName : armsx2BundleID
-        let title: String = folder ? "Carpeta en LiveContainer" : "Bundle ID de ARMSX2"
-        let placeholder: String = folder ? ARMSX2.defaultLCName : ARMSX2.defaultBundleID
+        let title: String
+        let placeholder: String
+        let initial: String
+        let emulator: Emulator
+        switch target {
+        case .lcFolder(let value):
+            emulator = value
+            title = "Carpeta en LiveContainer"
+            placeholder = value.defaultLCFolder
+            initial = EmulatorStore.lcFolder(value)
+        case .bundle(let value):
+            emulator = value
+            title = "Bundle ID del emulador"
+            placeholder = value.defaultBundleID
+            initial = EmulatorStore.bundleID(value)
+        }
         return RenameGameSheet(lang: appLanguage, pad: sheetPad, initialName: initial, title: title, placeholder: placeholder, bundleMode: true) { value in
-            if folder {
-                armsx2Folder = value
-            } else {
-                armsx2Bundle = value
+            switch target {
+            case .lcFolder: EmulatorStore.setLCFolder(value, emulator)
+            case .bundle: EmulatorStore.setBundleID(value, emulator)
             }
+            emulatorRevision += 1
         }
     }
 
@@ -500,9 +520,10 @@ struct HomeView: View {
         showToast(tr("Método de instalación: %@", installMethodTitle(method)))
         if usesBuiltInJIT { jitStatus.autoPrepare() }
         // Con SideStore/AltStore, la primera vez se ofrece importar el archivo de emparejamiento.
-        guard firstTime, method == .sideStore, !PairingFile.exists else { return }
+        guard firstTime else { return }
+        let next: HomeSheet = method == .sideStore && !PairingFile.exists ? .pairing : .emulatorSetup
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.7) {
-            if sheet == nil { sheet = .pairing }
+            if sheet == nil { sheet = next }
         }
     }
 
@@ -743,14 +764,24 @@ struct HomeView: View {
             if !PairingFile.exists { _ = PairingFile.importFromDocuments() }
             jitStatus.autoPrepare()
         }
-        if armsx2Enabled && armsx2AutoCheck && ARMSX2Updater.shouldCheck {
-            checkARMSX2Update(manual: false)
+        for emulator in Emulator.allCases where EmulatorStore.isEnabled(emulator) {
+            if EmulatorStore.folderBookmark(emulator) != nil { scanEmulator(emulator, silent: true) }
+            if EmulatorStore.autoCheck(emulator) && EmulatorStore.shouldCheck(emulator) {
+                checkEmulatorUpdate(emulator, manual: false)
+            }
         }
     }
 
     /// La primera vez se pregunta cómo se instaló la app (decide cómo se activa el JIT).
     private func askInstallMethodIfNeeded() {
-        guard installMethodRaw.isEmpty else { return }
+        if !installMethodRaw.isEmpty {
+            // Después de elegir la instalación, una vez: qué emuladores tienes y sus carpetas.
+            guard !emulatorSetupDone else { return }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) {
+                if !emulatorSetupDone && sheet == nil { sheet = .emulatorSetup }
+            }
+            return
+        }
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) {
             if installMethodRaw.isEmpty && sheet == nil { sheet = .installMethod }
         }
@@ -980,12 +1011,14 @@ struct HomeView: View {
             return jitEnablerMenu(cancel)
         case .jitScript:
             return jitScriptMenu(cancel)
-        case .armsx2Location:
-            return armsx2LocationMenu(cancel)
-        case .armsx2Bundle:
-            return armsx2BundleMenu(cancel)
-        case .armsx2Update:
-            return armsx2UpdateMenu(cancel)
+        case .emulatorLocation:
+            return emulatorLocationMenu(cancel)
+        case .emulatorBundle:
+            return emulatorBundleMenu(cancel)
+        case .emulatorUpdate:
+            return emulatorUpdateMenu(cancel)
+        case .emulatorFolder:
+            return emulatorFolderMenu(cancel)
         }
     }
 
@@ -1029,63 +1062,94 @@ struct HomeView: View {
         }
     }
 
-    private func armsx2LocationMenu(_ cancel: PadMenuItem) -> PadMenuContent {
-        let current: ARMSX2.Location = armsx2Location
+    private func emulatorLocationMenu(_ cancel: PadMenuItem) -> PadMenuContent {
+        let emulator: Emulator = activeEmulator
+        let current: Emulator.Location = EmulatorStore.location(emulator, installMethod: installMethodRaw)
         var items: [PadMenuItem] = []
         items.append(PadMenuItem(title: checked("LiveContainer", current == .liveContainer)) {
-            armsx2LocationRaw = ARMSX2.Location.liveContainer.rawValue
+            EmulatorStore.setLocation(.liveContainer, emulator)
+            emulatorRevision += 1
             closePadMenu()
         })
         items.append(PadMenuItem(title: checked(tr("SideStore / AltStore"), current == .native)) {
-            armsx2LocationRaw = ARMSX2.Location.native.rawValue
+            EmulatorStore.setLocation(.native, emulator)
+            emulatorRevision += 1
             closePadMenu()
         })
         items.append(cancel)
-        return (tr("ARMSX2 instalado en"), nil, items)
+        return (tr("%@ instalado en", emulator.name), nil, items)
     }
 
-    private func armsx2BundleMenu(_ cancel: PadMenuItem) -> PadMenuContent {
+    private func emulatorBundleMenu(_ cancel: PadMenuItem) -> PadMenuContent {
+        let emulator: Emulator = activeEmulator
         var items: [PadMenuItem] = []
         if usesBuiltInJIT {
             items.append(PadMenuItem(title: tr("Elegir app instalada")) {
                 closePadMenu()
-                appPickerTarget = .armsx2
+                appPickerTarget = .emulator(emulator)
                 sheet = .installedApps
             })
         }
         items.append(PadMenuItem(title: tr("Escribir Bundle ID")) {
             closePadMenu()
-            textTarget = .armsx2Bundle
+            textTarget = .bundle(emulator)
             sheet = .textEntry
         })
         items.append(cancel)
-        return (tr("Bundle ID de ARMSX2"), armsx2BundleID, items)
+        return (tr("Bundle ID de %@", emulator.name), EmulatorStore.bundleID(emulator), items)
     }
 
-    private func armsx2UpdateMenu(_ cancel: PadMenuItem) -> PadMenuContent {
-        let installed: String = armsx2Installed.isEmpty ? tr("sin marcar") : ARMSX2Updater.shortName(armsx2Installed)
-        let latest: String = armsx2LatestTag.isEmpty ? tr("sin comprobar") : ARMSX2Updater.shortName(armsx2LatestTag)
+    private func emulatorFolderMenu(_ cancel: PadMenuItem) -> PadMenuContent {
+        let emulator: Emulator = activeEmulator
+        let name: String = EmulatorStore.folderName(emulator)
+        var items: [PadMenuItem] = []
+        items.append(PadMenuItem(title: name.isEmpty ? tr("Elegir carpeta") : tr("Cambiar carpeta")) {
+            closePadMenu()
+            folderPickEmulator = emulator
+            showFolderImporter = true
+        })
+        if !name.isEmpty {
+            items.append(PadMenuItem(title: tr("Volver a escanear")) {
+                closePadMenu()
+                scanEmulator(emulator, silent: false)
+            })
+            items.append(PadMenuItem(title: tr("Desvincular carpeta"), kind: .destructive) {
+                closePadMenu()
+                unlinkEmulatorFolder(emulator)
+            })
+        }
+        items.append(cancel)
+        return (tr("Juegos de %@", emulator.name), name.isEmpty ? tr("La misma carpeta que uses dentro del emulador.") : name, items)
+    }
+
+    private func emulatorUpdateMenu(_ cancel: PadMenuItem) -> PadMenuContent {
+        let emulator: Emulator = activeEmulator
+        let installedTag: String = EmulatorStore.installedVersion(emulator)
+        let latestTag: String = EmulatorStore.latestTag(emulator)
+        let installed: String = installedTag.isEmpty ? tr("sin marcar") : EmulatorUpdater.shortName(installedTag)
+        let latest: String = latestTag.isEmpty ? tr("sin comprobar") : EmulatorUpdater.shortName(latestTag)
         let message: String = tr("Instalada: %@", installed) + "\n" + tr("Última: %@", latest)
         var items: [PadMenuItem] = []
-        if !armsx2LatestURL.isEmpty {
-            let title: String = armsx2LatestTag == armsx2Installed ? tr("Reinstalar") : tr("Instalar %@", latest)
+        if !EmulatorStore.latestURL(emulator).isEmpty {
+            let title: String = latestTag == installedTag ? tr("Reinstalar") : tr("Instalar %@", latest)
             items.append(PadMenuItem(title: title) {
                 closePadMenu()
-                installARMSX2()
+                installEmulator(emulator)
             })
         }
         items.append(PadMenuItem(title: tr("Buscar actualizaciones")) {
             closePadMenu()
-            checkARMSX2Update(manual: true)
+            checkEmulatorUpdate(emulator, manual: true)
         })
-        if !armsx2LatestTag.isEmpty && armsx2LatestTag != armsx2Installed {
+        if !latestTag.isEmpty && latestTag != installedTag {
             items.append(PadMenuItem(title: tr("Ya la tengo: marcar como instalada")) {
-                armsx2Installed = armsx2LatestTag
+                EmulatorStore.setInstalledVersion(latestTag, emulator)
+                emulatorRevision += 1
                 closePadMenu()
             })
         }
         items.append(cancel)
-        return ("ARMSX2", message, items)
+        return (emulator.name, message, items)
     }
 
     private typealias PadMenuContent = (title: String, message: String?, items: [PadMenuItem])
@@ -1730,8 +1794,8 @@ struct HomeView: View {
         feedback()
         playCounts[game.id, default: 0] += 1
         UserDefaults.standard.set(playCounts, forKey: "playCounts")
-        if isARMSX2Game(game) {
-            openInARMSX2(game)
+        if let emulator = emulatorFor(game) {
+            openInEmulator(game, emulator)
             return
         }
         if wantsJIT(game) {
@@ -1839,6 +1903,33 @@ struct HomeView: View {
         })
     }
 
+    /// Indicador de JIT (horizontal): verde si los juegos pueden abrirse con JIT ahora mismo.
+    private var jitIndicatorOn: Bool {
+        if jitEnabled { return true }
+        if usesBuiltInJIT { return jitStatus.isReady }
+        if DebugSupport.isInsideLiveContainer { return LiveContainerJIT.canRequestJIT }
+        return JITLauncher.stikDebugInstalled
+    }
+
+    private func explainJITIndicator() {
+        let text: String
+        if usesBuiltInJIT {
+            switch jitStatus.state {
+            case .ready: text = tr("JIT integrado listo")
+            case .preparing: text = tr("Preparando el JIT…")
+            case .unreachable: text = tr("JIT no disponible: activa la VPN LocalDevVPN")
+            case .failed(let reason): text = tr("JIT no disponible: %@", reason)
+            case .idle: text = tr("JIT no disponible: falta el archivo de emparejamiento")
+            }
+            if !jitStatus.isReady { jitStatus.autoPrepare(force: true) }
+        } else if jitIndicatorOn {
+            text = tr("JIT disponible con StikDebug")
+        } else {
+            text = tr("JIT no disponible: instala StikDebug o elígelo como activador en LiveContainer")
+        }
+        showToast(text, seconds: 3.5)
+    }
+
     private func showPendingReturnMessage() {
         guard let text = pendingReturnMessage else { return }
         pendingReturnMessage = nil
@@ -1847,122 +1938,192 @@ struct HomeView: View {
         }
     }
 
-    // MARK: - ARMSX2 (PS2)
+    // MARK: - Emuladores (ARMSX2, MeloNX…)
 
-    private var armsx2Location: ARMSX2.Location {
-        if let location = ARMSX2.Location(rawValue: armsx2LocationRaw) { return location }
-        return installMethodRaw == InstallMethod.sideStore.rawValue ? .native : .liveContainer
+    /// Juegos de la plataforma de un emulador activado (escaneados, sin acceso directo propio).
+    private func emulatorFor(_ game: Game) -> Emulator? {
+        guard game.launchURL == nil, game.isCustom, let emulator = Emulator.handling(platform: game.platform),
+              EmulatorStore.isEnabled(emulator) else { return nil }
+        return emulator
     }
 
-    private var armsx2FolderName: String {
-        armsx2Folder.isEmpty ? ARMSX2.defaultLCName : armsx2Folder
-    }
-
-    private var armsx2BundleID: String {
-        armsx2Bundle.isEmpty ? ARMSX2.defaultBundleID : armsx2Bundle
-    }
-
-    /// Juegos de PS2 escaneados (sin acceso directo propio): se abren en ARMSX2.
-    private func isARMSX2Game(_ game: Game) -> Bool {
-        armsx2Enabled && game.platform == ARMSX2.platform && game.launchURL == nil && game.isCustom
-    }
-
-    private func openInARMSX2(_ game: Game) {
+    private func openInEmulator(_ game: Game, _ emulator: Emulator) {
         guard let file = libraryGames.first(where: { $0.id == game.id })?.fileName else {
-            showToast(tr("Vuelve a escanear la carpeta para abrir este juego en ARMSX2"), seconds: 4)
+            showToast(tr("Vuelve a escanear la carpeta para abrir este juego en %@", emulator.name), seconds: 4)
             return
         }
-        switch armsx2Location {
+        let link: String = emulator.gameLink(fileName: file, title: game.name)
+        switch EmulatorStore.location(emulator, installMethod: installMethodRaw) {
         case .liveContainer:
+            let folder: String = EmulatorStore.lcFolder(emulator)
             if DebugSupport.isInsideLiveContainer {
-                let request: LiveContainerJIT.Request = LiveContainerJIT.request(folder: armsx2FolderName, openURL: ARMSX2.gameURL(fileName: file))
-                if requestLiveContainerJIT(request, name: "ARMSX2") { return }
+                let request: LiveContainerJIT.Request = LiveContainerJIT.request(folder: folder, openURL: link)
+                if requestLiveContainerJIT(request, name: emulator.name) { return }
             }
-            showToast(tr("Abriendo en ARMSX2 con JIT…"))
-            openExternal(ARMSX2.liveContainerURL(appFolder: armsx2FolderName, fileName: file), failure: tr("No se pudo abrir LiveContainer. ¿Está instalado?"))
+            showToast(tr("Abriendo en %@ con JIT…", emulator.name))
+            openExternal(EmulatorLinks.liveContainerURL(appFolder: folder, gameLink: link), failure: tr("No se pudo abrir LiveContainer. ¿Está instalado?"))
         case .native:
-            openARMSX2Natively(file: file, name: game.name)
+            openEmulatorNatively(emulator, link: link, gameName: game.name)
         }
     }
 
-    private func openARMSX2Natively(file: String, name: String) {
-        let link: URL? = URL(string: ARMSX2.gameURL(fileName: file))
-        let failure: String = tr("No se pudo abrir ARMSX2. ¿Está instalado?")
-        // Con StikDebug, ARMSX2 pide el JIT por su cuenta cuando no lo tiene.
+    private func openEmulatorNatively(_ emulator: Emulator, link: String, gameName: String) {
+        let url: URL? = URL(string: link)
+        let failure: String = tr("No se pudo abrir %@. ¿Está instalado?", emulator.name)
+        // Con la app StikDebug, el emulador pide el JIT por su cuenta cuando no lo tiene.
         guard usesBuiltInJIT else {
-            openExternal(link, failure: failure)
+            openExternal(url, failure: failure)
             return
         }
-        let bundle: String = armsx2BundleID
+        if let problem = BuiltInJIT.preflightProblem(lang: appLanguage) {
+            showToast(problem, seconds: 4.5)
+            return
+        }
+        let bundle: String = EmulatorStore.bundleID(emulator)
         BuiltInJIT.isStillRunningWithJIT(bundleID: bundle) { running in
             if running {
-                openExternal(link, failure: failure)
+                // Sigue abierto con JIT: el juego arranca al momento.
+                openExternal(url, failure: failure)
+            } else if emulator.waitsForJIT {
+                // Se abre el juego y, mientras el emulador espera, OmniStation le da el JIT.
+                attachBuiltInJIT(emulator, bundleID: bundle)
+                openExternal(url, failure: failure)
             } else {
-                let after: String = tr("ARMSX2 ya tiene JIT. Vuelve aquí y pulsa %@ otra vez para arrancarlo.", name)
-                startBuiltInJIT(bundleID: bundle, script: .automatic, name: "ARMSX2", afterMessage: after)
+                let after: String = tr("%@ ya tiene JIT. Vuelve aquí y pulsa %@ otra vez para arrancarlo.", emulator.name, gameName)
+                startBuiltInJIT(bundleID: bundle, script: .automatic, name: emulator.name, afterMessage: after)
             }
         }
     }
 
-    private func checkARMSX2Update(manual: Bool) {
-        guard !armsx2Checking else { return }
-        armsx2Checking = true
+    /// Da el JIT a un emulador que ya se está abriendo (MeloNX espera él solo a tenerlo).
+    private func attachBuiltInJIT(_ emulator: Emulator, bundleID: String) {
+        guard !jitLaunching else { return }
+        jitLaunching = true
+        BuiltInJIT.attachWhenRunning(bundleID: bundleID, appName: emulator.appName, script: .automatic) { result in
+            jitLaunching = false
+            switch result {
+            case .success:
+                jitStatus.markReady()
+            case .failure(let error):
+                let text: String = tr("No se pudo activar el JIT: %@", BuiltInJIT.message(for: error))
+                pendingReturnMessage = text
+                showToast(text, seconds: 7)
+            }
+        }
+    }
+
+    // MARK: Carpeta de juegos de cada emulador
+
+    private func linkEmulatorFolder(_ emulator: Emulator, url: URL) {
+        let accessing: Bool = url.startAccessingSecurityScopedResource()
+        defer { if accessing { url.stopAccessingSecurityScopedResource() } }
+        do {
+            let bookmark: Data = try LibraryFolder.bookmark(for: url)
+            EmulatorStore.setFolder(bookmark: bookmark, name: url.lastPathComponent, emulator)
+            emulatorRevision += 1
+            showToast(tr("Carpeta de %@: %@", emulator.name, url.lastPathComponent))
+            scanEmulator(emulator, silent: false)
+        } catch {
+            showToast(tr("No se pudo vincular la carpeta"))
+        }
+    }
+
+    private func unlinkEmulatorFolder(_ emulator: Emulator) {
+        EmulatorStore.setFolder(bookmark: nil, name: "", emulator)
+        emulatorRevision += 1
+        setLibrary(libraryGames.filter { $0.source != "emu:" + emulator.rawValue })
+    }
+
+    private func scanEmulator(_ emulator: Emulator, silent: Bool) {
+        guard let bookmark = EmulatorStore.folderBookmark(emulator), let url = LibraryFolder.resolve(bookmark) else {
+            if !silent { showToast(tr("Primero vincula una carpeta de juegos")) }
+            return
+        }
         Task {
-            var found: ARMSX2Release? = nil
+            let found: [LibraryGame] = await Task.detached(priority: .utility) { () -> [LibraryGame] in
+                let accessing = url.startAccessingSecurityScopedResource()
+                defer { if accessing { url.stopAccessingSecurityScopedResource() } }
+                return LibraryScanner.scan(folder: url, emulator: emulator)
+            }.value
+            let source: String = "emu:" + emulator.rawValue
+            let foundIDs: Set<String> = Set(found.map(\.id))
+            // Sustituye los de este emulador; si un juego ya estaba por la carpeta general, manda este.
+            let kept: [LibraryGame] = libraryGames.filter { $0.source != source && !foundIDs.contains($0.id) }
+            setLibrary(kept + found)
+            if !silent {
+                showToast(tr("%@: %ld juegos", emulator.name, found.count), seconds: 3)
+            }
+        }
+    }
+
+    // MARK: Versiones nuevas
+
+    private func checkEmulatorUpdate(_ emulator: Emulator, manual: Bool) {
+        guard !checkingEmulators.contains(emulator.rawValue) else { return }
+        checkingEmulators.insert(emulator.rawValue)
+        Task {
+            var found: EmulatorRelease? = nil
             var failed: Bool = false
             do {
-                found = try await ARMSX2Updater.latest()
+                found = try await EmulatorUpdater.latest(emulator)
             } catch {
                 failed = true
             }
-            armsx2Checking = false
+            checkingEmulators.remove(emulator.rawValue)
             if failed {
-                if manual { showToast(tr("No se pudo consultar GitHub. ¿Hay conexión?")) }
+                if manual { showToast(tr("No se pudo consultar las versiones de %@. ¿Hay conexión?", emulator.name)) }
                 return
             }
             guard let release = found else {
                 if manual { showToast(tr("No hay versiones de iOS publicadas")) }
                 return
             }
-            ARMSX2Updater.remember(release)
-            armsx2LatestTag = release.tag
-            armsx2LatestURL = release.ipaURL
-            handleARMSX2Release(release, manual: manual)
+            EmulatorStore.remember(release, emulator)
+            emulatorRevision += 1
+            handleEmulatorRelease(release, emulator, manual: manual)
         }
     }
 
-    private func handleARMSX2Release(_ release: ARMSX2Release, manual: Bool) {
-        let short: String = ARMSX2Updater.shortName(release.tag)
-        if armsx2Installed.isEmpty {
-            if manual { dialog = .armsx2Update }
+    private func handleEmulatorRelease(_ release: EmulatorRelease, _ emulator: Emulator, manual: Bool) {
+        let short: String = EmulatorUpdater.shortName(release.tag)
+        let installed: String = EmulatorStore.installedVersion(emulator)
+        if installed.isEmpty {
+            if manual {
+                activeEmulator = emulator
+                dialog = .emulatorUpdate
+            }
             return
         }
-        guard release.tag != armsx2Installed else {
-            if manual { showToast(tr("ARMSX2 está al día (%@)", short)) }
+        guard release.tag != installed else {
+            if manual { showToast(tr("%@ está al día (%@)", emulator.name, short)) }
             return
         }
-        if armsx2AutoInstall && !manual {
-            installARMSX2()
+        if EmulatorStore.autoInstall(emulator) && !manual {
+            installEmulator(emulator)
             return
         }
         if sheet == nil && dialog == nil {
-            dialog = .armsx2Update
+            activeEmulator = emulator
+            dialog = .emulatorUpdate
         } else {
-            showToast(tr("ARMSX2 %@ disponible", short), seconds: 4)
+            showToast(tr("%@ %@ disponible", emulator.name, short), seconds: 4)
         }
     }
 
-    /// Manda la IPA de ARMSX2 a LiveContainer o a SideStore/AltStore para instalarla.
-    private func installARMSX2() {
-        guard !armsx2LatestURL.isEmpty else {
-            checkARMSX2Update(manual: true)
+    /// Manda la IPA a LiveContainer o a SideStore/AltStore para instalarla.
+    private func installEmulator(_ emulator: Emulator) {
+        let ipa: String = EmulatorStore.latestURL(emulator)
+        guard !ipa.isEmpty else {
+            checkEmulatorUpdate(emulator, manual: true)
             return
         }
-        let urls: [URL] = ARMSX2.installURLs(ipa: armsx2LatestURL, location: armsx2Location)
-        let tag: String = armsx2LatestTag
+        let location: Emulator.Location = EmulatorStore.location(emulator, installMethod: installMethodRaw)
+        let urls: [URL] = EmulatorLinks.installURLs(ipa: ipa, location: location)
+        let tag: String = EmulatorStore.latestTag(emulator)
         openFirst(urls) { success in
             if success {
-                armsx2Installed = tag
+                EmulatorStore.setInstalledVersion(tag, emulator)
+                emulatorRevision += 1
             } else {
                 showToast(tr("No se pudo abrir el instalador. ¿Está instalado LiveContainer o SideStore?"), seconds: 4)
             }
@@ -2035,7 +2196,13 @@ struct HomeView: View {
     }
 
     private func handleFolderPick(_ result: Result<[URL], Error>) {
+        let emulatorTarget: Emulator? = folderPickEmulator
+        folderPickEmulator = nil
         guard case .success(let urls) = result, let url = urls.first else { return }
+        if let emulatorTarget {
+            linkEmulatorFolder(emulatorTarget, url: url)
+            return
+        }
         let accessing = url.startAccessingSecurityScopedResource()
         defer { if accessing { url.stopAccessingSecurityScopedResource() } }
         do {
@@ -2063,8 +2230,9 @@ struct HomeView: View {
                 defer { if accessing { url.stopAccessingSecurityScopedResource() } }
                 return LibraryScanner.scan(folder: url)
             }.value
-            // Sustituye los escaneados y conserva los accesos directos.
-            setLibrary(libraryGames.filter { $0.source != "scan" } + found)
+            // Sustituye los escaneados y conserva los accesos directos y los de cada emulador.
+            let emulatorIDs: Set<String> = Set(libraryGames.filter { $0.source.hasPrefix("emu:") }.map(\.id))
+            setLibrary(libraryGames.filter { $0.source != "scan" } + found.filter { !emulatorIDs.contains($0.id) })
             isScanning = false
             showToast(found.isEmpty ? tr("No se encontraron juegos en la carpeta") : tr("Escaneo completo: %ld juegos", found.count), seconds: 3.2)
         }
@@ -2079,6 +2247,11 @@ struct HomeView: View {
             Spacer(minLength: 6)
             HeaderPlanet(progress: scrollProgress, size: compact ? 30 : 34)
             Spacer(minLength: 6)
+            if isLandscapeNow {
+                JITIndicatorDot(active: jitIndicatorOn)
+                    .onTapGesture { explainJITIndicator() }
+                    .padding(.trailing, 8)
+            }
             tabButtons(compact: compact)
                 .layoutPriority(2)
         }
@@ -2773,7 +2946,7 @@ struct HomeView: View {
     // así no pueden desincronizarse al añadir o quitar ajustes.
 
     private var settingGroups: [SettingGroup] {
-        [generalSettings, appearanceSettings, gameSettings, armsx2Settings, debugSettings, liveContainerSettings]
+        [generalSettings, appearanceSettings, gameSettings] + Emulator.allCases.map { emulatorSettings($0) } + [debugSettings, liveContainerSettings]
     }
 
     private var allSettingItems: [SettingItem] {
@@ -2868,6 +3041,10 @@ struct HomeView: View {
             shortcutMode = 0
             sheet = .addShortcut
         }))
+        let emulatorCount: Int = Emulator.allCases.filter { EmulatorStore.isEnabled($0) }.count
+        items.append(SettingItem(id: "emulators", title: tr("Emuladores"), subtitle: tr("Qué tienes instalado y sus carpetas"), symbol: "cpu.fill", tint: SettingTint.blue, control: .badge("\(emulatorCount)", Color.cyan), action: {
+            sheet = .emulatorSetup
+        }))
         items.append(SettingItem(id: "achievements", title: tr("Logros"), subtitle: raSubtitle, symbol: "trophy.fill", tint: Color.yellow, control: raControl, action: {
             sheet = .retroAccount
         }))
@@ -2887,44 +3064,78 @@ struct HomeView: View {
         return SettingControl.plain
     }
 
-    private var armsx2Settings: SettingGroup {
-        let location: ARMSX2.Location = armsx2Location
-        let hasUpdate: Bool = !armsx2LatestTag.isEmpty && armsx2LatestTag != armsx2Installed && !armsx2Installed.isEmpty
+    private func emulatorSettings(_ emulator: Emulator) -> SettingGroup {
+        _ = emulatorRevision
+        let key: String = emulator.rawValue
+        let location: Emulator.Location = EmulatorStore.location(emulator, installMethod: installMethodRaw)
+        let enabled = Binding<Bool>(get: { EmulatorStore.isEnabled(emulator) }, set: { value in
+            EmulatorStore.setEnabled(value, emulator)
+            emulatorRevision += 1
+        })
+        let autoCheck = Binding<Bool>(get: { EmulatorStore.autoCheck(emulator) }, set: { value in
+            EmulatorStore.setAutoCheck(value, emulator)
+            emulatorRevision += 1
+        })
+        let autoInstall = Binding<Bool>(get: { EmulatorStore.autoInstall(emulator) }, set: { value in
+            EmulatorStore.setAutoInstall(value, emulator)
+            emulatorRevision += 1
+        })
         var items: [SettingItem] = []
-        items.append(toggleSetting("armsx2On", tr("PS2 con ARMSX2"), tr("Abre los juegos de PS2 escaneados"), "playstation.logo", SettingTint.blue, $armsx2Enabled))
+        items.append(toggleSetting(key + "On", tr("%@ con %@", emulator.platform, emulator.name), tr("Abre sus juegos directamente"), emulator.symbol, SettingTint.blue, enabled))
+        items.append(emulatorFolderItem(emulator))
         let whereText: String = location == .liveContainer ? "LiveContainer" : tr("SideStore / AltStore")
-        items.append(SettingItem(id: "armsx2Where", title: tr("ARMSX2 instalado en"), subtitle: whereText, symbol: "shippingbox.fill", tint: SettingTint.blue, control: .symbol("chevron.right"), action: {
-            dialog = .armsx2Location
+        items.append(SettingItem(id: key + "Where", title: tr("Instalado en"), subtitle: whereText, symbol: "shippingbox.fill", tint: SettingTint.blue, control: .symbol("chevron.right"), action: {
+            activeEmulator = emulator
+            dialog = .emulatorLocation
         }))
         if location == .liveContainer {
-            items.append(SettingItem(id: "armsx2Folder", title: tr("Carpeta en LiveContainer"), subtitle: armsx2FolderName, symbol: "folder.fill", tint: SettingTint.blue, control: .symbol("pencil"), action: {
-                textTarget = .armsx2Folder
+            items.append(SettingItem(id: key + "LC", title: tr("Carpeta en LiveContainer"), subtitle: EmulatorStore.lcFolder(emulator), symbol: "folder.badge.gearshape", tint: SettingTint.blue, control: .symbol("pencil"), action: {
+                textTarget = .lcFolder(emulator)
                 sheet = .textEntry
             }))
         } else {
-            items.append(SettingItem(id: "armsx2Bundle", title: tr("Bundle ID de ARMSX2"), subtitle: armsx2BundleID, symbol: "number", tint: SettingTint.blue, control: .symbol("pencil"), action: {
-                dialog = .armsx2Bundle
+            items.append(SettingItem(id: key + "Bundle", title: tr("Bundle ID"), subtitle: EmulatorStore.bundleID(emulator), symbol: "number", tint: SettingTint.blue, control: .symbol("pencil"), action: {
+                activeEmulator = emulator
+                dialog = .emulatorBundle
             }))
         }
-        items.append(SettingItem(id: "armsx2Version", title: tr("Versión de ARMSX2"), subtitle: armsx2VersionSubtitle, symbol: "arrow.triangle.2.circlepath", tint: SettingTint.blue, control: armsx2VersionControl(hasUpdate), action: {
-            dialog = .armsx2Update
+        items.append(SettingItem(id: key + "Version", title: tr("Versión"), subtitle: emulatorVersionSubtitle(emulator), symbol: "arrow.triangle.2.circlepath", tint: SettingTint.blue, control: emulatorVersionControl(emulator), action: {
+            activeEmulator = emulator
+            dialog = .emulatorUpdate
         }))
-        items.append(toggleSetting("armsx2Check", tr("Buscar versiones nuevas"), tr("Al abrir la app"), "bell.badge.fill", SettingTint.blue, $armsx2AutoCheck))
-        items.append(toggleSetting("armsx2AutoInstall", tr("Instalar sin preguntar"), tr("Abre el instalador al detectarla"), "square.and.arrow.down.fill", SettingTint.blue, $armsx2AutoInstall))
-        return SettingGroup(id: "armsx2", title: "ARMSX2 (PS2)", isSubsection: true, items: items)
+        items.append(toggleSetting(key + "Check", tr("Buscar versiones nuevas"), tr("Al abrir la app"), "bell.badge.fill", SettingTint.blue, autoCheck))
+        items.append(toggleSetting(key + "AutoInstall", tr("Instalar sin preguntar"), tr("Abre el instalador al detectarla"), "square.and.arrow.down.fill", SettingTint.blue, autoInstall))
+        return SettingGroup(id: key, title: emulator.name + " (" + emulator.platform + ")", isSubsection: true, items: items)
     }
 
-    private var armsx2VersionSubtitle: String {
-        if armsx2LatestTag.isEmpty { return tr("Sin comprobar") }
-        let latest: String = ARMSX2Updater.shortName(armsx2LatestTag)
-        if armsx2Installed.isEmpty { return tr("Última: %@", latest) }
-        if armsx2Installed == armsx2LatestTag { return tr("Al día: %@", latest) }
+    private func emulatorFolderItem(_ emulator: Emulator) -> SettingItem {
+        let name: String = EmulatorStore.folderName(emulator)
+        let count: Int = libraryGames.filter { $0.source == "emu:" + emulator.rawValue }.count
+        let control: SettingControl = name.isEmpty ? SettingControl.symbol("plus") : SettingControl.badge("\(count)", Color.green)
+        let subtitle: String = name.isEmpty ? tr("La misma que uses en el emulador") : name
+        return SettingItem(id: emulator.rawValue + "Games", title: tr("Carpeta de juegos"), subtitle: subtitle, symbol: "externaldrive.fill", tint: SettingTint.blue, control: control, action: {
+            activeEmulator = emulator
+            dialog = .emulatorFolder
+        })
+    }
+
+    private func emulatorVersionSubtitle(_ emulator: Emulator) -> String {
+        let latestTag: String = EmulatorStore.latestTag(emulator)
+        let installed: String = EmulatorStore.installedVersion(emulator)
+        if latestTag.isEmpty { return tr("Sin comprobar") }
+        let latest: String = EmulatorUpdater.shortName(latestTag)
+        if installed.isEmpty { return tr("Última: %@", latest) }
+        if installed == latestTag { return tr("Al día: %@", latest) }
         return tr("Nueva: %@", latest)
     }
 
-    private func armsx2VersionControl(_ hasUpdate: Bool) -> SettingControl {
-        if armsx2Checking { return SettingControl.progress }
-        if hasUpdate { return SettingControl.badge(tr("NUEVA"), Color.green) }
+    private func emulatorVersionControl(_ emulator: Emulator) -> SettingControl {
+        if checkingEmulators.contains(emulator.rawValue) { return SettingControl.progress }
+        let latestTag: String = EmulatorStore.latestTag(emulator)
+        let installed: String = EmulatorStore.installedVersion(emulator)
+        if !latestTag.isEmpty && !installed.isEmpty && latestTag != installed {
+            return SettingControl.badge(tr("NUEVA"), Color.green)
+        }
         return SettingControl.symbol("chevron.right")
     }
 
@@ -3249,7 +3460,7 @@ struct HomeView: View {
                 .padding(5)
                 .padRing(gamepadConnected && controllerSelectedArea == "dockNav", cornerRadius: 18)
                 .fixedSize()
-            DockStatus(use24h: clock24h)
+            DockStatus(use24h: clock24h, jitActive: jitIndicatorOn, onJITTap: { explainJITIndicator() })
                 .frame(maxWidth: .infinity, alignment: .trailing)
         }
         .padding(.horizontal, dockFullWidth ? 34 : 22)

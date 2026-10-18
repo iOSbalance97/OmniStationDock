@@ -305,6 +305,32 @@ enum LibraryScanner {
         return nil
     }
 
+    /// Carpeta propia de un emulador: todos sus juegos van a su plataforma.
+    static func scan(folder: URL, emulator: Emulator, limit: Int = 40000) -> [LibraryGame] {
+        let fileManager = FileManager.default
+        guard let enumerator = fileManager.enumerator(
+            at: folder,
+            includingPropertiesForKeys: [.isRegularFileKey],
+            options: [.skipsHiddenFiles, .skipsPackageDescendants]
+        ) else { return [] }
+
+        let extensions: Set<String> = Set(emulator.extensions)
+        var found: [String: LibraryGame] = [:]
+        var visited: Int = 0
+        for case let url as URL in enumerator {
+            visited += 1
+            if visited > limit { break }
+            guard extensions.contains(url.pathExtension.lowercased()) else { continue }
+            let name: String = url.deletingPathExtension().lastPathComponent
+            let id = "\(emulator.platform)/\(name)"
+            if found[id] == nil {
+                found[id] = LibraryGame(id: id, name: name, platform: emulator.platform, launchURL: nil,
+                                        source: "emu:" + emulator.rawValue, fileName: url.lastPathComponent)
+            }
+        }
+        return found.values.sorted { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
+    }
+
     static func scan(folder: URL, limit: Int = 40000) -> [LibraryGame] {
         let fileManager = FileManager.default
         guard let enumerator = fileManager.enumerator(
