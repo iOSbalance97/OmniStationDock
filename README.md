@@ -1,4 +1,4 @@
-# OmniStation Dock — versión 0.2.2
+# OmniStation Dock — versión 0.3.0
 
 Lanzador de juegos y emuladores para iPhone con interfaz espacial/Liquid Glass, control completo con mando y **Modo Dock** (carrusel en horizontal, también al conectar HDMI).
 
@@ -30,14 +30,22 @@ También puedes elegir **App StikDebug** en *Activador de JIT* si prefieres segu
 
 Requisitos del JIT integrado: iOS 17.4 o posterior, apps instaladas con SideStore/AltStore (con `get-task-allow`), no funciona dentro de LiveContainer.
 
-## ARMSX2 (PS2)
-Los juegos de PS2 escaneados de tu carpeta se abren en **ARMSX2** con su enlace oficial `armsx2://launch?game=<archivo>`.
-- **En LiveContainer**: un toque abre ARMSX2 con JIT y arranca el juego. Por defecto busca la carpeta `com.armsx2.ios.app` (cámbiala en Ajustes → ARMSX2 si la tuya es otra).
-- **Instalado con SideStore/AltStore + JIT integrado**: la primera vez OmniStation abre ARMSX2 con JIT; vuelve y pulsa el juego otra vez y arranca al momento (mientras ARMSX2 siga abierto conserva el JIT).
-- **Con la app StikDebug**: OmniStation abre el juego y ARMSX2 pide el JIT a StikDebug por su cuenta.
-- ARMSX2 busca el juego por el **nombre del archivo** en su propia biblioteca: configura en ARMSX2 la misma carpeta de juegos. Si añadiste juegos con una versión anterior, vuelve a escanear la carpeta.
+## Emuladores (ARMSX2 y MeloNX)
+La primera vez (y en Ajustes → Juegos → Emuladores) la app pregunta qué emuladores tienes y la **carpeta de juegos de cada uno**: elige la misma que uses dentro del emulador. Sus juegos aparecen en OmniStation y se abren directamente en él con JIT. La carpeta externa general sigue existiendo para el resto.
 
-**Versiones nuevas**: al abrir la app (como mucho cada 6 h) mira las versiones de ARMSX2 en GitHub (solo las *nightly* traen IPA de iOS). Si hay una nueva, te ofrece instalarla: la IPA se manda a LiveContainer (`livecontainer://install`) o a SideStore/AltStore, que la descargan e instalan tras confirmar. Con *Instalar sin preguntar* abre el instalador directamente. iOS no permite que una app actualice a otra sin ningún toque.
+| Emulador | Plataforma | Enlace que usa | Carpeta en LiveContainer por defecto |
+|---|---|---|---|
+| ARMSX2 | PS2 | `armsx2://launch?game=<archivo>` | `com.armsx2.ios.app` |
+| MeloNX | Switch | `melonx://game?id=<Title ID>` o `?name=<título>` | `com.stossy11.MeloNX.app` |
+
+- **MeloNX** busca el juego por su Title ID si el nombre del archivo lo lleva entre corchetes (`Juego [0100XXXXXXXXXXXX].nsp`); si no, por el título: renombra el juego en OmniStation con el mismo título que muestra MeloNX.
+- **En LiveContainer**: un toque abre el emulador con JIT (pidiéndolo como hace LiveContainer) y arranca el juego.
+- **SideStore/AltStore + JIT integrado**: MeloNX se abre con el juego y espera al JIT; OmniStation se lo da en segundo plano y el juego arranca solo. ARMSX2 no espera al JIT: la primera vez se abre con JIT y hay que volver y pulsar el juego otra vez (mientras siga abierto, arranca al momento).
+- **Con la app StikDebug**: OmniStation abre el juego y el emulador pide el JIT a StikDebug por su cuenta.
+- **Versiones nuevas** (cada emulador por separado, como mucho cada 6 h): ARMSX2 desde GitHub (solo las *nightly* traen IPA de iOS) y MeloNX desde su servidor Forgejo. La IPA se manda a LiveContainer o a SideStore/AltStore, que la instalan tras confirmar.
+
+## Indicador de JIT
+En horizontal, un punto verde o rojo indica si los juegos se pueden abrir con JIT ahora mismo (en el Modo Dock, entre la batería y la hora; sin Dock, a la izquierda de las pestañas). Al tocarlo explica el motivo.
 
 ## Fondo animado predeterminado
 Crea la carpeta `OmniStation/Resources/Background/` y pon dentro el vídeo con el nombre **`DefaultBackground.mp4`** (también vale `.mov` o `.m4v`). XcodeGen lo incluye solo en la app. Recomendado: bucle corto (10–30 s), H.264 o HEVC, 1080p o menos, menos de ~20 MB (GitHub no admite archivos de más de 100 MB). El audio se silencia. Si no hay vídeo, la opción aparece como «Animado predeterminado (no incluido)» y se usa el original estático.
@@ -65,6 +73,6 @@ El workflow `.github/workflows/ios-build.yml` compila una IPA sin firmar y la pu
 Orbitron y Space Grotesk (Google Fonts), licencia SIL Open Font License 1.1, en `OmniStation/Resources/Fonts`.
 
 ## Versión
-- Marketing version: `0.2.2`
-- Build: `22`
+- Marketing version: `0.3.0`
+- Build: `30`
 - Bundle ID: `com.omnistation.dock`
