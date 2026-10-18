@@ -1,4 +1,4 @@
-# OmniStation Dock — versión 0.2.0
+# OmniStation Dock — versión 0.2.1
 
 Lanzador de juegos y emuladores para iPhone con interfaz espacial/Liquid Glass, control completo con mando y **Modo Dock** (carrusel en horizontal, también al conectar HDMI).
 
@@ -14,7 +14,7 @@ La primera vez la app pregunta **cómo se instaló** (Ajustes → Depuración �
 
 ### LiveContainer + StikDebug
 1. En LiveContainer → Ajustes, elige **StikDebug** como activador de JIT.
-2. En los ajustes de cada app dentro de LiveContainer (ARMSX2 incluido), activa **iniciar con JIT**: cuando se cambia de una app a otra dentro de LiveContainer, es ese ajuste el que manda.
+2. Si OmniStation también está dentro de LiveContainer, al abrir un juego con JIT hace lo mismo que LiveContainer desde su lista: deja apuntada la app (y el juego que debe abrir) y pide a StikDebug que relance LiveContainer con el JIT. Usa el script de JIT que tenga puesto esa app en sus ajustes de LiveContainer. Funciona con el activador StikDebug o SideStore de LiveContainer.
 3. Añade los juegos como acceso directo de tipo *LiveContainer* (pega su enlace de lanzamiento o escribe su carpeta, `com.empresa.juego.app`).
 
 ### SideStore / AltStore + StikJIT integrado (sin StikDebug)
@@ -65,6 +65,6 @@ El workflow `.github/workflows/ios-build.yml` compila una IPA sin firmar y la pu
 Orbitron y Space Grotesk (Google Fonts), licencia SIL Open Font License 1.1, en `OmniStation/Resources/Fonts`.
 
 ## Versión
-- Marketing version: `0.2.0`
-- Build: `20`
+- Marketing version: `0.2.1`
+- Build: `21`
 - Bundle ID: `com.omnistation.dock`
