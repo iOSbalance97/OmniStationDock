@@ -1,4 +1,4 @@
-# OmniStation Dock — versión 0.2.1
+# OmniStation Dock — versión 0.2.2
 
 Lanzador de juegos y emuladores para iPhone con interfaz espacial/Liquid Glass, control completo con mando y **Modo Dock** (carrusel en horizontal, también al conectar HDMI).
 
@@ -22,7 +22,7 @@ OmniStation lleva dentro **StikJIT** (MPL-2.0) y abre las apps con el depurador 
 1. Crea el archivo de emparejamiento con **iloader** en un ordenador (Manage Pairing File, iPhone por cable). Tiene que ser del tipo **RPPairing**; el antiguo de SideStore ya no sirve.
 2. Ajustes → Depuración → **Archivo de emparejamiento** → Importar (o déjalo en Archivos → En mi iPhone → OmniStation Dock).
 3. Activa el **Modo desarrollador** y la VPN **LocalDevVPN** (mejor con Wi‑Fi).
-4. Ajustes → Depuración → **JIT integrado** → *Preparar JIT*: comprueba la VPN y monta la imagen de desarrollador (la primera vez se descarga, unos 20 MB).
+4. No hay que hacer nada más: al abrir la app (y al volver a ella) OmniStation comprueba la VPN y monta la imagen de desarrollador por sí sola (la primera vez se descarga, unos 20 MB). Su estado se ve en Ajustes → Depuración → **JIT integrado**.
 5. En las opciones de cada juego: *Elegir app instalada* (lista las apps de SideStore/AltStore con su Bundle ID) y, si hace falta, *Script JIT* (Automático, Universal o Legacy; solo cuenta con TXM en iOS 26).
 6. Al pulsar el juego, OmniStation lo abre con JIT. Si algo falla, el motivo exacto aparece al volver a OmniStation.
 
@@ -65,6 +65,6 @@ El workflow `.github/workflows/ios-build.yml` compila una IPA sin firmar y la pu
 Orbitron y Space Grotesk (Google Fonts), licencia SIL Open Font License 1.1, en `OmniStation/Resources/Fonts`.
 
 ## Versión
-- Marketing version: `0.2.1`
-- Build: `21`
+- Marketing version: `0.2.2`
+- Build: `22`
 - Bundle ID: `com.omnistation.dock`
