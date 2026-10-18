@@ -120,6 +120,7 @@ struct HomeView: View {
     // Dispositivos
     @StateObject private var controllers = ControllerMonitor()
     @StateObject private var hdmi = HDMIMonitor()
+    @ObservedObject private var jitStatus = JITStatusCenter.shared
 
     // Biblioteca
     @State private var libraryGames: [LibraryGame] = []
@@ -497,6 +498,7 @@ struct HomeView: View {
     private func chooseInstallMethod(_ method: InstallMethod, firstTime: Bool) {
         installMethodRaw = method.rawValue
         showToast(tr("Método de instalación: %@", installMethodTitle(method)))
+        if usesBuiltInJIT { jitStatus.autoPrepare() }
         // Con SideStore/AltStore, la primera vez se ofrece importar el archivo de emparejamiento.
         guard firstTime, method == .sideStore, !PairingFile.exists else { return }
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.7) {
@@ -570,6 +572,7 @@ struct HomeView: View {
             .onReceive(NotificationCenter.default.publisher(for: UIApplication.didBecomeActiveNotification)) { _ in
                 refreshJITStatus(announce: false)
                 showPendingReturnMessage()
+                if usesBuiltInJIT { jitStatus.autoPrepare() }
             }
     }
 
@@ -735,6 +738,11 @@ struct HomeView: View {
         if hdmi.isConnected { handleHDMI(true) }
         SoundManager.shared.updateAmbient(volume: volumeAmbient)
         askInstallMethodIfNeeded()
+        // JIT integrado: se prepara solo, sin que el usuario tenga que hacer nada.
+        if usesBuiltInJIT {
+            if !PairingFile.exists { _ = PairingFile.importFromDocuments() }
+            jitStatus.autoPrepare()
+        }
         if armsx2Enabled && armsx2AutoCheck && ARMSX2Updater.shouldCheck {
             checkARMSX2Update(manual: false)
         }
@@ -987,6 +995,7 @@ struct HomeView: View {
         items.append(PadMenuItem(title: checked(tr("JIT integrado (StikJIT)"), current == .builtIn)) {
             jitEnablerRaw = JITEnabler.builtIn.rawValue
             closePadMenu()
+            if usesBuiltInJIT { jitStatus.autoPrepare() }
         })
         items.append(PadMenuItem(title: checked(tr("App StikDebug"), current == .stikDebug)) {
             jitEnablerRaw = JITEnabler.stikDebug.rawValue
@@ -1820,6 +1829,7 @@ struct HomeView: View {
             jitLaunching = false
             switch result {
             case .success:
+                jitStatus.markReady()
                 pendingReturnMessage = afterMessage ?? tr("JIT activado en %@", name)
             case .failure(let error):
                 let text: String = tr("No se pudo activar el JIT: %@", BuiltInJIT.message(for: error))
@@ -2930,26 +2940,52 @@ struct HomeView: View {
         if method == .sideStore {
             items.append(jitEnablerSettingItem())
             if usesBuiltInJIT {
-                items.append(SettingItem(id: "jitSetup", title: tr("JIT integrado"), subtitle: tr("Preparar y comprobar"), symbol: "bolt.shield.fill", tint: SettingTint.violet, control: .symbol("chevron.right"), action: {
-                    sheet = .jitSetup
-                }))
+                items.append(builtInJITSettingItem())
             }
             items.append(pairingSettingItem())
         }
-        items.append(SettingItem(id: "jitStatus", title: tr("Estado JIT"), subtitle: jitEnabled ? tr("Activo en esta app") : tr("No activo en esta app"), symbol: "cpu", tint: SettingTint.violet, control: jitControl, action: {
-            refreshJITStatus(announce: true)
-        }))
-        items.append(SettingItem(id: "enableJIT", title: tr("Activar JIT"), subtitle: tr("Con StikDebug, en esta app"), symbol: "bolt.fill", tint: SettingTint.violet, control: .symbol("arrow.up.forward"), action: {
-            openExternal(DebugSupport.enableJITURL, failure: stikFailure)
-        }))
-        items.append(SettingItem(id: "openStik", title: tr("Abrir StikDebug"), subtitle: tr("Emparejamiento y scripts JIT"), symbol: "ladybug.fill", tint: SettingTint.violet, control: .symbol("arrow.up.forward"), action: {
-            openExternal(DebugSupport.stikDebugURL, failure: stikFailure)
-        }))
+        // El JIT de la propia OmniStation solo hace falta con StikDebug; el integrado da JIT a los juegos.
+        if !usesBuiltInJIT {
+            items.append(SettingItem(id: "jitStatus", title: tr("Estado JIT"), subtitle: jitEnabled ? tr("Activo en esta app") : tr("No activo en esta app"), symbol: "cpu", tint: SettingTint.violet, control: jitControl, action: {
+                refreshJITStatus(announce: true)
+            }))
+            items.append(SettingItem(id: "enableJIT", title: tr("Activar JIT"), subtitle: tr("Con StikDebug, en esta app"), symbol: "bolt.fill", tint: SettingTint.violet, control: .symbol("arrow.up.forward"), action: {
+                openExternal(DebugSupport.enableJITURL, failure: stikFailure)
+            }))
+            items.append(SettingItem(id: "openStik", title: tr("Abrir StikDebug"), subtitle: tr("Emparejamiento y scripts JIT"), symbol: "ladybug.fill", tint: SettingTint.violet, control: .symbol("arrow.up.forward"), action: {
+                openExternal(DebugSupport.stikDebugURL, failure: stikFailure)
+            }))
+        }
         items.append(SettingItem(id: "copyBundle", title: tr("Copiar Bundle ID"), subtitle: DebugSupport.bundleID, symbol: "doc.on.doc.fill", tint: SettingTint.violet, control: .plain, action: {
             UIPasteboard.general.string = DebugSupport.bundleID
             showToast(tr("Bundle ID copiado"))
         }))
         return SettingGroup(id: "debug", title: tr("Depuración"), items: items)
+    }
+
+    private func builtInJITSettingItem() -> SettingItem {
+        let subtitle: String
+        let control: SettingControl
+        switch jitStatus.state {
+        case .ready:
+            subtitle = tr("Listo para tus juegos")
+            control = SettingControl.badge("ON", Color.green)
+        case .preparing:
+            subtitle = tr("Preparando…")
+            control = SettingControl.progress
+        case .unreachable:
+            subtitle = tr("Activa la VPN LocalDevVPN")
+            control = SettingControl.badge("VPN", Color.orange)
+        case .failed:
+            subtitle = tr("No listo: toca para ver el motivo")
+            control = SettingControl.badge(tr("ERROR"), Color.red)
+        case .idle:
+            subtitle = PairingFile.exists ? tr("Se prepara solo al abrir la app") : tr("Falta el archivo de emparejamiento")
+            control = SettingControl.symbol("chevron.right")
+        }
+        return SettingItem(id: "jitSetup", title: tr("JIT integrado"), subtitle: subtitle, symbol: "bolt.shield.fill", tint: SettingTint.violet, control: control, action: {
+            sheet = .jitSetup
+        })
     }
 
     private func jitEnablerSettingItem() -> SettingItem {

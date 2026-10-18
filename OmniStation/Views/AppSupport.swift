@@ -439,6 +439,12 @@ enum L10n {
         "Última: %@": "Latest: %@",
         "Pidiendo JIT para %@…": "Requesting JIT for %@…",
         "LiveContainer no encuentra %@. Revisa el nombre de su carpeta.": "LiveContainer cannot find %@. Check its folder name.",
+        "Listo para tus juegos": "Ready for your games",
+        "Activa la VPN LocalDevVPN": "Turn on the LocalDevVPN VPN",
+        "No listo: toca para ver el motivo": "Not ready: tap to see why",
+        "ERROR": "ERROR",
+        "Se prepara solo al abrir la app": "Prepares itself when the app opens",
+        "Falta el archivo de emparejamiento": "Pairing file missing",
         "Listo": "Done"
     ]
 }

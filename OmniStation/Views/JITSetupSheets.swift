@@ -10,9 +10,7 @@ struct JITSetupSheet: View {
     @Environment(\.dismiss) private var dismiss
 
     @AppStorage(BuiltInJIT.forceScriptKey) private var forceScript = false
-    @State private var readiness: BuiltInJIT.Readiness?
-    @State private var working = false
-    @State private var stage = ""
+    @ObservedObject private var status = JITStatusCenter.shared
     @State private var message: String?
     // Con el mando: 0 Preparar, 1 Emparejamiento, 2 Forzar script, 3 Restablecer imagen, 4 Listo.
     @State private var selected = 0
@@ -40,6 +38,7 @@ struct JITSetupSheet: View {
         }
         .padSheetStyle(large: true)
         .onAppear {
+            status.autoPrepare()
             pad.handler = { action in
                 handle(action)
                 return true
@@ -48,6 +47,8 @@ struct JITSetupSheet: View {
         .onDisappear { pad.handler = nil }
     }
 
+    private var working: Bool { status.isPreparing }
+
     // MARK: Estado
 
     private var statusCard: some View {
@@ -55,7 +56,7 @@ struct JITSetupSheet: View {
             statusRow(tr("iOS 17.4 o posterior"), ok: BuiltInJIT.isSupportedOS, detail: nil)
             pairingRow
             connectionRow
-            statusRow(tr("TXM (iOS 26)"), ok: nil, detail: txmText)
+            txmRow
         }
         .padding(13)
         .frame(maxWidth: .infinity, alignment: .leading)
@@ -78,19 +79,24 @@ struct JITSetupSheet: View {
 
     private var connectionRow: some View {
         let title: String = tr("VPN e imagen de desarrollador")
-        if working {
+        switch status.state {
+        case .preparing(let stage):
             return statusRow(title, ok: nil, detail: stage.isEmpty ? tr("Comprobando…") : stage)
-        }
-        switch readiness {
         case .ready:
             return statusRow(title, ok: true, detail: tr("Listo"))
         case .unreachable(let reason):
             return statusRow(title, ok: false, detail: tr("Inalcanzable: ") + reason)
-        case .notReady(let reason):
+        case .failed(let reason):
             return statusRow(title, ok: false, detail: tr("No listo: ") + reason)
-        case .none:
+        case .idle:
             return statusRow(title, ok: nil, detail: tr("Sin comprobar"))
         }
+    }
+
+    /// Solo informa: con TXM se usa el script de cada app, sin TXM basta con conectar.
+    private var txmRow: some View {
+        let known: Bool = BuiltInJIT.txmPresent != nil
+        return statusRow(tr("TXM (iOS 26)"), ok: known ? true : nil, detail: txmText)
     }
 
     private var txmText: String {
@@ -193,21 +199,14 @@ struct JITSetupSheet: View {
             message = problem
             return
         }
-        working = true
-        stage = ""
         message = nil
-        BuiltInJIT.prepare(progress: { text in
-            stage = text
-        }, completion: { result in
-            working = false
-            readiness = result
-        })
+        status.autoPrepare(force: true)
     }
 
     private func resetImage() {
         do {
             try BuiltInJIT.resetDiskImage()
-            readiness = nil
+            status.invalidate()
             message = tr("Imagen de desarrollador borrada. Se descargará de nuevo al preparar el JIT.")
         } catch {
             message = BuiltInJIT.message(for: error)

@@ -521,6 +521,8 @@ struct PairingFileSheet: View {
         guard case .success(let urls) = result, let url = urls.first else { return }
         if let imported = PairingFile.importFile(from: url) {
             info = imported
+            JITStatusCenter.shared.invalidate()
+            JITStatusCenter.shared.autoPrepare(force: true)
             message = tr("Archivo de emparejamiento importado.")
             onMessage(tr("Archivo de emparejamiento importado."))
         } else {
@@ -545,6 +547,7 @@ struct PairingFileSheet: View {
 
     private func removeFile() {
         PairingFile.remove()
+        JITStatusCenter.shared.invalidate()
         info = nil
         message = tr("Archivo de emparejamiento quitado.")
     }
