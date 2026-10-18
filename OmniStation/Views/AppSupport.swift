@@ -488,6 +488,17 @@ enum L10n {
         "Nombre en el emulador": "Name in the emulator",
         "Reconoce títulos y carátulas": "Recognizes titles and covers",
         "Title ID / título": "Title ID / title",
+        "%ld carátulas descargadas": "%ld covers downloaded",
+        "1. Abre MeloNX y mira el título exacto de cada juego (o su Title ID en la información del juego).\n2. En OmniStation, abre las opciones del juego (△) → «Nombre en MeloNX» y escríbelo tal cual, con tildes y signos.\n3. Ya está: OmniStation usará ese nombre para el juego y para abrirlo. Si el archivo lleva el Title ID entre corchetes [0100…], no hace falta.": "1. Open MeloNX and check the exact title of each game (or its Title ID in the game info).\n2. In OmniStation, open the game options (△) → “Name in MeloNX” and type it exactly, with accents and symbols.\n3. Done: OmniStation will use that name for the game and to open it. If the file has the Title ID in brackets [0100…], it is not needed.",
+        "Carátulas automáticas": "Automatic covers",
+        "Cerrar al abrir un juego": "Close when opening a game",
+        "Cómo emparejar los juegos": "How to match games",
+        "Dentro de LiveContainer, en 3 pasos": "Inside LiveContainer, in 3 steps",
+        "Desactivadas": "Off",
+        "Emparejar juegos de MeloNX": "Match MeloNX games",
+        "Entendido": "Got it",
+        "OmniStation no se queda detrás": "OmniStation does not stay behind",
+        "Se descargan solas": "Downloaded automatically",
         "Listo": "Done"
     ]
 }
@@ -641,6 +652,8 @@ final class ControllerMonitor: ObservableObject {
     var onAccept: (() -> Void)?
     /// Y/triángulo: opciones del juego (Modo Dock).
     var onOptions: (() -> Void)?
+    /// X/cuadrado: borrar la última letra en el teclado de Búsqueda.
+    var onSquare: (() -> Void)?
 
     enum Direction {
         case up, down, left, right
@@ -769,6 +782,10 @@ final class ControllerMonitor: ObservableObject {
         pad.buttonY.pressedChangedHandler = { [weak self] _, _, pressed in
             guard pressed, self?.navigationEnabled == true else { return }
             DispatchQueue.main.async { self?.onOptions?() }
+        }
+        pad.buttonX.pressedChangedHandler = { [weak self] _, _, pressed in
+            guard pressed, self?.navigationEnabled == true else { return }
+            DispatchQueue.main.async { self?.onSquare?() }
         }
     }
 }

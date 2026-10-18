@@ -50,7 +50,7 @@ private enum PhotoPurpose: Equatable {
 private enum SettingsDialog {
     case language, staticBackground, videoBackground, clearFavorites, clearLibrary, gameOptions
     case assignPlatform, externalFolder
-    case jitEnabler, jitScript, emulatorLocation, emulatorBundle, emulatorUpdate, emulatorFolder
+    case jitEnabler, jitScript, emulatorLocation, emulatorBundle, emulatorUpdate, emulatorFolder, emulatorHelp
 }
 
 private struct Toast: Identifiable {
@@ -110,6 +110,8 @@ struct HomeView: View {
     @AppStorage(JITLauncher.defaultKey) private var jitByDefault = false
     @AppStorage(JITEnabler.storageKey) private var jitEnablerRaw = JITEnabler.builtIn.rawValue
     @AppStorage("emulatorSetupDone") private var emulatorSetupDone = false
+    @AppStorage("closeAfterLaunch") private var closeAfterLaunch = true
+    @AppStorage(CoverDownloader.enabledKey) private var autoCoversEnabled = true
 
     // Dispositivos
     @StateObject private var controllers = ControllerMonitor()
@@ -154,6 +156,7 @@ struct HomeView: View {
     // Cambia al tocar los ajustes de un emulador, para repintar Ajustes.
     @State private var emulatorRevision = 0
     @State private var checkingEmulators: Set<String> = []
+    @State private var downloadingCovers = false
     @State private var jitLaunching = false
     @State private var pendingReturnMessage: String?
     @State private var photoPurpose: PhotoPurpose = .staticBackground
@@ -494,7 +497,11 @@ struct HomeView: View {
         let game: Game? = games.first { $0.id == id }
         let initial: String = gameMeta[id]?.emulatorGameID ?? game?.name ?? ""
         return RenameGameSheet(lang: appLanguage, pad: sheetPad, initialName: initial, title: "Nombre en el emulador", placeholder: "Title ID / título") { value in
-            updateMeta(id) { meta in meta.emulatorGameID = value.isEmpty ? nil : value }
+            updateMeta(id) { meta in
+                meta.emulatorGameID = value.isEmpty ? nil : value
+                // Un título (no un Title ID) pasa a ser también el nombre en OmniStation.
+                if !value.isEmpty && !Emulator.isTitleID(value) { meta.name = value }
+            }
         }
     }
 
@@ -713,6 +720,8 @@ struct HomeView: View {
             showToast(tr("No se pudo usar esa imagen"))
             return
         }
+        // Elegida a mano: las automáticas ya no la sustituyen.
+        AutoCovers.unmark(id)
         coverVersion += 1
         showToast(tr("Carátula actualizada"))
     }
@@ -781,6 +790,7 @@ struct HomeView: View {
         controllers.onDirection = { direction in handleDirection(direction) }
         controllers.onAccept = { handleAccept() }
         controllers.onOptions = { handleOptions() }
+        controllers.onSquare = { handleSquare() }
         if keepLandscape {
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) {
                 OrientationController.apply(landscape: true)
@@ -794,6 +804,7 @@ struct HomeView: View {
             if !PairingFile.exists { _ = PairingFile.importFromDocuments() }
             jitStatus.autoPrepare()
         }
+        downloadMissingCovers()
         for emulator in Emulator.allCases where EmulatorStore.isEnabled(emulator) {
             if EmulatorStore.folderBookmark(emulator) != nil { scanEmulator(emulator, silent: true) }
             if EmulatorStore.autoCheck(emulator) && EmulatorStore.shouldCheck(emulator) {
@@ -846,6 +857,15 @@ struct HomeView: View {
         } else {
             activateControllerSelection()
         }
+    }
+
+    /// Cuadrado/X: en el teclado de Búsqueda borra la última letra.
+    private func handleSquare() {
+        guard !modalActive, selectedSection == .busqueda, controllerSelectedArea == "alphabet" else { return }
+        guard !controllerAlphabetSearchText.isEmpty else { return }
+        controllerAlphabetSearchText.removeLast()
+        searchText = controllerAlphabetSearchText
+        feedback()
     }
 
     private func handleOptions() {
@@ -1049,6 +1069,10 @@ struct HomeView: View {
             return emulatorUpdateMenu(cancel)
         case .emulatorFolder:
             return emulatorFolderMenu(cancel)
+        case .emulatorHelp:
+            return (tr("Emparejar juegos de MeloNX"), tr("1. Abre MeloNX y mira el título exacto de cada juego (o su Title ID en la información del juego).\n2. En OmniStation, abre las opciones del juego (△) → «Nombre en MeloNX» y escríbelo tal cual, con tildes y signos.\n3. Ya está: OmniStation usará ese nombre para el juego y para abrirlo. Si el archivo lleva el Title ID entre corchetes [0100…], no hace falta."), [
+                PadMenuItem(title: tr("Entendido"), kind: .cancel) { closePadMenu() }
+            ])
         }
     }
 
@@ -1372,7 +1396,7 @@ struct HomeView: View {
                     padMenuList(menu.items)
                 }
                 .padding(18)
-                .frame(maxWidth: 340)
+                .frame(maxWidth: padMenuColumns > 1 ? 660 : 340)
                 .glassCard(cornerRadius: 26)
                 .padding(24)
             }
@@ -1380,9 +1404,17 @@ struct HomeView: View {
         }
     }
 
+    /// En horizontal, los menús con varias opciones se ven en cuadrícula (3 por fila).
+    private var padMenuColumns: Int {
+        guard isLandscapeNow, let menu = padMenu, menu.items.count > 3 else { return 1 }
+        return 3
+    }
+
     @ViewBuilder
     private func padMenuList(_ items: [PadMenuItem]) -> some View {
-        if items.count > 7 {
+        if padMenuColumns > 1 {
+            padMenuGrid(items)
+        } else if items.count > 7 {
             ScrollViewReader { proxy in
                 ScrollView(showsIndicators: false) {
                     padMenuButtons(items)
@@ -1397,6 +1429,26 @@ struct HomeView: View {
         }
     }
 
+    private func padMenuGrid(_ items: [PadMenuItem]) -> some View {
+        let columns: [GridItem] = Array(repeating: GridItem(.flexible(), spacing: 10), count: 3)
+        let rows: Int = (items.count + 2) / 3
+        return ScrollViewReader { proxy in
+            ScrollView(showsIndicators: false) {
+                LazyVGrid(columns: columns, spacing: 10) {
+                    ForEach(items.indices, id: \.self) { index in
+                        padMenuButton(items[index], selected: index == menuIndex, tile: true)
+                            .id(index)
+                    }
+                }
+                .padding(2)
+            }
+            .frame(height: rows > 3 ? 236 : CGFloat(rows) * 72 + 4)
+            .onChange(of: menuIndex) { _, value in
+                withAnimation(.easeInOut(duration: 0.2)) { proxy.scrollTo(value, anchor: .center) }
+            }
+        }
+    }
+
     private func padMenuButtons(_ items: [PadMenuItem]) -> some View {
         VStack(spacing: 8) {
             ForEach(items.indices, id: \.self) { index in
@@ -1406,16 +1458,20 @@ struct HomeView: View {
         }
     }
 
-    private func padMenuButton(_ item: PadMenuItem, selected rawSelected: Bool) -> some View {
+    private func padMenuButton(_ item: PadMenuItem, selected rawSelected: Bool, tile: Bool = false) -> some View {
         let selected: Bool = rawSelected && gamepadConnected
         let color: Color = item.kind == .destructive ? Color.red : (item.kind == .cancel ? Color.white.opacity(0.8) : Color.cyan)
         return Button {
             item.action()
         } label: {
             Text(item.title)
-                .font(AppFont.text(15, .semibold))
+                .font(AppFont.text(tile ? 13 : 15, .semibold))
                 .foregroundStyle(color)
-                .frame(maxWidth: .infinity)
+                .multilineTextAlignment(.center)
+                .lineLimit(2)
+                .minimumScaleFactor(0.75)
+                .frame(maxWidth: .infinity, minHeight: tile ? 38 : nil)
+                .padding(.horizontal, tile ? 8 : 0)
                 .padding(.vertical, 13)
                 .contentShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
                 .liquidGlass(
@@ -1430,10 +1486,13 @@ struct HomeView: View {
 
     private func routeModalDirection(_ direction: ControllerMonitor.Direction) {
         if let menu = padMenu {
+            let columns: Int = padMenuColumns
+            let last: Int = menu.items.count - 1
             switch direction {
-            case .up: menuIndex = max(0, menuIndex - 1)
-            case .down: menuIndex = min(menu.items.count - 1, menuIndex + 1)
-            default: break
+            case .up: menuIndex = max(0, menuIndex - columns)
+            case .down: menuIndex = min(last, menuIndex + columns)
+            case .left: if columns > 1 && menuIndex % columns > 0 { menuIndex -= 1 }
+            case .right: if columns > 1 && menuIndex % columns < columns - 1 && menuIndex < last { menuIndex += 1 }
             }
             feedback(.navigate)
             return
@@ -1843,11 +1902,7 @@ struct HomeView: View {
             showToast(tr("Este juego aún no tiene acceso directo"))
             return
         }
-        UIApplication.shared.open(url) { success in
-            if !success {
-                DispatchQueue.main.async { showToast(tr("No se pudo abrir el enlace")) }
-            }
-        }
+        launchExternal(url, failure: tr("No se pudo abrir el enlace"))
     }
 
     /// ¿Este juego se abre con JIT? Su propio ajuste manda; si no tiene, el ajuste general.
@@ -1864,7 +1919,7 @@ struct HomeView: View {
                 if requestLiveContainerJIT(request, name: game.name) { return }
             }
             showToast(tr("Abriendo con JIT…"))
-            openExternal(liveContainerURL, failure: tr("No se pudo abrir LiveContainer. ¿Está instalado?"))
+            launchExternal(liveContainerURL, failure: tr("No se pudo abrir LiveContainer. ¿Está instalado?"))
             return
         }
         guard let bundle = jitBundleID(game) else {
@@ -1882,7 +1937,7 @@ struct HomeView: View {
         } else {
             showToast(tr("Abriendo con JIT…"))
         }
-        openExternal(url, failure: tr("No se pudo abrir StikDebug. ¿Está instalado?"))
+        launchExternal(url, failure: tr("No se pudo abrir StikDebug. ¿Está instalado?"))
     }
 
     /// Pide el JIT a StikDebug para una app de LiveContainer. Devuelve false si hay que usar
@@ -1892,9 +1947,13 @@ struct HomeView: View {
         case .ready(let url):
             showToast(tr("Pidiendo JIT para %@…", name))
             UIApplication.shared.open(url) { success in
-                if !success {
-                    LiveContainerJIT.cancel()
-                    DispatchQueue.main.async { showToast(tr("No se pudo abrir StikDebug. ¿Está instalado?")) }
+                DispatchQueue.main.async {
+                    if success {
+                        closeAfterLaunchIfNeeded(delay: 1.5)
+                    } else {
+                        LiveContainerJIT.cancel()
+                        showToast(tr("No se pudo abrir StikDebug. ¿Está instalado?"))
+                    }
                 }
             }
             return true
@@ -1932,6 +1991,8 @@ struct HomeView: View {
             case .success:
                 jitStatus.markReady()
                 pendingReturnMessage = afterMessage ?? tr("JIT activado en %@", name)
+                // Con un mensaje para cuando vuelvas (ARMSX2), la app se queda para enseñarlo.
+                if afterMessage == nil { closeAfterLaunchIfNeeded(delay: 0.5) }
             case .failure(let error):
                 let text: String = tr("No se pudo activar el JIT: %@", BuiltInJIT.message(for: error))
                 pendingReturnMessage = nil
@@ -1941,14 +2002,29 @@ struct HomeView: View {
     }
 
     /// Indicador de JIT (horizontal): verde si los juegos pueden abrirse con JIT ahora mismo.
-    /// Verde solo si la app está corriendo con JIT ahora mismo (lo mismo que «Estado JIT»).
+    /// Verde si el JIT funciona ahora mismo: en LiveContainer, si la app corre con JIT; con el JIT
+    /// integrado (SideStore), si está listo para dárselo a los juegos (OmniStation no lo necesita).
     private var jitIndicatorOn: Bool {
-        jitEnabled
+        if usesBuiltInJIT { return jitStatus.isReady }
+        return jitEnabled
     }
 
     private func explainJITIndicator() {
         refreshJITStatus(announce: false)
-        showToast(jitEnabled ? tr("JIT activo en esta app") : tr("JIT no activo en esta app"), seconds: 3)
+        guard usesBuiltInJIT else {
+            showToast(jitEnabled ? tr("JIT activo en esta app") : tr("JIT no activo en esta app"), seconds: 3)
+            return
+        }
+        let text: String
+        switch jitStatus.state {
+        case .ready: text = tr("JIT integrado listo")
+        case .preparing: text = tr("Preparando el JIT…")
+        case .unreachable: text = tr("JIT no disponible: activa la VPN LocalDevVPN")
+        case .failed(let reason): text = tr("JIT no disponible: %@", reason)
+        case .idle: text = tr("JIT no disponible: falta el archivo de emparejamiento")
+        }
+        if !jitStatus.isReady { jitStatus.autoPrepare(force: true) }
+        showToast(text, seconds: 3.5)
     }
 
     // MARK: - Enlaces que llegan (MeloNX)
@@ -1958,19 +2034,32 @@ struct HomeView: View {
         applyMeloNXLibrary(list)
     }
 
-    /// Empareja los juegos de Switch con los títulos de MeloNX y guarda su Title ID.
-    /// Si un juego no tiene carátula, usa el icono que manda MeloNX.
+    /// Empareja los juegos de Switch con los títulos de MeloNX: guarda su Title ID, usa el título
+    /// de MeloNX como nombre en OmniStation y su icono como carátula (salvo carátulas elegidas a mano).
     private func applyMeloNXLibrary(_ list: [MeloNXGame]) {
         var matched: Int = 0
         let switchGames: [Game] = games.filter { $0.isCustom && $0.platform == Emulator.melonx.platform }
         for game in switchGames {
             let file: String = libraryGames.first(where: { $0.id == game.id })?.fileName ?? ""
             let fileBase: String = (file as NSString).deletingPathExtension
-            if Emulator.titleID(in: file) != nil { continue }
-            guard let found = MeloNXLibrary.bestMatch(for: game.name, in: list) ?? MeloNXLibrary.bestMatch(for: fileBase, in: list) else { continue }
-            updateMeta(game.id) { meta in meta.emulatorGameID = found.titleId }
-            if CoverStore.shared.image(for: game.id) == nil, let icon = found.iconData {
-                _ = CoverStore.shared.save(icon, for: game.id)
+            let originalName: String = libraryGames.first(where: { $0.id == game.id })?.name ?? game.name
+            var found: MeloNXGame? = nil
+            if let titleID = Emulator.titleID(in: file) {
+                found = list.first { $0.titleId.lowercased() == titleID }
+            }
+            if found == nil, let saved = gameMeta[game.id]?.emulatorGameID, Emulator.isTitleID(saved) {
+                found = list.first { $0.titleId.lowercased() == saved.lowercased() }
+            }
+            if found == nil {
+                found = MeloNXLibrary.bestMatch(for: originalName, in: list) ?? MeloNXLibrary.bestMatch(for: fileBase, in: list)
+            }
+            guard let match = found else { continue }
+            updateMeta(game.id) { meta in
+                meta.emulatorGameID = match.titleId
+                if !match.titleName.isEmpty { meta.name = match.titleName }
+            }
+            if let icon = match.iconData, CoverStore.shared.image(for: game.id) == nil || AutoCovers.contains(game.id) {
+                if CoverStore.shared.save(icon, for: game.id) { AutoCovers.mark(game.id) }
             }
             matched += 1
         }
@@ -1978,9 +2067,91 @@ struct HomeView: View {
         showToast(tr("MeloNX: %ld de %ld juegos reconocidos", matched, switchGames.count), seconds: 4)
     }
 
+    /// Si hay juegos de MeloNX nuevos sin reconocer, se le pide su lista (una vez por cada
+    /// grupo de juegos nuevos, para no abrir MeloNX cada vez que se abre la app).
+    private func requestMeloNXLibraryIfNeeded() {
+        guard EmulatorStore.isEnabled(.melonx),
+              EmulatorStore.location(.melonx, installMethod: installMethodRaw) == .native else { return }
+        let pending: [String] = libraryGames
+            .filter { $0.source == "emu:" + Emulator.melonx.rawValue && gameMeta[$0.id]?.emulatorGameID == nil }
+            .map(\.id)
+            .sorted()
+        guard !pending.isEmpty else { return }
+        let signature: String = pending.joined(separator: "|")
+        guard UserDefaults.standard.string(forKey: "melonxLibraryAskedFor") != signature else { return }
+        UserDefaults.standard.set(signature, forKey: "melonxLibraryAskedFor")
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) {
+            guard UIApplication.shared.applicationState == .active, sheet == nil, dialog == nil else { return }
+            requestMeloNXLibrary()
+        }
+    }
+
     /// Pide a MeloNX su lista de juegos (solo con MeloNX instalado aparte: LiveContainer no la devuelve).
     private func requestMeloNXLibrary() {
         openExternal(MeloNXLibrary.requestURL, failure: tr("No se pudo abrir %@. ¿Está instalado?", Emulator.melonx.name))
+    }
+
+    // MARK: - Carátulas automáticas
+
+    /// Busca y descarga carátulas para los juegos que no tengan (una vez por juego).
+    private func downloadMissingCovers() {
+        guard autoCoversEnabled, !downloadingCovers else { return }
+        let pending: [Game] = games.filter { game in
+            game.isCustom && CoverDownloader.repository(for: game.platform) != nil
+                && CoverStore.shared.image(for: game.id) == nil && !CoverDownloader.wasAttempted(game.id)
+        }
+        guard !pending.isEmpty else { return }
+        let files: [String: String] = Dictionary(libraryGames.compactMap { item in
+            item.fileName.map { (item.id, $0) }
+        }, uniquingKeysWith: { first, _ in first })
+        downloadingCovers = true
+        Task {
+            var lists: [String: [String]] = [:]
+            var added: Int = 0
+            for game in pending {
+                guard let repository = CoverDownloader.repository(for: game.platform) else { continue }
+                if lists[repository] == nil {
+                    lists[repository] = (try? await CoverDownloader.boxartNames(repository)) ?? []
+                }
+                let names: [String] = lists[repository] ?? []
+                guard !names.isEmpty else { continue }
+                CoverDownloader.markAttempted(game.id)
+                guard let name = CoverDownloader.bestMatch(for: game.name, fileName: files[game.id], in: names),
+                      let data = try? await CoverDownloader.download(repository, name: name) else { continue }
+                if CoverStore.shared.image(for: game.id) == nil, CoverStore.shared.save(data, for: game.id) {
+                    AutoCovers.mark(game.id)
+                    added += 1
+                    coverVersion += 1
+                }
+            }
+            downloadingCovers = false
+            if added > 0 { showToast(tr("%ld carátulas descargadas", added), seconds: 3) }
+        }
+    }
+
+    // MARK: - Cerrar al abrir un juego
+
+    /// Abre un juego (enlace) y, si sale bien y el ajuste está activo, cierra OmniStation.
+    private func launchExternal(_ url: URL?, failure: String) {
+        guard let url else { return }
+        UIApplication.shared.open(url) { success in
+            DispatchQueue.main.async {
+                if success {
+                    closeAfterLaunchIfNeeded(delay: 1.5)
+                } else {
+                    showToast(failure)
+                }
+            }
+        }
+    }
+
+    /// Cierra OmniStation cuando ya está detrás del juego (si el usuario sigue en ella, no hace nada).
+    private func closeAfterLaunchIfNeeded(delay: Double) {
+        guard closeAfterLaunch else { return }
+        DispatchQueue.main.asyncAfter(deadline: .now() + delay) {
+            guard UIApplication.shared.applicationState != .active, !jitLaunching else { return }
+            exit(0)
+        }
     }
 
     private func showPendingReturnMessage() {
@@ -2014,7 +2185,7 @@ struct HomeView: View {
                 if requestLiveContainerJIT(request, name: emulator.name) { return }
             }
             showToast(tr("Abriendo en %@ con JIT…", emulator.name))
-            openExternal(EmulatorLinks.liveContainerURL(appFolder: folder, gameLink: link), failure: tr("No se pudo abrir LiveContainer. ¿Está instalado?"))
+            launchExternal(EmulatorLinks.liveContainerURL(appFolder: folder, gameLink: link), failure: tr("No se pudo abrir LiveContainer. ¿Está instalado?"))
         case .native:
             openEmulatorNatively(emulator, link: link, gameName: game.name)
         }
@@ -2025,7 +2196,7 @@ struct HomeView: View {
         let failure: String = tr("No se pudo abrir %@. ¿Está instalado?", emulator.name)
         // Con la app StikDebug, el emulador pide el JIT por su cuenta cuando no lo tiene.
         guard usesBuiltInJIT else {
-            openExternal(url, failure: failure)
+            launchExternal(url, failure: failure)
             return
         }
         if let problem = BuiltInJIT.preflightProblem(lang: appLanguage) {
@@ -2036,7 +2207,7 @@ struct HomeView: View {
         BuiltInJIT.isStillRunningWithJIT(bundleID: bundle) { running in
             if running {
                 // Sigue abierto con JIT: el juego arranca al momento.
-                openExternal(url, failure: failure)
+                launchExternal(url, failure: failure)
             } else if emulator.waitsForJIT {
                 // Se abre el juego y, mientras el emulador espera, OmniStation le da el JIT.
                 attachBuiltInJIT(emulator, bundleID: bundle)
@@ -2057,6 +2228,7 @@ struct HomeView: View {
             switch result {
             case .success:
                 jitStatus.markReady()
+                closeAfterLaunchIfNeeded(delay: 0.5)
             case .failure(let error):
                 let text: String = tr("No se pudo activar el JIT: %@", BuiltInJIT.message(for: error))
                 pendingReturnMessage = text
@@ -2105,12 +2277,10 @@ struct HomeView: View {
             setLibrary(kept + found)
             if !silent {
                 showToast(tr("%@: %ld juegos", emulator.name, found.count), seconds: 3)
-                // MeloNX instalado aparte: se le pide su lista para reconocer títulos y carátulas.
-                let native: Bool = EmulatorStore.location(emulator, installMethod: installMethodRaw) == .native
-                if emulator == .melonx && native && !found.isEmpty {
-                    DispatchQueue.main.asyncAfter(deadline: .now() + 1.2) { requestMeloNXLibrary() }
-                }
             }
+            // Juegos nuevos de MeloNX: se reconocen solos. Y carátulas para los que no tengan.
+            if emulator == .melonx { requestMeloNXLibraryIfNeeded() }
+            downloadMissingCovers()
         }
     }
 
@@ -2293,6 +2463,7 @@ struct HomeView: View {
             setLibrary(libraryGames.filter { $0.source != "scan" } + found.filter { !emulatorIDs.contains($0.id) })
             isScanning = false
             showToast(found.isEmpty ? tr("No se encontraron juegos en la carpeta") : tr("Escaneo completo: %ld juegos", found.count), seconds: 3.2)
+            downloadMissingCovers()
         }
     }
 
@@ -2456,6 +2627,15 @@ struct HomeView: View {
         let columns: Int = gameColumns
         let lastRow: Int = (items.count - 1) / columns
         let row: Int = index / columns
+        // En Búsqueda la barra y el teclado ocupan la parte de arriba: la fila se centra.
+        if selectedSection == .busqueda {
+            if row == lastRow && row > 0 {
+                proxy.scrollTo("screen-bottom", anchor: .bottom)
+            } else {
+                proxy.scrollTo(id, anchor: .center)
+            }
+            return
+        }
         // La primera fila siempre sube del todo (antes se centraba y tapaba título y plataformas).
         if row == 0 || gameFitsFromTop(id) {
             scrollToTop(proxy)
@@ -2488,7 +2668,7 @@ struct HomeView: View {
         case "settings":
             return controllerSelectedSettingIndex < (isLandscapeNow ? 3 : 2)
         default:
-            guard let id = controllerSelectedGameID,
+            guard selectedSection != .busqueda, let id = controllerSelectedGameID,
                   let index = controllerGames.firstIndex(where: { $0.id == id }) else { return false }
             return index < gameColumns
         }
@@ -3032,6 +3212,7 @@ struct HomeView: View {
         let count: Int = controllers.controllers.count
         let countColor: Color = count == 0 ? Color.gray : Color.green
         var items: [SettingItem] = []
+        items.append(toggleSetting("closeAfterLaunch", tr("Cerrar al abrir un juego"), tr("OmniStation no se queda detrás"), "xmark.app.fill", SettingTint.sky, $closeAfterLaunch))
         items.append(SettingItem(id: "controllers", title: tr("Mandos"), subtitle: controllersSubtitle, symbol: "gamecontroller.fill", tint: SettingTint.sky, control: .badge("\(count)", countColor), action: {
             sheet = .controllers
         }))
@@ -3099,6 +3280,13 @@ struct HomeView: View {
             shortcutMode = 0
             sheet = .addShortcut
         }))
+        items.append(SettingItem(id: "autoCovers", title: tr("Carátulas automáticas"), subtitle: autoCoversEnabled ? tr("Se descargan solas") : tr("Desactivadas"), symbol: "photo.stack.fill", tint: SettingTint.blue, control: downloadingCovers ? .progress : .toggle(autoCoversEnabled), action: {
+            autoCoversEnabled.toggle()
+            if autoCoversEnabled {
+                CoverDownloader.resetAttempts()
+                downloadMissingCovers()
+            }
+        }))
         let emulatorCount: Int = Emulator.allCases.filter { EmulatorStore.isEnabled($0) }.count
         items.append(SettingItem(id: "emulators", title: tr("Emuladores"), subtitle: tr("Qué tienes instalado y sus carpetas"), symbol: "cpu.fill", tint: SettingTint.blue, control: .badge("\(emulatorCount)", Color.cyan), action: {
             sheet = .emulatorSetup
@@ -3155,6 +3343,12 @@ struct HomeView: View {
             items.append(SettingItem(id: key + "Bundle", title: tr("Bundle ID"), subtitle: EmulatorStore.bundleID(emulator), symbol: "number", tint: SettingTint.blue, control: .symbol("pencil"), action: {
                 activeEmulator = emulator
                 dialog = .emulatorBundle
+            }))
+        }
+        if emulator == .melonx && location == .liveContainer {
+            items.append(SettingItem(id: key + "Help", title: tr("Cómo emparejar los juegos"), subtitle: tr("Dentro de LiveContainer, en 3 pasos"), symbol: "questionmark.circle.fill", tint: SettingTint.blue, control: .symbol("chevron.right"), action: {
+                activeEmulator = emulator
+                dialog = .emulatorHelp
             }))
         }
         if emulator == .melonx && location == .native {
