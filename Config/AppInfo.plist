@@ -29,7 +29,15 @@
 		<string>steamlink</string>
 		<string>xbox</string>
 		<string>stikjit</string>
+		<string>stikdebug</string>
 		<string>livecontainer</string>
+		<string>armsx2</string>
+		<string>sidestore</string>
+		<string>altstore</string>
+	</array>
+	<key>UIBackgroundModes</key>
+	<array>
+		<string>audio</string>
 	</array>
 </dict>
 </plist>
