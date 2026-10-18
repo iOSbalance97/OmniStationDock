@@ -17,6 +17,25 @@ jobs:
       - name: Install XcodeGen
         run: brew install xcodegen
 
+      # JIT integrado: la librería idevice de StikJIT (fijada a un commit concreto y comprobada).
+      - name: Fetch idevice (StikJIT)
+        env:
+          STIKJIT_COMMIT: 32287268fa5824f9edce4cb359f5833ce0cf7b00
+        run: |
+          set -e
+          git init -q "$RUNNER_TEMP/stikjit"
+          git -C "$RUNNER_TEMP/stikjit" remote add origin https://github.com/StikDebug/StikJIT.git
+          git -C "$RUNNER_TEMP/stikjit" fetch -q --depth 1 origin "$STIKJIT_COMMIT"
+          git -C "$RUNNER_TEMP/stikjit" checkout -q FETCH_HEAD
+          mkdir -p Vendor/idevice
+          cp "$RUNNER_TEMP/stikjit/idevice/idevice.h" "$RUNNER_TEMP/stikjit/idevice/module.modulemap" "$RUNNER_TEMP/stikjit/idevice/libidevice_ffi.a" Vendor/idevice/
+          cd Vendor/idevice
+          echo "696286794e8cf1c18a91d4dab5046cef4d9bae352f5e7a1ad33fbc0ba30d7ab4  idevice.h" > SHA256SUMS
+          echo "4db23fe1d342927b9480bb9a8577f219994365621dc28aa0018e23ea1990ecc8  libidevice_ffi.a" >> SHA256SUMS
+          echo "d98e25796e1135d892d81e6922a61e78e82b3d6c33322112e9eca1e089c7a300  module.modulemap" >> SHA256SUMS
+          shasum -a 256 -c SHA256SUMS
+          rm SHA256SUMS
+
       - name: Generate Xcode project
         run: xcodegen generate
 
