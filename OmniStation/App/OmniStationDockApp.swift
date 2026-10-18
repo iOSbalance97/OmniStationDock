@@ -26,6 +26,9 @@ struct OmniStationDockApp: App {
             WelcomeView()
                 .preferredColorScheme(.dark)
                 .statusBarHidden(false)
+                .onOpenURL { url in
+                    IncomingLinks.shared.url = url
+                }
         }
     }
 }
