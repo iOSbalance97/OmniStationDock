@@ -1,14 +1,14 @@
-# OmniStation Dock — versión 0.3.3
+# OmniStation Dock — versión 0.3.4
 
 Lanzador de juegos y emuladores para iPhone con interfaz espacial/Liquid Glass, control completo con mando y **Modo Dock** (carrusel en horizontal, también al conectar HDMI).
 
 ## Funciones
 - Inicio, Favoritos, Búsqueda y Ajustes, con filtros por plataforma (incluidas Juegos iOS, Ports y las tuyas).
 - Biblioteca: carpeta externa con ROMs de todas las plataformas, accesos directos (URL, app iOS por Bundle ID con StikDebug, o LiveContainer) y carátulas.
-- **Pantalla del juego**: al elegir un juego (✕ o toque) se abre su ficha con carátula, nombre, plataforma y descripción (de Wikipedia, en tu idioma, guardada en el iPhone), y los botones **Jugar** y **Opciones**. Arriba, volver (también ○) y favorito. Vertical y horizontal, con y sin Dock.
+- **Pantalla del juego**: al elegir un juego (✕ o toque) se abre su ficha con los botones **Jugar** y **Opciones**; arriba, volver (también ○) y favorito. En vertical: carátula, nombre, plataforma y descripción (de Wikipedia, en tu idioma). En horizontal (con y sin Dock): una imagen del juego de fondo a pantalla completa (banner de la eShop en Switch; captura del juego de libretro-thumbnails en el resto; se guarda en el iPhone), el nombre centrado y los botones debajo; la descripción se abre con su botón, al lado del de favorito.
 - Por juego: cambiar nombre, carátula (Descargar, Importar foto o Importar archivo) y plataforma, favoritos, logros de RetroAchievements, mapa de botones y **abrir con JIT**.
 - Mando (DualSense, Xbox…): cruceta (mantener = repetir), ✕ elegir, △ opciones, ○ atrás, □ borrar letra en los teclados, L1/R1 plataforma, L2/R2 pestaña.
-- Reorganizar plataformas: orden y un interruptor por plataforma para mostrarla u ocultarla en la barra.
+- Reorganizar plataformas: orden y un interruptor por plataforma. Encendida sale siempre en la barra (también las de la carpeta externa sin juegos) y apagada nunca; sin tocarla, las de la carpeta externa salen solo cuando tienen juegos.
 - Fondo: animado predeterminado, original estático, imagen propia o vídeo propio. Sonidos con volumen propio.
 
 ## JIT
@@ -48,7 +48,7 @@ La primera vez (y en Ajustes → Juegos → Emuladores) la app pregunta qué emu
 - **Versiones nuevas** (cada emulador por separado, como mucho cada 6 h): ARMSX2 desde GitHub (solo las *nightly* traen IPA de iOS) y MeloNX desde su servidor Forgejo. La IPA se manda a LiveContainer o a SideStore/AltStore, que la instalan tras confirmar.
 
 ## Carátulas automáticas
-Para los juegos sin carátula, OmniStation busca la suya en la colección pública **libretro-thumbnails** (PS1, PS2, PSP, GB/GBC/GBA, NDS, 3DS, NES, SNES, N64, GameCube, Wii, Mega Drive, Master System, Game Gear, Dreamcast y Saturn) y la descarga sola, emparejando por nombre y prefiriendo la región de tu idioma. En Switch usa los iconos de MeloNX. Las carátulas que elijas a mano nunca se sustituyen. En las opciones del juego, *Cambiar carátula* → **Descargar** la busca en ese momento (en Switch, se la pide a MeloNX), **Importar foto** abre la galería e **Importar archivo** abre Archivos. Se activa o desactiva en Ajustes → Juegos → Carátulas automáticas.
+Para los juegos sin carátula, OmniStation busca la suya en la colección pública **libretro-thumbnails** (PS1, PS2, PSP, GB/GBC/GBA, NDS, 3DS, NES, SNES, N64, GameCube, Wii, Mega Drive, Master System, Game Gear, Dreamcast y Saturn) y la descarga sola, emparejando por nombre y prefiriendo la región de tu idioma. En Switch usa los iconos de MeloNX (instalado aparte) o, dentro de LiveContainer, el icono de la eShop (api.nlib.cc, si el archivo lleva el Title ID) o la portada del artículo de Wikipedia. Si un juego no está en libretro-thumbnails, *Descargar* prueba también con Wikipedia. Las carátulas que elijas a mano nunca se sustituyen. En las opciones del juego, *Cambiar carátula* → **Descargar** la busca en ese momento (en Switch con MeloNX aparte, se la pide a MeloNX; dentro de LiveContainer, el icono de la eShop por su Title ID o la portada de Wikipedia), **Importar foto** abre la galería e **Importar archivo** abre Archivos. Se activa o desactiva en Ajustes → Juegos → Carátulas automáticas.
 
 ## Cerrar al abrir un juego
 Con *Cerrar al abrir un juego* (Ajustes → General, activado por defecto), OmniStation se cierra en cuanto el juego está abierto (con el JIT integrado, cuando ha terminado de dárselo), para que no se quede detrás.
@@ -82,6 +82,6 @@ El workflow `.github/workflows/ios-build.yml` compila una IPA sin firmar y la pu
 Orbitron y Space Grotesk (Google Fonts), licencia SIL Open Font License 1.1, en `OmniStation/Resources/Fonts`.
 
 ## Versión
-- Marketing version: `0.3.3`
-- Build: `33`
+- Marketing version: `0.3.4`
+- Build: `34`
 - Bundle ID: `com.omnistation.dock`
