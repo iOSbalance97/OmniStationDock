@@ -71,9 +71,17 @@ enum Emulator: String, CaseIterable, Identifiable {
     /// Enlace oficial del emulador para arrancar un juego.
     /// - ARMSX2: por el nombre del archivo en su biblioteca.
     /// - MeloNX: por el Title ID si el archivo lo lleva entre corchetes; si no, por el título.
-    func gameLink(fileName: String, title: String) -> String {
+    func gameLink(fileName: String, title: String, override: String? = nil) -> String {
         var allowed = CharacterSet.urlQueryAllowed
         allowed.remove(charactersIn: "&=+")
+        // Lo que se haya guardado para este juego (Title ID o título exacto en el emulador) manda.
+        if self == .melonx, let override, !override.isEmpty {
+            if Self.isTitleID(override) {
+                return "melonx://game?id=" + override.lowercased()
+            }
+            let encoded: String = override.addingPercentEncoding(withAllowedCharacters: allowed) ?? override
+            return "melonx://game?name=" + encoded
+        }
         switch self {
         case .armsx2:
             let encoded: String = fileName.addingPercentEncoding(withAllowedCharacters: allowed) ?? fileName
@@ -85,6 +93,11 @@ enum Emulator: String, CaseIterable, Identifiable {
             let encoded: String = title.addingPercentEncoding(withAllowedCharacters: allowed) ?? title
             return "melonx://game?name=" + encoded
         }
+    }
+
+    static func isTitleID(_ text: String) -> Bool {
+        let hex = CharacterSet(charactersIn: "0123456789abcdefABCDEF")
+        return text.count == 16 && text.unicodeScalars.allSatisfy { hex.contains($0) }
     }
 
     /// Title ID de Switch escrito en el nombre del archivo, por ejemplo "Juego [0100ABCD12340000].nsp".
@@ -315,5 +328,86 @@ enum EmulatorUpdater {
     /// Nombre corto de una versión: "nightly-20261016" → "20261016".
     static func shortName(_ tag: String) -> String {
         tag.hasPrefix("nightly-") ? String(tag.dropFirst("nightly-".count)) : tag
+    }
+}
+
+// MARK: - Enlaces que llegan a OmniStation
+
+/// Enlaces "omnistation://…" que abren la app (por ejemplo, la lista de juegos que devuelve MeloNX).
+/// Se guardan aquí porque pueden llegar antes de que se vea la pantalla principal.
+final class IncomingLinks: ObservableObject {
+    static let shared = IncomingLinks()
+    @Published var url: URL?
+}
+
+// MARK: - Biblioteca de MeloNX
+
+/// MeloNX abre un juego por su Title ID o por su título exacto (con tildes y todo). Para no depender
+/// del nombre del archivo, OmniStation le pide su lista de juegos (`melonx://gameInfo`) y empareja
+/// cada archivo con el título que tiene MeloNX.
+struct MeloNXGame: Decodable {
+    let titleName: String
+    let titleId: String
+    let iconData: Data?
+}
+
+enum MeloNXLibrary {
+    /// Enlace que pide a MeloNX su lista; MeloNX responde con "omnistation://melonx?games=…".
+    static let requestURL: URL? = URL(string: "melonx://gameInfo?scheme=omnistation")
+
+    /// Lee la respuesta de MeloNX.
+    static func games(from url: URL) -> [MeloNXGame]? {
+        guard url.scheme?.lowercased() == "omnistation", url.host?.lowercased() == "melonx",
+              let components = URLComponents(url: url, resolvingAgainstBaseURL: false),
+              let text = components.queryItems?.first(where: { $0.name == "games" })?.value else { return nil }
+        var base64: String = text.replacingOccurrences(of: "-", with: "+").replacingOccurrences(of: "_", with: "/")
+        while base64.count % 4 != 0 { base64.append("=") }
+        guard let data = Data(base64Encoded: base64) else { return nil }
+        return try? JSONDecoder().decode([MeloNXGame].self, from: data)
+    }
+
+    /// Texto comparable: minúsculas, sin tildes, sin lo que va entre corchetes o paréntesis.
+    static func normalized(_ text: String) -> [String] {
+        var cleaned: String = ""
+        var depth: Int = 0
+        for character in text {
+            if character == "[" || character == "(" { depth += 1; continue }
+            if character == "]" || character == ")" { depth = max(0, depth - 1); continue }
+            if depth == 0 { cleaned.append(character) }
+        }
+        let folded: String = cleaned.folding(options: [.diacriticInsensitive, .caseInsensitive], locale: Locale(identifier: "en_US"))
+        let words: [String] = folded.lowercased()
+            .components(separatedBy: CharacterSet.alphanumerics.inverted)
+            .filter { !$0.isEmpty }
+        return words
+    }
+
+    /// El juego de MeloNX que mejor encaja con un nombre (nil si ninguno se parece lo bastante).
+    static func bestMatch(for name: String, in games: [MeloNXGame]) -> MeloNXGame? {
+        let target: [String] = normalized(name)
+        guard !target.isEmpty else { return nil }
+        let targetSet: Set<String> = Set(target)
+        let targetJoined: String = target.joined()
+        var best: MeloNXGame? = nil
+        var bestScore: Double = 0
+        for game in games {
+            let words: [String] = normalized(game.titleName)
+            guard !words.isEmpty else { continue }
+            let joined: String = words.joined()
+            var score: Double
+            if joined == targetJoined {
+                score = 1
+            } else {
+                let set: Set<String> = Set(words)
+                let common: Double = Double(set.intersection(targetSet).count)
+                score = common / Double(set.union(targetSet).count)
+                if joined.contains(targetJoined) || targetJoined.contains(joined) { score = max(score, 0.8) }
+            }
+            if score > bestScore {
+                bestScore = score
+                best = game
+            }
+        }
+        return bestScore >= 0.5 ? best : nil
     }
 }

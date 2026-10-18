@@ -482,6 +482,12 @@ enum L10n {
         "Versión": "Version",
         "Vuelve a escanear la carpeta para abrir este juego en %@": "Scan the folder again to open this game in %@",
         "¿Qué emuladores tienes instalados?": "Which emulators do you have installed?",
+        "Leer biblioteca de MeloNX": "Read MeloNX library",
+        "MeloNX: %ld de %ld juegos reconocidos": "MeloNX: %ld of %ld games recognized",
+        "Nombre en %@": "Name in %@",
+        "Nombre en el emulador": "Name in the emulator",
+        "Reconoce títulos y carátulas": "Recognizes titles and covers",
+        "Title ID / título": "Title ID / title",
         "Listo": "Done"
     ]
 }

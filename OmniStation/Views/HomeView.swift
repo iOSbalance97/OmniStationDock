@@ -36,6 +36,8 @@ private enum AppPickerTarget: Equatable {
 private enum TextEntryTarget: Equatable {
     case lcFolder(Emulator)
     case bundle(Emulator)
+    /// Cómo se llama el juego en su emulador (id del juego en OmniStation).
+    case emulatorGame(String)
 }
 
 /// Para qué se abre el selector de fotos.
@@ -481,6 +483,22 @@ struct HomeView: View {
     }
 
     private func textEntrySheet() -> some View {
+        if case .emulatorGame(let id) = textTarget {
+            return AnyView(emulatorGameSheet(id))
+        }
+        return AnyView(emulatorTextSheet())
+    }
+
+    /// Título exacto o Title ID del juego en MeloNX (vacío = automático).
+    private func emulatorGameSheet(_ id: String) -> some View {
+        let game: Game? = games.first { $0.id == id }
+        let initial: String = gameMeta[id]?.emulatorGameID ?? game?.name ?? ""
+        return RenameGameSheet(lang: appLanguage, pad: sheetPad, initialName: initial, title: "Nombre en el emulador", placeholder: "Title ID / título") { value in
+            updateMeta(id) { meta in meta.emulatorGameID = value.isEmpty ? nil : value }
+        }
+    }
+
+    private func emulatorTextSheet() -> some View {
         let target: TextEntryTarget = textTarget
         let title: String
         let placeholder: String
@@ -497,11 +515,18 @@ struct HomeView: View {
             title = "Bundle ID del emulador"
             placeholder = value.defaultBundleID
             initial = EmulatorStore.bundleID(value)
+        case .emulatorGame:
+            // Se atiende en emulatorGameSheet.
+            emulator = .melonx
+            title = ""
+            placeholder = ""
+            initial = ""
         }
         return RenameGameSheet(lang: appLanguage, pad: sheetPad, initialName: initial, title: title, placeholder: placeholder, bundleMode: true) { value in
             switch target {
             case .lcFolder: EmulatorStore.setLCFolder(value, emulator)
             case .bundle: EmulatorStore.setBundleID(value, emulator)
+            case .emulatorGame: break
             }
             emulatorRevision += 1
         }
@@ -584,6 +609,11 @@ struct HomeView: View {
     private func withSettingObservers<V: View>(_ view: V) -> some View {
         view
             .onChange(of: photoItem) { _, item in handlePhotoItem(item) }
+            .onReceive(IncomingLinks.shared.$url) { url in
+                guard let url else { return }
+                IncomingLinks.shared.url = nil
+                handleIncomingLink(url)
+            }
             .onChange(of: showSampleGames) { _, _ in refreshLibrary() }
             .onChange(of: dialog) { _, _ in menuIndex = 0 }
             .onChange(of: showAbout) { _, _ in menuIndex = 0 }
@@ -1261,6 +1291,13 @@ struct HomeView: View {
             closePadMenu()
             showToast(jitOn ? tr("Se abrirá sin JIT") : tr("Se abrirá con JIT"))
         })
+        if let emulator = emulatorFor(game), emulator == .melonx {
+            items.append(PadMenuItem(title: tr("Nombre en %@", emulator.name)) {
+                closePadMenu()
+                textTarget = .emulatorGame(id)
+                sheet = .textEntry
+            })
+        }
         items.append(PadMenuItem(title: tr("Bundle ID para JIT")) {
             closePadMenu()
             sheet = .bundleID
@@ -1904,30 +1941,46 @@ struct HomeView: View {
     }
 
     /// Indicador de JIT (horizontal): verde si los juegos pueden abrirse con JIT ahora mismo.
+    /// Verde solo si la app está corriendo con JIT ahora mismo (lo mismo que «Estado JIT»).
     private var jitIndicatorOn: Bool {
-        if jitEnabled { return true }
-        if usesBuiltInJIT { return jitStatus.isReady }
-        if DebugSupport.isInsideLiveContainer { return LiveContainerJIT.canRequestJIT }
-        return JITLauncher.stikDebugInstalled
+        jitEnabled
     }
 
     private func explainJITIndicator() {
-        let text: String
-        if usesBuiltInJIT {
-            switch jitStatus.state {
-            case .ready: text = tr("JIT integrado listo")
-            case .preparing: text = tr("Preparando el JIT…")
-            case .unreachable: text = tr("JIT no disponible: activa la VPN LocalDevVPN")
-            case .failed(let reason): text = tr("JIT no disponible: %@", reason)
-            case .idle: text = tr("JIT no disponible: falta el archivo de emparejamiento")
+        refreshJITStatus(announce: false)
+        showToast(jitEnabled ? tr("JIT activo en esta app") : tr("JIT no activo en esta app"), seconds: 3)
+    }
+
+    // MARK: - Enlaces que llegan (MeloNX)
+
+    private func handleIncomingLink(_ url: URL) {
+        guard let list = MeloNXLibrary.games(from: url) else { return }
+        applyMeloNXLibrary(list)
+    }
+
+    /// Empareja los juegos de Switch con los títulos de MeloNX y guarda su Title ID.
+    /// Si un juego no tiene carátula, usa el icono que manda MeloNX.
+    private func applyMeloNXLibrary(_ list: [MeloNXGame]) {
+        var matched: Int = 0
+        let switchGames: [Game] = games.filter { $0.isCustom && $0.platform == Emulator.melonx.platform }
+        for game in switchGames {
+            let file: String = libraryGames.first(where: { $0.id == game.id })?.fileName ?? ""
+            let fileBase: String = (file as NSString).deletingPathExtension
+            if Emulator.titleID(in: file) != nil { continue }
+            guard let found = MeloNXLibrary.bestMatch(for: game.name, in: list) ?? MeloNXLibrary.bestMatch(for: fileBase, in: list) else { continue }
+            updateMeta(game.id) { meta in meta.emulatorGameID = found.titleId }
+            if CoverStore.shared.image(for: game.id) == nil, let icon = found.iconData {
+                _ = CoverStore.shared.save(icon, for: game.id)
             }
-            if !jitStatus.isReady { jitStatus.autoPrepare(force: true) }
-        } else if jitIndicatorOn {
-            text = tr("JIT disponible con StikDebug")
-        } else {
-            text = tr("JIT no disponible: instala StikDebug o elígelo como activador en LiveContainer")
+            matched += 1
         }
-        showToast(text, seconds: 3.5)
+        coverVersion += 1
+        showToast(tr("MeloNX: %ld de %ld juegos reconocidos", matched, switchGames.count), seconds: 4)
+    }
+
+    /// Pide a MeloNX su lista de juegos (solo con MeloNX instalado aparte: LiveContainer no la devuelve).
+    private func requestMeloNXLibrary() {
+        openExternal(MeloNXLibrary.requestURL, failure: tr("No se pudo abrir %@. ¿Está instalado?", Emulator.melonx.name))
     }
 
     private func showPendingReturnMessage() {
@@ -1952,7 +2005,7 @@ struct HomeView: View {
             showToast(tr("Vuelve a escanear la carpeta para abrir este juego en %@", emulator.name), seconds: 4)
             return
         }
-        let link: String = emulator.gameLink(fileName: file, title: game.name)
+        let link: String = emulator.gameLink(fileName: file, title: game.name, override: gameMeta[game.id]?.emulatorGameID)
         switch EmulatorStore.location(emulator, installMethod: installMethodRaw) {
         case .liveContainer:
             let folder: String = EmulatorStore.lcFolder(emulator)
@@ -2052,6 +2105,11 @@ struct HomeView: View {
             setLibrary(kept + found)
             if !silent {
                 showToast(tr("%@: %ld juegos", emulator.name, found.count), seconds: 3)
+                // MeloNX instalado aparte: se le pide su lista para reconocer títulos y carátulas.
+                let native: Bool = EmulatorStore.location(emulator, installMethod: installMethodRaw) == .native
+                if emulator == .melonx && native && !found.isEmpty {
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 1.2) { requestMeloNXLibrary() }
+                }
             }
         }
     }
@@ -3097,6 +3155,11 @@ struct HomeView: View {
             items.append(SettingItem(id: key + "Bundle", title: tr("Bundle ID"), subtitle: EmulatorStore.bundleID(emulator), symbol: "number", tint: SettingTint.blue, control: .symbol("pencil"), action: {
                 activeEmulator = emulator
                 dialog = .emulatorBundle
+            }))
+        }
+        if emulator == .melonx && location == .native {
+            items.append(SettingItem(id: key + "Library", title: tr("Leer biblioteca de MeloNX"), subtitle: tr("Reconoce títulos y carátulas"), symbol: "books.vertical.fill", tint: SettingTint.blue, control: .symbol("arrow.up.forward"), action: {
+                requestMeloNXLibrary()
             }))
         }
         items.append(SettingItem(id: key + "Version", title: tr("Versión"), subtitle: emulatorVersionSubtitle(emulator), symbol: "arrow.triangle.2.circlepath", tint: SettingTint.blue, control: emulatorVersionControl(emulator), action: {

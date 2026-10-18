@@ -213,6 +213,8 @@ struct GameMeta: Codable, Equatable {
     var bundleID: String?
     /// Script de JIT con TXM: "auto", "universal", "legacy" o "none" (nil = automático).
     var jitScript: String?
+    /// Cómo lo llama su emulador: Title ID o título exacto (MeloNX).
+    var emulatorGameID: String?
 }
 
 enum GameMetaStore {
