@@ -60,6 +60,7 @@ enum BuiltInJIT {
 
     /// Todo el trabajo de StikJIT va en una sola cola serie (así lo pide su documentación).
     private static let queue = DispatchQueue(label: "omnistation.builtin-jit", qos: .userInitiated)
+    private static let lookupQueue = DispatchQueue(label: "omnistation.builtin-jit.lookup", qos: .userInitiated)
 
     /// PID de la última app abierta con JIT, por Bundle ID.
     private static let pidsKey = "builtinJITPids"
@@ -201,6 +202,78 @@ enum BuiltInJIT {
         return choice.resolved(appName: name)
     }
 
+    // MARK: Abrir el juego y después dar el JIT
+
+    /// Apps con una sesión de JIT en marcha (con TXM el script espera a que el juego arranque).
+    private static var activeSessions: Set<String> = []
+    private static let sessionLock = NSLock()
+
+    static func isSessionActive(for bundleID: String) -> Bool {
+        sessionLock.lock()
+        defer { sessionLock.unlock() }
+        return activeSessions.contains(bundleID)
+    }
+
+    private static func setSession(_ bundleID: String, active: Bool) {
+        sessionLock.lock()
+        if active { activeSessions.insert(bundleID) } else { activeSessions.remove(bundleID) }
+        sessionLock.unlock()
+    }
+
+    /// Para emuladores que esperan al JIT por su cuenta (MeloNX): la app ya se ha abierto con el
+    /// enlace del juego; aquí se busca su proceso y se le activa el JIT sin relanzarla.
+    static func attachWhenRunning(bundleID: String,
+                                  appName: String,
+                                  script choice: JITScriptChoice,
+                                  timeout: TimeInterval = 20,
+                                  completion: @escaping (Result<Int32, Error>) -> Void) {
+        let pairing: URL = PairingFile.url
+        let paths: DDIPaths = ddiPaths
+        let force: Bool = forceScript
+        let keepAlive = JITKeepAlive()
+        setSession(bundleID, active: true)
+        queue.async {
+            let outcome: Result<Int32, Error>
+            do {
+                let readiness = StikJIT.prepareDevice(pairingFile: pairing, paths: paths)
+                var txm: Bool? = nil
+                switch readiness {
+                case .ready(let state): txm = state.isTXMPresent
+                case .unreachable(let reason), .preparationFailed(let reason):
+                    throw StikJITError.deviceNotReady(reason)
+                }
+                let session = ExternalJITSession(pairingFilePath: pairing.path)
+                guard let path = try session.bundlePath(of: bundleID) else {
+                    throw StikJITError.device(code: -1, subCode: 0, message: "\(bundleID) is not installed")
+                }
+                let pid: Int32 = try waitForProcess(session: session, bundlePath: path, timeout: timeout)
+                var script: StikJIT.Script? = nil
+                if force || txm != false {
+                    script = choice.resolved(appName: appName)
+                }
+                remember(pid: pid, for: bundleID)
+                try session.attachJIT(pid: pid, script: script) { _ in }
+                outcome = .success(pid)
+            } catch {
+                outcome = .failure(error)
+            }
+            setSession(bundleID, active: false)
+            DispatchQueue.main.async {
+                keepAlive.invalidate()
+                completion(outcome)
+            }
+        }
+    }
+
+    private static func waitForProcess(session: ExternalJITSession, bundlePath: String, timeout: TimeInterval) throws -> Int32 {
+        let deadline: Date = Date().addingTimeInterval(timeout)
+        while Date() < deadline {
+            if let pid = try? session.runningPID(bundlePath: bundlePath) { return pid }
+            Thread.sleep(forTimeInterval: 0.5)
+        }
+        throw StikJITError.device(code: -1, subCode: 0, message: "The app did not open in time")
+    }
+
     // MARK: Apps instaladas
 
     static func debuggableApps(completion: @escaping (Result<[DebuggableApp], Error>) -> Void) {
@@ -220,12 +293,17 @@ enum BuiltInJIT {
 
     /// ¿La última app que se abrió con JIT sigue abierta? (entonces conserva el JIT).
     static func isStillRunningWithJIT(bundleID: String, completion: @escaping (Bool) -> Void) {
+        if isSessionActive(for: bundleID) {
+            completion(true)
+            return
+        }
         guard let pid = rememberedPID(for: bundleID) else {
             completion(false)
             return
         }
         let pairing: URL = PairingFile.url
-        queue.async {
+        // Cola aparte: la principal puede estar ocupada esperando a que arranque un juego.
+        lookupQueue.async {
             let running: Bool = (try? ExternalJITSession(pairingFilePath: pairing.path).isRunning(pid: pid)) ?? false
             DispatchQueue.main.async { completion(running) }
         }

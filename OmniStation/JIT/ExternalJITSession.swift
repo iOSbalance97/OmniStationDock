@@ -78,6 +78,32 @@ final class ExternalJITSession {
         return pid
     }
 
+    /// Activa el JIT en una app que ya está abierta (por su PID).
+    func attachJIT(pid: Int32,
+                   script: StikJIT.Script?,
+                   progress: @escaping (String) -> Void) throws {
+        let tunnel = try makeTunnel()
+        defer { tunnel.free() }
+
+        let session = try connectDebugSession(over: tunnel)
+        defer { session.free() }
+
+        guard let debugProxy = session.debugProxy else { throw StikJITError.debugProxyUnavailable }
+
+        debug_proxy_send_ack(debugProxy)
+        debug_proxy_send_ack(debugProxy)
+        _ = try? sendCommand("QStartNoAckMode", over: debugProxy)
+        debug_proxy_set_ack_mode(debugProxy, 0)
+
+        if let script {
+            try ScriptRunner(targetPID: pid, debugProxy: debugProxy, script: script, progress: progress).run()
+        } else {
+            let hexPID: String = String(UInt32(bitPattern: pid), radix: 16)
+            _ = try sendCommand("vAttach;" + hexPID, over: debugProxy)
+            _ = try? sendCommand("D", over: debugProxy)
+        }
+    }
+
     private func launchSuspended(bundleID: String, remoteServer: OpaquePointer) throws -> Int32 {
         var processControl: OpaquePointer?
         try IdeviceFFI.check("failed to open process control") {
@@ -162,6 +188,77 @@ final class ExternalJITSession {
     }
 
     // MARK: Procesos en marcha
+
+    /// Carpeta de la app instalada ("…/<UUID>/Nombre.app"), para reconocer su proceso.
+    func bundlePath(of bundleID: String) throws -> String? {
+        let tunnel = try makeTunnel()
+        defer { tunnel.free() }
+
+        var client: OpaquePointer?
+        try IdeviceFFI.check("failed to connect to installation proxy") {
+            installation_proxy_connect_rsd(tunnel.adapter, tunnel.handshake, &client)
+        }
+        guard let client else { throw StikJITError.debugProxyUnavailable }
+        defer { installation_proxy_client_free(client) }
+
+        var rawApps: UnsafeMutableRawPointer?
+        var count: Int = 0
+        try IdeviceFFI.check("failed to fetch installed apps") {
+            installation_proxy_get_apps(client, nil, nil, 0, &rawApps, &count)
+        }
+        guard let rawApps, count > 0 else { return nil }
+
+        let apps = rawApps.assumingMemoryBound(to: plist_t?.self)
+        defer {
+            for index in 0..<count {
+                plist_free(apps[index])
+            }
+            idevice_data_free(rawApps.assumingMemoryBound(to: UInt8.self),
+                              UInt(count * MemoryLayout<plist_t?>.stride))
+        }
+
+        for index in 0..<count {
+            guard let dictionary = Self.dictionary(from: apps[index]),
+                  dictionary["CFBundleIdentifier"] as? String == bundleID else { continue }
+            return dictionary["Path"] as? String
+        }
+        return nil
+    }
+
+    /// PID de la app abierta cuya carpeta es `bundlePath` (nil si no está abierta).
+    func runningPID(bundlePath: String) throws -> Int32? {
+        // Se compara el final de la ruta ("<UUID>/Nombre.app"): es único y no depende de /private.
+        let parts: [String] = bundlePath.split(separator: "/").map(String.init)
+        guard parts.count >= 2 else { return nil }
+        let suffix: String = parts.suffix(2).joined(separator: "/")
+
+        let tunnel = try makeTunnel()
+        defer { tunnel.free() }
+
+        var service: OpaquePointer?
+        try IdeviceFFI.check("failed to connect to app service") {
+            app_service_connect_rsd(tunnel.adapter, tunnel.handshake, &service)
+        }
+        guard let service else { throw StikJITError.debugProxyUnavailable }
+        defer { app_service_free(service) }
+
+        var processes: UnsafeMutablePointer<ProcessTokenC>?
+        var count: UInt = 0
+        try IdeviceFFI.check("failed to list processes") {
+            app_service_list_processes(service, &processes, &count)
+        }
+        guard let processes else { return nil }
+        defer { app_service_free_process_list(processes, count) }
+
+        for index in 0..<Int(count) {
+            guard let raw = processes[index].executable_url else { continue }
+            let path: String = String(cString: raw).removingPercentEncoding ?? String(cString: raw)
+            if path.contains(suffix + "/") {
+                return Int32(bitPattern: processes[index].pid)
+            }
+        }
+        return nil
+    }
 
     /// ¿Sigue abierto el proceso con este PID?
     func isRunning(pid: Int32) throws -> Bool {
