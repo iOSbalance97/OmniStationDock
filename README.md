@@ -1,4 +1,4 @@
-# OmniStation Dock — versión 0.3.1
+# OmniStation Dock — versión 0.3.2
 
 Lanzador de juegos y emuladores para iPhone con interfaz espacial/Liquid Glass, control completo con mando y **Modo Dock** (carrusel en horizontal, también al conectar HDMI).
 
@@ -44,8 +44,14 @@ La primera vez (y en Ajustes → Juegos → Emuladores) la app pregunta qué emu
 - **Con la app StikDebug**: OmniStation abre el juego y el emulador pide el JIT a StikDebug por su cuenta.
 - **Versiones nuevas** (cada emulador por separado, como mucho cada 6 h): ARMSX2 desde GitHub (solo las *nightly* traen IPA de iOS) y MeloNX desde su servidor Forgejo. La IPA se manda a LiveContainer o a SideStore/AltStore, que la instalan tras confirmar.
 
+## Carátulas automáticas
+Para los juegos sin carátula, OmniStation busca la suya en la colección pública **libretro-thumbnails** (PS1, PS2, PSP, GB/GBC/GBA, NDS, 3DS, NES, SNES, N64, GameCube, Wii, Mega Drive, Master System, Game Gear, Dreamcast y Saturn) y la descarga sola, emparejando por nombre y prefiriendo la región de tu idioma. En Switch usa los iconos de MeloNX. Las carátulas que elijas a mano nunca se sustituyen. Se activa o desactiva en Ajustes → Juegos → Carátulas automáticas.
+
+## Cerrar al abrir un juego
+Con *Cerrar al abrir un juego* (Ajustes → General, activado por defecto), OmniStation se cierra en cuanto el juego está abierto (con el JIT integrado, cuando ha terminado de dárselo), para que no se quede detrás.
+
 ## Indicador de JIT
-En horizontal, un punto verde o rojo indica si OmniStation está corriendo con JIT ahora mismo (lo mismo que *Estado JIT* en Ajustes) (en el Modo Dock, entre la batería y la hora; sin Dock, a la izquierda de las pestañas). Al tocarlo explica el motivo.
+En horizontal, un punto verde o rojo indica si el JIT funciona ahora mismo: en LiveContainer, si OmniStation corre con JIT (lo mismo que *Estado JIT*); con SideStore y el JIT integrado, si está listo para dárselo a los juegos (en el Modo Dock, entre la batería y la hora; sin Dock, a la izquierda de las pestañas). Al tocarlo explica el motivo.
 
 ## Fondo animado predeterminado
 Crea la carpeta `OmniStation/Resources/Background/` y pon dentro el vídeo con el nombre **`DefaultBackground.mp4`** (también vale `.mov` o `.m4v`). XcodeGen lo incluye solo en la app. Recomendado: bucle corto (10–30 s), H.264 o HEVC, 1080p o menos, menos de ~20 MB (GitHub no admite archivos de más de 100 MB). El audio se silencia. Si no hay vídeo, la opción aparece como «Animado predeterminado (no incluido)» y se usa el original estático.
@@ -73,6 +79,6 @@ El workflow `.github/workflows/ios-build.yml` compila una IPA sin firmar y la pu
 Orbitron y Space Grotesk (Google Fonts), licencia SIL Open Font License 1.1, en `OmniStation/Resources/Fonts`.
 
 ## Versión
-- Marketing version: `0.3.1`
-- Build: `31`
+- Marketing version: `0.3.2`
+- Build: `32`
 - Bundle ID: `com.omnistation.dock`
