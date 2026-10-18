@@ -1,4 +1,4 @@
-# OmniStation Dock — versión 0.3.0
+# OmniStation Dock — versión 0.3.1
 
 Lanzador de juegos y emuladores para iPhone con interfaz espacial/Liquid Glass, control completo con mando y **Modo Dock** (carrusel en horizontal, también al conectar HDMI).
 
@@ -38,14 +38,14 @@ La primera vez (y en Ajustes → Juegos → Emuladores) la app pregunta qué emu
 | ARMSX2 | PS2 | `armsx2://launch?game=<archivo>` | `com.armsx2.ios.app` |
 | MeloNX | Switch | `melonx://game?id=<Title ID>` o `?name=<título>` | `com.stossy11.MeloNX.app` |
 
-- **MeloNX** busca el juego por su Title ID si el nombre del archivo lo lleva entre corchetes (`Juego [0100XXXXXXXXXXXX].nsp`); si no, por el título: renombra el juego en OmniStation con el mismo título que muestra MeloNX.
+- **MeloNX** abre un juego por su Title ID o por su título exacto (con tildes y todo). OmniStation usa, por orden: lo que pongas en *Nombre en MeloNX* (opciones del juego), el Title ID si el archivo lo lleva entre corchetes (`Juego [0100XXXXXXXXXXXX].nsp`) o el nombre del juego. Con MeloNX instalado aparte, *Leer biblioteca de MeloNX* (y al vincular su carpeta) le pide su lista de juegos (`melonx://gameInfo`), empareja cada archivo con su título aunque se escriba distinto (por ejemplo «Super Mario Wonder» con «Super Mario Bros. Wonder») y usa sus iconos como carátulas. Dentro de LiveContainer MeloNX no puede devolver esa lista: usa *Nombre en MeloNX* si un juego no arranca.
 - **En LiveContainer**: un toque abre el emulador con JIT (pidiéndolo como hace LiveContainer) y arranca el juego.
 - **SideStore/AltStore + JIT integrado**: MeloNX se abre con el juego y espera al JIT; OmniStation se lo da en segundo plano y el juego arranca solo. ARMSX2 no espera al JIT: la primera vez se abre con JIT y hay que volver y pulsar el juego otra vez (mientras siga abierto, arranca al momento).
 - **Con la app StikDebug**: OmniStation abre el juego y el emulador pide el JIT a StikDebug por su cuenta.
 - **Versiones nuevas** (cada emulador por separado, como mucho cada 6 h): ARMSX2 desde GitHub (solo las *nightly* traen IPA de iOS) y MeloNX desde su servidor Forgejo. La IPA se manda a LiveContainer o a SideStore/AltStore, que la instalan tras confirmar.
 
 ## Indicador de JIT
-En horizontal, un punto verde o rojo indica si los juegos se pueden abrir con JIT ahora mismo (en el Modo Dock, entre la batería y la hora; sin Dock, a la izquierda de las pestañas). Al tocarlo explica el motivo.
+En horizontal, un punto verde o rojo indica si OmniStation está corriendo con JIT ahora mismo (lo mismo que *Estado JIT* en Ajustes) (en el Modo Dock, entre la batería y la hora; sin Dock, a la izquierda de las pestañas). Al tocarlo explica el motivo.
 
 ## Fondo animado predeterminado
 Crea la carpeta `OmniStation/Resources/Background/` y pon dentro el vídeo con el nombre **`DefaultBackground.mp4`** (también vale `.mov` o `.m4v`). XcodeGen lo incluye solo en la app. Recomendado: bucle corto (10–30 s), H.264 o HEVC, 1080p o menos, menos de ~20 MB (GitHub no admite archivos de más de 100 MB). El audio se silencia. Si no hay vídeo, la opción aparece como «Animado predeterminado (no incluido)» y se usa el original estático.
@@ -73,6 +73,6 @@ El workflow `.github/workflows/ios-build.yml` compila una IPA sin firmar y la pu
 Orbitron y Space Grotesk (Google Fonts), licencia SIL Open Font License 1.1, en `OmniStation/Resources/Fonts`.
 
 ## Versión
-- Marketing version: `0.3.0`
-- Build: `30`
+- Marketing version: `0.3.1`
+- Build: `31`
 - Bundle ID: `com.omnistation.dock`
