@@ -78,7 +78,34 @@ final class OmniStationJITRequestHandler: NSObject, NSExtensionRequestHandling {
             let preparation: (StikJIT.PreparationStage) -> Void = { stage in
                 channel.log(Self.describe(stage))
             }
-            if request.requiresCoreHandshake {
+            if request.requiresCoreHandshake && request.scriptName == "universal" {
+                // MeloNX integrado: script universal de StikDebug. El depurador sigue enganchado
+                // hasta que el núcleo pide soltarlo (comando 0).
+                guard let resource = Bundle.main.url(forResource: "universal", withExtension: "js") else {
+                    throw HelperError.invalidRequest("Falta el script universal de JIT.")
+                }
+                let source: String = try String(contentsOf: resource, encoding: .utf8)
+                let scriptURL: URL = folder.appendingPathComponent(UUID().uuidString + ".js")
+                try source.write(to: scriptURL, atomically: true, encoding: .utf8)
+                temporaryFiles.append(scriptURL)
+                var announced: Bool = false
+                try StikJIT.enableJIT(
+                    targetPID: request.targetPID,
+                    pairingFile: pairingURL,
+                    ddiPaths: ddiPaths,
+                    configuration: configuration,
+                    script: .custom(scriptURL),
+                    forceScript: true,
+                    preparationProgress: preparation,
+                    progress: { message in
+                        channel.log(message)
+                        if !announced && message.hasPrefix("attach_response") {
+                            announced = true
+                            try? channel.send(event: "pid_attached", message: "Depurador enganchado a OmniStation.", targetPID: request.targetPID)
+                        }
+                    }
+                )
+            } else if request.requiresCoreHandshake {
                 guard let resource = Bundle.main.url(forResource: "armsx2-universal", withExtension: "js") else {
                     throw HelperError.invalidRequest("Falta el script de JIT del núcleo.")
                 }
@@ -148,6 +175,8 @@ private struct HelperRequest {
     let pairingData: Data
     let probeNonce: UInt64
     let requiresCoreHandshake: Bool
+    /// Script del depurador: «armsx2» (por defecto) o «universal» (MeloNX).
+    let scriptName: String
 
     init(data: Data) throws {
         guard let object = try JSONSerialization.jsonObject(with: data) as? [String: Any],
@@ -175,6 +204,7 @@ private struct HelperRequest {
         pairingData = pairing
         probeNonce = nonce.uint64Value
         requiresCoreHandshake = object["requiresCoreHandshake"] as? Bool ?? false
+        scriptName = object["script"] as? String ?? "armsx2"
     }
 }
 
