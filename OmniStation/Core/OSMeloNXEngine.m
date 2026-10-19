@@ -463,34 +463,30 @@ static int32_t OSNXCallWithArguments(NSArray<NSString *> *arguments, int32_t (^b
 
 // MARK: - Mando físico → núcleo
 
+/// Jugador 1 de OmniStation. El núcleo ve siempre este mismo mando; el mando físico que esté
+/// conectado se engancha y se desengancha de él, así que se puede cambiar de mando (o volver a
+/// conectarlo) en mitad de la partida sin salir.
 @interface OSNXPad : NSObject
-@property (nonatomic, strong) GCController *controller;
+@property (nonatomic, strong, nullable) GCController *controller;
 @property (nonatomic, assign) const OSNXCoreAPI *api;
 @property (nonatomic, copy) NSString *identifier;
 @property (nonatomic, assign) BOOL suspended;
-- (instancetype)initWithController:(GCController *)controller api:(const OSNXCoreAPI *)api;
-- (void *)pointer;
+- (instancetype)initWithAPI:(const OSNXCoreAPI *)api;
+- (void)bindController:(nullable GCController *)controller;
 - (void)releaseAll;
 - (void)detach;
 @end
 
 @implementation OSNXPad
 
-- (instancetype)initWithController:(GCController *)controller api:(const OSNXCoreAPI *)api {
+- (instancetype)initWithAPI:(const OSNXCoreAPI *)api {
     self = [super init];
     if (self) {
-        _controller = controller;
         _api = api;
         _identifier = [NSString stringWithFormat:@"%llX", (unsigned long long)(uintptr_t)(__bridge void *)self];
-        NSString *name = controller.vendorName.length ? controller.vendorName : @"OmniStation Controller";
-        api->attachGamepad(name.UTF8String, (__bridge void *)self);
-        [self bind];
+        api->attachGamepad("OmniStation Controller", (__bridge void *)self);
     }
     return self;
-}
-
-- (void *)pointer {
-    return (__bridge void *)self;
 }
 
 - (void)send:(OSNXButton)button pressed:(BOOL)pressed {
@@ -498,15 +494,24 @@ static int32_t OSNXCallWithArguments(NSArray<NSString *> *arguments, int32_t (^b
     self.api->setButtonState((__bridge void *)self, button, pressed ? 1 : 0);
 }
 
-- (void)bindButton:(GCControllerButtonInput *)input to:(OSNXButton)button {
+- (void)setButton:(GCControllerButtonInput *)input to:(OSNXButton)button enabled:(BOOL)enabled {
     if (input == nil) return;
+    if (!enabled) {
+        input.valueChangedHandler = nil;
+        return;
+    }
     __weak OSNXPad *weakSelf = self;
     input.valueChangedHandler = ^(GCControllerButtonInput *element, float value, BOOL pressed) {
         [weakSelf send:button pressed:pressed];
     };
 }
 
-- (void)bindStick:(GCControllerDirectionPad *)input stick:(int32_t)stick {
+- (void)setStick:(GCControllerDirectionPad *)input stick:(int32_t)stick enabled:(BOOL)enabled {
+    if (input == nil) return;
+    if (!enabled) {
+        input.valueChangedHandler = nil;
+        return;
+    }
     __weak OSNXPad *weakSelf = self;
     input.valueChangedHandler = ^(GCControllerDirectionPad *element, float x, float y) {
         OSNXPad *strongSelf = weakSelf;
@@ -516,31 +521,38 @@ static int32_t OSNXCallWithArguments(NSArray<NSString *> *arguments, int32_t (^b
     };
 }
 
-- (void)bind {
-    GCExtendedGamepad *pad = self.controller.extendedGamepad;
+- (void)wire:(GCExtendedGamepad *)pad enabled:(BOOL)enabled {
     if (pad == nil) return;
-    [self bindButton:pad.buttonA to:OSNXButtonA];
-    [self bindButton:pad.buttonB to:OSNXButtonB];
-    [self bindButton:pad.buttonX to:OSNXButtonX];
-    [self bindButton:pad.buttonY to:OSNXButtonY];
-    [self bindButton:pad.dpad.up to:OSNXButtonDPadUp];
-    [self bindButton:pad.dpad.down to:OSNXButtonDPadDown];
-    [self bindButton:pad.dpad.left to:OSNXButtonDPadLeft];
-    [self bindButton:pad.dpad.right to:OSNXButtonDPadRight];
-    [self bindButton:pad.leftShoulder to:OSNXButtonLeftShoulder];
-    [self bindButton:pad.rightShoulder to:OSNXButtonRightShoulder];
-    [self bindButton:pad.leftTrigger to:OSNXButtonLeftTrigger];
-    [self bindButton:pad.rightTrigger to:OSNXButtonRightTrigger];
-    [self bindButton:pad.leftThumbstickButton to:OSNXButtonLeftStick];
-    [self bindButton:pad.rightThumbstickButton to:OSNXButtonRightStick];
-    [self bindButton:pad.buttonMenu to:OSNXButtonStart];
-    [self bindButton:pad.buttonOptions to:OSNXButtonBack];
-    [self bindStick:pad.leftThumbstick stick:1];
-    [self bindStick:pad.rightThumbstick stick:2];
-    if (pad.buttonHome != nil) {
+    [self setButton:pad.buttonA to:OSNXButtonA enabled:enabled];
+    [self setButton:pad.buttonB to:OSNXButtonB enabled:enabled];
+    [self setButton:pad.buttonX to:OSNXButtonX enabled:enabled];
+    [self setButton:pad.buttonY to:OSNXButtonY enabled:enabled];
+    [self setButton:pad.dpad.up to:OSNXButtonDPadUp enabled:enabled];
+    [self setButton:pad.dpad.down to:OSNXButtonDPadDown enabled:enabled];
+    [self setButton:pad.dpad.left to:OSNXButtonDPadLeft enabled:enabled];
+    [self setButton:pad.dpad.right to:OSNXButtonDPadRight enabled:enabled];
+    [self setButton:pad.leftShoulder to:OSNXButtonLeftShoulder enabled:enabled];
+    [self setButton:pad.rightShoulder to:OSNXButtonRightShoulder enabled:enabled];
+    [self setButton:pad.leftTrigger to:OSNXButtonLeftTrigger enabled:enabled];
+    [self setButton:pad.rightTrigger to:OSNXButtonRightTrigger enabled:enabled];
+    [self setButton:pad.leftThumbstickButton to:OSNXButtonLeftStick enabled:enabled];
+    [self setButton:pad.rightThumbstickButton to:OSNXButtonRightStick enabled:enabled];
+    [self setButton:pad.buttonMenu to:OSNXButtonStart enabled:enabled];
+    [self setButton:pad.buttonOptions to:OSNXButtonBack enabled:enabled];
+    [self setStick:pad.leftThumbstick stick:1 enabled:enabled];
+    [self setStick:pad.rightThumbstick stick:2 enabled:enabled];
+    if (enabled && pad.buttonHome != nil) {
         // Home abre el menú de OmniStation, no el de iOS.
         pad.buttonHome.preferredSystemGestureState = GCSystemGestureStateDisabled;
     }
+}
+
+- (void)bindController:(nullable GCController *)controller {
+    if (controller == self.controller) return;
+    [self wire:self.controller.extendedGamepad enabled:NO];
+    [self releaseAll];
+    self.controller = controller;
+    [self wire:controller.extendedGamepad enabled:YES];
 }
 
 - (void)releaseAll {
@@ -552,14 +564,8 @@ static int32_t OSNXCallWithArguments(NSArray<NSString *> *arguments, int32_t (^b
 }
 
 - (void)detach {
-    GCExtendedGamepad *pad = self.controller.extendedGamepad;
-    for (GCControllerElement *element in pad.allElements) {
-        if ([element isKindOfClass:GCControllerButtonInput.class]) {
-            ((GCControllerButtonInput *)element).valueChangedHandler = nil;
-        } else if ([element isKindOfClass:GCControllerDirectionPad.class]) {
-            ((GCControllerDirectionPad *)element).valueChangedHandler = nil;
-        }
-    }
+    [self wire:self.controller.extendedGamepad enabled:NO];
+    self.controller = nil;
     self.api->detachGamepad((__bridge void *)self);
 }
 
@@ -655,6 +661,7 @@ static int32_t OSNXCallWithArguments(NSArray<NSString *> *arguments, int32_t (^b
 @property (nonatomic, copy, nullable) void (^quitRequested)(void);
 - (void)showStatus:(NSString *)message sticky:(BOOL)sticky;
 - (void)hideStatus;
+- (void)openMenu;
 @end
 
 @implementation OSNXGameViewController {
@@ -1054,7 +1061,7 @@ static int32_t OSNXCallWithArguments(NSArray<NSString *> *arguments, int32_t (^b
     api.initialize = (void (*)(void))[self symbol:core name:"initialize" missing:missing];
     api.mainRyujinx = (int32_t (*)(int32_t, char **))[self symbol:core name:"main_ryujinx_sdl" missing:missing];
     api.setNativeWindow = (void (*)(void *))[self symbol:core name:"set_native_window" missing:missing];
-    api.pauseEmulation = (void (*)(bool))[self symbol:core name:"pause_emulation" missing:missing];
+    api.pauseEmulation = (void (*)(bool))dlsym(core, "pause_emulation");  // opcional (no en MeloNX 2.7)
     api.stopEmulation = (void (*)(void))[self symbol:core name:"stop_emulation" missing:missing];
     api.installFirmware = (char *(*)(const char *))[self symbol:core name:"install_firmware" missing:missing];
     api.installedFirmwareVersion = (char *(*)(void))[self symbol:core name:"installed_firmware_version" missing:missing];
@@ -1063,7 +1070,7 @@ static int32_t OSNXCallWithArguments(NSArray<NSString *> *arguments, int32_t (^b
     api.detachGamepad = (void (*)(void *))[self symbol:core name:"detach_gamepad" missing:missing];
     api.setButtonState = (void (*)(void *, int32_t, uint8_t))[self symbol:core name:"set_gamepad_button_state" missing:missing];
     api.setStickAxis = (void (*)(void *, int32_t, float, float))[self symbol:core name:"set_gamepad_stick_axis" missing:missing];
-    api.setGamepadConfiguration = (void (*)(int32_t, char **))[self symbol:core name:"set_gamepad_configuration" missing:missing];
+    api.setGamepadConfiguration = (void (*)(int32_t, char **))dlsym(core, "set_gamepad_configuration");  // opcional
     api.touchBegan = (void (*)(float, float, int32_t))[self symbol:core name:"touch_began" missing:missing];
     api.touchMoved = (void (*)(float, float, int32_t))[self symbol:core name:"touch_moved" missing:missing];
     api.touchEnded = (void (*)(int32_t))[self symbol:core name:"touch_ended" missing:missing];
@@ -1272,25 +1279,20 @@ static int32_t OSNXCallWithArguments(NSArray<NSString *> *arguments, int32_t (^b
     return controller;
 }
 
-- (void)attachConnectedPads {
+/// Mando físico que debe llevar al jugador 1: el actual de iOS o el primero conectado.
+- (nullable GCController *)preferredController {
+    GCController *current = GCController.current;
+    if (current.extendedGamepad != nil) return current;
     for (GCController *controller in GCController.controllers) {
-        if (controller.extendedGamepad == nil) continue;
-        BOOL known = NO;
-        for (OSNXPad *pad in self.pads) {
-            if (pad.controller == controller) known = YES;
-        }
-        if (!known) [self.pads addObject:[[OSNXPad alloc] initWithController:controller api:&_api]];
+        if (controller.extendedGamepad != nil) return controller;
     }
+    return nil;
 }
 
-- (void)reloadPads {
-    NSArray<NSString *> *arguments = [self inputArguments];
-    if (arguments.count == 0) return;
-    const OSNXCoreAPI *api = &_api;
-    OSNXCallWithArguments(arguments, ^int32_t(int32_t argc, char **argv) {
-        api->setGamepadConfiguration(argc, argv);
-        return 0;
-    });
+/// Crea el jugador 1 (una vez por partida) y le engancha el mando conectado.
+- (void)preparePlayerPad {
+    if (self.pads.count == 0) [self.pads addObject:[[OSNXPad alloc] initWithAPI:&_api]];
+    [self.pads.firstObject bindController:[self preferredController]];
 }
 
 - (void)watchControllersAndApp {
@@ -1298,9 +1300,28 @@ static int32_t OSNXCallWithArguments(NSArray<NSString *> *arguments, int32_t (^b
     NSNotificationCenter *center = NSNotificationCenter.defaultCenter;
     [_observers addObject:[center addObserverForName:GCControllerDidConnectNotification object:nil queue:NSOperationQueue.mainQueue usingBlock:^(NSNotification *note) {
         OSMeloNXEngine *strongSelf = weakSelf;
-        if (!strongSelf || !strongSelf.busy) return;
-        [strongSelf attachConnectedPads];
-        [strongSelf reloadPads];
+        OSNXPad *player = strongSelf.pads.firstObject;
+        GCController *connected = [note.object isKindOfClass:GCController.class] ? (GCController *)note.object : nil;
+        if (!strongSelf || !strongSelf.busy || player == nil || connected.extendedGamepad == nil) return;
+        // Sin mando (o tras una desconexión), el que se conecta pasa a ser el jugador 1.
+        if (player.controller == nil) {
+            [player bindController:connected];
+            [strongSelf.gameController showStatus:OSNXText(strongSelf.gameController.language, @"Mando conectado", @"Controller connected") sticky:NO];
+        }
+    }]];
+    [_observers addObject:[center addObserverForName:GCControllerDidDisconnectNotification object:nil queue:NSOperationQueue.mainQueue usingBlock:^(NSNotification *note) {
+        OSMeloNXEngine *strongSelf = weakSelf;
+        OSNXPad *player = strongSelf.pads.firstObject;
+        if (!strongSelf || !strongSelf.busy || player == nil || note.object != player.controller) return;
+        [player bindController:nil];
+        GCController *other = [strongSelf preferredController];
+        if (other != nil && other != note.object) {
+            [player bindController:other];
+            return;
+        }
+        // Sin mando: menú abierto (y el juego en pausa si esta versión de MeloNX lo permite).
+        [strongSelf.gameController openMenu];
+        [strongSelf.gameController showStatus:OSNXText(strongSelf.gameController.language, @"Mando desconectado: vuelve a conectarlo para seguir", @"Controller disconnected: reconnect it to continue") sticky:YES];
     }]];
     [_observers addObject:[center addObserverForName:UIApplicationWillResignActiveNotification object:nil queue:NSOperationQueue.mainQueue usingBlock:^(NSNotification *note) {
         OSMeloNXEngine *strongSelf = weakSelf;
@@ -1388,14 +1409,6 @@ static int32_t OSNXCallWithArguments(NSArray<NSString *> *arguments, int32_t (^b
         completion(NO, OSNXText(language, @"No se puede leer el archivo del juego.", @"The game file cannot be read."));
         return;
     }
-    BOOL hasPad = NO;
-    for (GCController *controller in GCController.controllers) {
-        if (controller.extendedGamepad != nil) hasPad = YES;
-    }
-    if (!hasPad) {
-        completion(NO, OSNXText(language, @"Conecta un mando para jugar a Switch.", @"Connect a controller to play Switch games."));
-        return;
-    }
     NSString *loadError = nil;
     if (![self loadRuntimeOnMain:&loadError]) {
         completion(NO, loadError ?: @"No se pudo cargar MeloNX.");
@@ -1444,7 +1457,7 @@ static int32_t OSNXCallWithArguments(NSArray<NSString *> *arguments, int32_t (^b
                     pad.suspended = open;
                     if (open) [pad releaseAll];
                 }
-                strongSelf->_api.pauseEmulation(open);
+                if (strongSelf->_api.pauseEmulation) strongSelf->_api.pauseEmulation(open);
             };
             controller.quitRequested = ^{
                 OSMeloNXEngine *strongSelf = weakSelf;
@@ -1456,7 +1469,7 @@ static int32_t OSNXCallWithArguments(NSArray<NSString *> *arguments, int32_t (^b
             [controller.view layoutIfNeeded];
             self.gameController = controller;
             size = controller.metalView.bounds.size;
-            [self attachConnectedPads];
+            [self preparePlayerPad];
             [self watchControllersAndApp];
             CAMetalLayer *layer = (CAMetalLayer *)controller.metalView.layer;
             layer.drawableSize = CGSizeMake(size.width * layer.contentsScale, size.height * layer.contentsScale);
@@ -1474,7 +1487,10 @@ static int32_t OSNXCallWithArguments(NSArray<NSString *> *arguments, int32_t (^b
             };
             self->_api.registerCallback(@"exit-emulation", self->_exitCallback);
             self->_api.registerCallback(@"ran-first-frame", self->_firstFrameCallback);
-            [controller showStatus:OSNXText(language, @"Cargando el juego…", @"Loading the game…") sticky:YES];
+            BOOL noController = self.pads.firstObject.controller == nil;
+            NSString *loading = noController ? OSNXText(language, @"Cargando el juego… Conecta un mando para jugar.", @"Loading the game… Connect a controller to play.")
+                                             : OSNXText(language, @"Cargando el juego…", @"Loading the game…");
+            [controller showStatus:loading sticky:YES];
             presented = YES;
         });
         if (!presented || size.width < 1 || size.height < 1) {
