@@ -1,0 +1,104 @@
+name: Build ARMSX2 core (OmniStation)
+
+# Compila nuestro propio ARMSX2Core.framework y lo publica como release «armsx2-core» de este
+# repositorio. El workflow de la app lo descarga de ahí (no lo vuelve a compilar).
+# Tarda bastante (40-90 min de Mac): lánzalo solo cuando quieras un núcleo nuevo.
+on:
+  workflow_dispatch:
+    inputs:
+      lto:
+        description: "LTO en el núcleo de PCSX2 (como la app oficial de ARMSX2)"
+        type: boolean
+        default: true
+
+permissions:
+  contents: write
+
+concurrency:
+  group: armsx2-core
+  cancel-in-progress: false
+
+jobs:
+  core:
+    runs-on: macos-26
+    timeout-minutes: 180
+    env:
+      HOMEBREW_NO_AUTO_UPDATE: "1"
+      RUSTUP_TOOLCHAIN: "1.94.0"
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Read pinned ARMSX2 revision
+        id: source
+        run: |
+          python3 - <<'PY'
+          import json, os, re
+          from pathlib import Path
+          source = json.loads(Path('Cores/ARMSX2/source.json').read_text())
+          assert source['repository'] == 'https://github.com/ARMSX2/ARMSX2.git'
+          assert re.fullmatch('[0-9a-f]{40}', source['revision'])
+          with open(os.environ['GITHUB_OUTPUT'], 'a') as output:
+              print('revision=' + source['revision'], file=output)
+              print('release=' + source['release'], file=output)
+          PY
+
+      - name: Checkout ARMSX2
+        uses: actions/checkout@v4
+        with:
+          repository: ARMSX2/ARMSX2
+          ref: ${{ steps.source.outputs.revision }}
+          path: .native-sources/ARMSX2
+          submodules: recursive
+          persist-credentials: false
+
+      - name: Select Xcode
+        run: |
+          set -euo pipefail
+          sudo xcode-select -switch /Applications/Xcode.app
+          xcodebuild -version
+          python3 -m py_compile Cores/ARMSX2/*.py
+          bash -n Cores/ARMSX2/build_core.sh
+
+      - name: Install Rust (librashader)
+        run: |
+          set -euo pipefail
+          command -v rustup >/dev/null || brew install rustup
+          rustup toolchain install 1.94.0 --profile minimal
+          rustup default 1.94.0
+          rustup target add aarch64-apple-ios
+          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+          rustc --version
+
+      - name: Compile ARMSX2Core
+        run: bash Cores/ARMSX2/build_core.sh .native-sources/ARMSX2 "${{ inputs.lto && 'ON' || 'OFF' }}"
+
+      - name: Package core
+        run: |
+          set -euo pipefail
+          cd dist/armsx2
+          ditto -c -k --keepParent ARMSX2Core.framework ARMSX2Core-OmniStation.zip
+          test -s ARMSX2Core-OmniStation.zip
+          ls -l
+
+      - name: Publish release armsx2-core
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          gh release delete armsx2-core --repo "$GITHUB_REPOSITORY" --cleanup-tag --yes 2>/dev/null || true
+          gh release create armsx2-core --repo "$GITHUB_REPOSITORY" dist/armsx2/ARMSX2Core-OmniStation.zip dist/armsx2/identity.json \
+            --title "ARMSX2Core (OmniStation) ${{ steps.source.outputs.release }}" \
+            --notes "Núcleo de ARMSX2 ${{ steps.source.outputs.release }} compilado por OmniStation Dock (LTO: ${{ inputs.lto }}). Lo usa el workflow de la app." \
+            --prerelease
+
+      - name: Upload build logs
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: armsx2-core-logs
+          path: build/armsx2-core/*.log
+          if-no-files-found: ignore
+          retention-days: 7
