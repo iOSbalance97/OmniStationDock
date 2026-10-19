@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# Saca el «runtime» de MeloNX (núcleo Ryujinx compilado + MoltenVK, SDL2, FFmpeg y sus ayudantes)
+# Saca el «runtime» de MeloNX 2.7 (núcleo Ryujinx.Library + MoltenVK, SDL3, FFmpeg y BreakpointJIT)
 # de la IPA oficial y lo deja en <salida>/Frameworks con un MeloNXRuntime.json.
 #
 # MeloNX es AGPL-3.0 (https://melonx.org); Ryujinx, MIT. OmniStation solo lo empaqueta tal cual.
@@ -28,19 +28,19 @@ REQUIRED = os.environ.get('MELONX_REQUIRED', '') == '1'
 NM = os.environ.get('NM', 'nm')
 OTOOL = os.environ.get('OTOOL', 'otool')
 
-# Lo que OmniStation llama del núcleo (ver OSMeloNXEngine.m). Si falta alguno, no se empaqueta.
+# Lo que OmniStation llama del núcleo de MeloNX 2.7 (ver OSMeloNXEngine.m). Si falta alguno, no se empaqueta.
 REQUIRED_EXPORTS = [
-    '_initialize', '_main_ryujinx_sdl', '_set_native_window', '_stop_emulation',
+    '_initialize', '_main_ryujinx_sdl', '_set_native_window', '_stop_emulation', '_init_dualmapping',
     '_install_firmware', '_installed_firmware_version', '_free_firmware_version',
     '_attach_gamepad', '_detach_gamepad', '_set_gamepad_button_state', '_set_gamepad_stick_axis',
     '_touch_began', '_touch_moved', '_touch_ended', '_set_view_size',
 ]
-OPTIONAL_EXPORTS = ['_pause_emulation', '_set_gamepad_configuration',
-                    '_initialize-dualmapped', '_get_current_fps', '_set_gamepad_motion_axis',
-                    '_refresh_account_manager', '_get_game_info', '_free_game_info']
-# Ayudantes que el núcleo abre por su ruta relativa (DllImport).
-REQUIRED_HELPERS = ['RyujinxHelper.framework/RyujinxHelper', 'BreakpointJIT.framework/BreakpointJIT',
-                    'SDL2.framework/SDL2']
+OPTIONAL_EXPORTS = ['_toggle_pause_emulation', '_load_keyset', '_set_unbounded_present_target_fps',
+                    '_report_memory_pressure', '_set_gamepad_motion_axis', '_get_game_info', '_free_game_info']
+# Lo que OmniStation carga antes del núcleo (MeloNX 2.7: SDL3, MoltenVK y BreakpointJIT).
+REQUIRED_HELPERS = ['SDL3.framework/SDL3', 'BreakpointJIT.framework/BreakpointJIT', 'libMoltenVK.dylib']
+# Nombre del núcleo en MeloNX 2.7 (si cambia, se busca el que exporte main_ryujinx_sdl).
+CORE_NAME = 'Ryujinx.Library.dylib'
 
 
 class Failure(Exception):
@@ -136,8 +136,8 @@ def extract(ipa, destination):
         for name in members:
             relative = name[len(prefix):]
             top = relative.split('/', 1)[0]
-            # Las librerías de Swift ya están en iOS 17.
-            if top.startswith('libswift'):
+            # Las librerías de Swift ya están en iOS 17; las .a (estáticas) no sirven en la app.
+            if top.startswith('libswift') or relative.endswith('.a'):
                 continue
             target = destination / relative
             target.parent.mkdir(parents=True, exist_ok=True)
@@ -150,6 +150,9 @@ def extract(ipa, destination):
 
 
 def find_core(frameworks):
+    preferred = frameworks / CORE_NAME
+    if preferred.is_file() and '_main_ryujinx_sdl' in exports_of(preferred):
+        return preferred
     for path in sorted(frameworks.rglob('*')):
         if not path.is_file() or path.is_symlink() or not is_macho(path):
             continue
@@ -206,7 +209,7 @@ def main():
         top_level = sorted({f.split('/', 1)[0] for f in files})
         size = sum((output / 'Frameworks' / f).stat().st_size for f in files)
         manifest = {
-            'schema': 1,
+            'schema': 2,
             'version': tag,
             'app': app_name,
             'source': url,
