@@ -13,6 +13,10 @@
 //  4. prepare → request_jit_detach → la extensión se suelta → validate_jit → boot.
 #import "OSArmsx2Engine.h"
 #import "ARMSX2CoreABI.h"
+#import "OSExternalDisplay.h"
+#import "OSPerfHUD.h"
+
+#import <AVFoundation/AVFoundation.h>
 
 #import <UIKit/UIKit.h>
 #import <GameController/GameController.h>
@@ -518,6 +522,12 @@ static NSString *OSString(const char *text, NSString *fallback) {
 @property (nonatomic, copy, nullable) void (^saveRequested)(uint32_t slot);
 @property (nonatomic, copy, nullable) void (^loadRequested)(uint32_t slot);
 @property (nonatomic, copy, nullable) void (^quitRequested)(void);
+/// HUD de OmniStation (temperatura, RAM, batería). Los FPS los da el HUD propio de ARMSX2.
+@property (nonatomic, strong, nullable) OSPerfHUD *hud;
+/// Vibración al tocar los botones del mando táctil.
+@property (nonatomic, assign) BOOL touchHaptics;
+- (void)updateExternalDisplay;
+- (void)releaseExternalDisplay;
 - (void)showStatus:(NSString *)message;
 - (void)updateSaveMask:(uint32_t)mask;
 - (void)resetInput;
@@ -541,6 +551,11 @@ static NSString *OSString(const char *text, NSString *fallback) {
     // Estado anterior del mando (para detectar pulsaciones).
     BOOL _prevHome, _prevCombo, _prevUp, _prevDown, _prevLeft, _prevRight, _prevA, _prevB;
     NSMutableArray<id> *_observers;
+    UIImpactFeedbackGenerator *_haptic;
+    UILabel *_tvLabel;
+    UIView *_tvHost;
+    BOOL _onTV;
+    NSTimer *_hudTimer;
 }
 
 - (instancetype)init {
@@ -660,6 +675,24 @@ static NSString *OSString(const char *text, NSString *fallback) {
         [strongSelf sendSticks];
     };
 
+    _tvLabel = [UILabel new];
+    _tvLabel.text = [self t:@"Jugando en la tele" en:@"Playing on the TV"];
+    _tvLabel.textColor = [UIColor colorWithWhite:1 alpha:0.55];
+    _tvLabel.font = [UIFont systemFontOfSize:15 weight:UIFontWeightSemibold];
+    _tvLabel.textAlignment = NSTextAlignmentCenter;
+    _tvLabel.hidden = YES;
+    _tvLabel.userInteractionEnabled = NO;
+    [root insertSubview:_tvLabel belowSubview:_controlsView];
+
+    if (self.hud) {
+        [root addSubview:self.hud];
+        [self.hud refreshWithFPS:-1 frameTime:0 fifo:0];
+    }
+    if (self.touchHaptics) {
+        _haptic = [[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleLight];
+        [_haptic prepare];
+    }
+
     _menuButton = [UIButton buttonWithType:UIButtonTypeSystem];
     _menuButton.tintColor = UIColor.whiteColor;
     _menuButton.backgroundColor = [UIColor colorWithWhite:0 alpha:0.5];
@@ -693,6 +726,10 @@ static NSString *OSString(const char *text, NSString *fallback) {
         }];
         [_observers addObject:token];
     }
+    id tv = [center addObserverForName:OSExternalDisplayDidChangeNotification object:nil queue:NSOperationQueue.mainQueue usingBlock:^(NSNotification *note) {
+        [weakSelf updateExternalDisplay];
+    }];
+    [_observers addObject:tv];
     id resign = [center addObserverForName:UIApplicationWillResignActiveNotification object:nil queue:NSOperationQueue.mainQueue usingBlock:^(NSNotification *note) {
         OSArmsx2GameViewController *strongSelf = weakSelf;
         if (strongSelf && !strongSelf.closing && !strongSelf->_menuVisible) [strongSelf openMenu];
@@ -704,27 +741,84 @@ static NSString *OSString(const char *text, NSString *fallback) {
     [super viewDidAppear:animated];
     if (_displayLink == nil) {
         _displayLink = [CADisplayLink displayLinkWithTarget:self selector:@selector(pollController)];
+        // El menú no necesita más de 60 Hz: el resto del tiempo es para el juego.
+        _displayLink.preferredFrameRateRange = CAFrameRateRangeMake(30, 60, 60);
         [_displayLink addToRunLoop:NSRunLoop.mainRunLoop forMode:NSRunLoopCommonModes];
     }
+    if (self.hud && _hudTimer == nil) {
+        __weak OSArmsx2GameViewController *weakSelf = self;
+        _hudTimer = [NSTimer scheduledTimerWithTimeInterval:1.0 repeats:YES block:^(NSTimer *timer) {
+            OSArmsx2GameViewController *strongSelf = weakSelf;
+            if (!strongSelf || !strongSelf.hud) return;
+            [strongSelf.hud refreshWithFPS:-1 frameTime:0 fifo:0];
+            [strongSelf.view setNeedsLayout];
+        }];
+    }
     UIApplication.sharedApplication.idleTimerDisabled = YES;
+    [self updateExternalDisplay];
 }
 
 - (void)viewWillDisappear:(BOOL)animated {
     [super viewWillDisappear:animated];
     [_displayLink invalidate];
     _displayLink = nil;
+    [_hudTimer invalidate];
+    _hudTimer = nil;
     UIApplication.sharedApplication.idleTimerDisabled = NO;
 }
 
 - (void)dealloc {
     for (id token in _observers) [NSNotificationCenter.defaultCenter removeObserver:token];
     [_displayLink invalidate];
+    [_hudTimer invalidate];
+}
+
+// MARK: Tele (AirPlay o HDMI)
+
+- (void)updateExternalDisplay {
+    UIView *coreView = self.coreView;
+    if (coreView == nil || !self.isViewLoaded) return;
+    OSExternalDisplay *display = OSExternalDisplay.shared;
+    BOOL wantTV = display.connected && OSExternalDisplay.enabled && !self.closing;
+    if (wantTV && !_onTV) {
+        if (_tvHost == nil) {
+            _tvHost = [[UIView alloc] initWithFrame:CGRectMake(0, 0, 1920, 1080)];
+            _tvHost.backgroundColor = UIColor.blackColor;
+        }
+        coreView.frame = _tvHost.bounds;
+        coreView.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
+        [_tvHost addSubview:coreView];
+        if ([display hostView:_tvHost]) {
+            _onTV = YES;
+            _tvLabel.hidden = NO;
+        } else {
+            [self returnCoreViewToPhone];
+        }
+    } else if (!wantTV && _onTV) {
+        [self releaseExternalDisplay];
+    }
+}
+
+- (void)returnCoreViewToPhone {
+    UIView *coreView = self.coreView;
+    if (coreView == nil) return;
+    coreView.frame = self.view.bounds;
+    coreView.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
+    [self.view insertSubview:coreView atIndex:0];
+}
+
+- (void)releaseExternalDisplay {
+    if (!_onTV) return;
+    _onTV = NO;
+    _tvLabel.hidden = YES;
+    [self returnCoreViewToPhone];
+    [OSExternalDisplay.shared releaseView:_tvHost];
 }
 
 - (void)viewDidLayoutSubviews {
     [super viewDidLayoutSubviews];
     UIView *root = self.view;
-    self.coreView.frame = root.bounds;
+    if (!_onTV) self.coreView.frame = root.bounds;
     _controlsView.frame = root.bounds;
     UIEdgeInsets safe = root.safeAreaInsets;
     CGFloat w = root.bounds.size.width;
@@ -756,6 +850,11 @@ static NSString *OSString(const char *text, NSString *fallback) {
     select.frame = CGRectMake(w * 0.5 - 92, centerY, 76, 34);
     start.frame = CGRectMake(w * 0.5 + 16, centerY, 76, 34);
     _menuButton.frame = CGRectMake(safe.left + 14, safe.top + 12, 40, 40);
+    if (self.hud) {
+        CGSize hudSize = [self.hud fittingSize];
+        self.hud.frame = CGRectMake(safe.left + 62, safe.top + 12, hudSize.width, hudSize.height);
+    }
+    _tvLabel.frame = CGRectMake(0, h * 0.30, w, 24);
     CGFloat labelWidth = MIN(w * 0.7, 420);
     _statusLabel.frame = CGRectMake((w - labelWidth) * 0.5, safe.top + 14, labelWidth, 54);
     _menuView.frame = root.bounds;
@@ -768,6 +867,10 @@ static NSString *OSString(const char *text, NSString *fallback) {
 // MARK: Entrada táctil
 
 - (void)padDown:(UIButton *)sender {
+    if (_haptic) {
+        [_haptic impactOccurred];
+        [_haptic prepare];
+    }
     if (self.api && self.api->set_button && sender.tag >= 0 && sender.tag < 16) self.api->set_button((uint32_t)sender.tag, 1);
 }
 
@@ -1259,6 +1362,8 @@ static NSString *gLoadedFlavor = nil;
     OSArmsx2GameViewController *controller = self.gameController;
     self.gameController = nil;
     [controller resetInput];
+    controller.closing = YES;
+    [controller releaseExternalDisplay];
     void (^releaseView)(void) = ^{
         if (self.api && self.api->release_render_view) self.api->release_render_view();
         if (completion) completion();
@@ -1372,6 +1477,7 @@ static NSString *gLoadedFlavor = nil;
              pairingData:(NSData *)pairingData
                 language:(NSString *)language
      touchControlsAlways:(BOOL)touchControlsAlways
+             hostOptions:(NSDictionary<NSString *, NSString *> *)hostOptions
                 progress:(void (^)(NSString *))progress
               completion:(void (^)(BOOL, NSString *))completion
                    ended:(void (^)(void))ended {
@@ -1432,6 +1538,18 @@ static NSString *gLoadedFlavor = nil;
             controller.api = self.api;
             controller.language = language;
             controller.touchAlways = touchControlsAlways;
+            controller.touchHaptics = [hostOptions[@"touchHaptics"] boolValue];
+            if ([hostOptions[@"hudSystem"] boolValue]) {
+                OSPerfHUD *hud = [[OSPerfHUD alloc] initWithFrame:CGRectZero];
+                hud.showMemory = YES;
+                hud.showThermal = YES;
+                hud.showBattery = [hostOptions[@"hudBattery"] boolValue];
+                controller.hud = hud;
+            }
+            // El sonido del juego no se calla con el interruptor de silencio.
+            AVAudioSession *session = AVAudioSession.sharedInstance;
+            [session setCategory:AVAudioSessionCategoryPlayback withOptions:AVAudioSessionCategoryOptionMixWithOthers error:nil];
+            [session setActive:YES error:nil];
             controller.coreView = (__bridge UIView *)raw;
             controller.title = title;
             [self configureController:controller];

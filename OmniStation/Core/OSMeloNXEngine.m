@@ -11,6 +11,8 @@
 //     (attach_gamepad) y main_ryujinx_sdl con OptionsNative en un hilo propio.
 #import "OSMeloNXEngine.h"
 #import "OSMeloNXOptions.h"
+#import "OSExternalDisplay.h"
+#import "OSPerfHUD.h"
 
 #import <AVFoundation/AVFoundation.h>
 
@@ -476,7 +478,44 @@ typedef struct {
     void (*setViewSize)(int32_t width, int32_t height);
     void (*setUnboundedFps)(int32_t fps);
     void (*reportMemoryPressure)(uint8_t critical);
+    void (*registerCallback)(const char *name, void (*callback)(void *data, void *userData), void *userData);
+    void (*unregisterCallback)(const char *name);
 } OSNXCoreAPI;
+
+// Estadísticas que manda el núcleo («push_statistics»: FPS, ms por fotograma y FIFO).
+typedef struct {
+    const uint8_t *ptr;
+    int32_t len;
+} OSNXCallbackData;
+
+static volatile double gOSNXFps = -1;
+static volatile double gOSNXFrameTime = 0;
+static volatile double gOSNXFifo = 0;
+
+static void OSNXStatisticsCallback(void *raw, void *userData) {
+    const OSNXCallbackData *data = (const OSNXCallbackData *)raw;
+    if (data == NULL || data->ptr == NULL || data->len < 25) return;
+    double fps = 0, frameTime = 0, fifo = 0;
+    memcpy(&fps, data->ptr, sizeof(double));
+    memcpy(&frameTime, data->ptr + 8, sizeof(double));
+    memcpy(&fifo, data->ptr + 17, sizeof(double));
+    gOSNXFps = fps;
+    gOSNXFrameTime = frameTime;
+    gOSNXFifo = fifo;
+}
+
+/// Ajuste de la partida (texto de Swift) como número o sí/no.
+static double OSNXNumber(NSDictionary<NSString *, NSString *> *settings, NSString *key, double fallback) {
+    NSString *value = settings[key];
+    if (![value isKindOfClass:NSString.class] || value.length == 0 || [value isEqualToString:@"auto"]) return fallback;
+    return value.doubleValue;
+}
+
+static BOOL OSNXFlag(NSDictionary<NSString *, NSString *> *settings, NSString *key, BOOL fallback) {
+    NSString *value = settings[key];
+    if (![value isKindOfClass:NSString.class] || value.length == 0) return fallback;
+    return value.boolValue;
+}
 
 // Botones tal como los numera MeloNX (VirtualControllerButton).
 typedef NS_ENUM(int32_t, OSNXButton) {
@@ -504,7 +543,10 @@ typedef NS_ENUM(int32_t, OSNXButton) {
 - (void)detach;
 @end
 
-@implementation OSNXPad
+@implementation OSNXPad {
+    BOOL _physical[OSNXButtonCount];
+    float _stick[4];
+}
 
 - (instancetype)initWithAPI:(const OSNXCoreAPI *)api {
     self = [super init];
@@ -527,57 +569,67 @@ typedef NS_ENUM(int32_t, OSNXButton) {
     self.api->setStickAxis((__bridge void *)self, stick, x, y);
 }
 
-- (void)setButton:(GCControllerButtonInput *)input to:(OSNXButton)button enabled:(BOOL)enabled {
-    if (input == nil) return;
-    if (!enabled) {
-        input.valueChangedHandler = nil;
-        return;
+/// El mando se lee entero en cada cambio (manejador del propio mando, no de cada botón):
+/// la interfaz de OmniStation usa los de cada botón y así no se pisan al conectar un mando.
+- (void)readGamepad:(GCExtendedGamepad *)pad {
+    if (pad == nil) return;
+    BOOL states[OSNXButtonCount];
+    memset(states, 0, sizeof(states));
+    states[OSNXButtonA] = pad.buttonA.isPressed;
+    states[OSNXButtonB] = pad.buttonB.isPressed;
+    states[OSNXButtonX] = pad.buttonX.isPressed;
+    states[OSNXButtonY] = pad.buttonY.isPressed;
+    states[OSNXButtonBack] = pad.buttonOptions.isPressed;
+    states[OSNXButtonStart] = pad.buttonMenu.isPressed;
+    states[OSNXButtonLeftStick] = pad.leftThumbstickButton.isPressed;
+    states[OSNXButtonRightStick] = pad.rightThumbstickButton.isPressed;
+    states[OSNXButtonLeftShoulder] = pad.leftShoulder.isPressed;
+    states[OSNXButtonRightShoulder] = pad.rightShoulder.isPressed;
+    states[OSNXButtonDPadUp] = pad.dpad.up.isPressed;
+    states[OSNXButtonDPadDown] = pad.dpad.down.isPressed;
+    states[OSNXButtonDPadLeft] = pad.dpad.left.isPressed;
+    states[OSNXButtonDPadRight] = pad.dpad.right.isPressed;
+    states[OSNXButtonLeftTrigger] = pad.leftTrigger.isPressed;
+    states[OSNXButtonRightTrigger] = pad.rightTrigger.isPressed;
+    for (int32_t button = 0; button < OSNXButtonCount; button++) {
+        // Home abre el menú de OmniStation: no va al juego.
+        if (button == OSNXButtonGuide) continue;
+        if (states[button] != _physical[button]) {
+            _physical[button] = states[button];
+            [self send:(OSNXButton)button pressed:states[button]];
+        }
     }
-    __weak OSNXPad *weakSelf = self;
-    input.valueChangedHandler = ^(GCControllerButtonInput *element, float value, BOOL pressed) {
-        [weakSelf send:button pressed:pressed];
-    };
-}
-
-- (void)setStick:(GCControllerDirectionPad *)input stick:(int32_t)stick enabled:(BOOL)enabled {
-    if (input == nil) return;
-    if (!enabled) {
-        input.valueChangedHandler = nil;
-        return;
+    float lx = pad.leftThumbstick.xAxis.value, ly = pad.leftThumbstick.yAxis.value;
+    float rx = pad.rightThumbstick.xAxis.value, ry = pad.rightThumbstick.yAxis.value;
+    if (lx != _stick[0] || ly != _stick[1]) {
+        _stick[0] = lx;
+        _stick[1] = ly;
+        [self moveStick:1 x:lx y:ly];
     }
-    __weak OSNXPad *weakSelf = self;
-    input.valueChangedHandler = ^(GCControllerDirectionPad *element, float x, float y) {
-        OSNXPad *strongSelf = weakSelf;
-        if (strongSelf == nil) return;
-        if (strongSelf.suspended) { x = 0; y = 0; }
-        strongSelf.api->setStickAxis((__bridge void *)strongSelf, stick, x, y);
-    };
+    if (rx != _stick[2] || ry != _stick[3]) {
+        _stick[2] = rx;
+        _stick[3] = ry;
+        [self moveStick:2 x:rx y:ry];
+    }
 }
 
 - (void)wire:(GCExtendedGamepad *)pad enabled:(BOOL)enabled {
     if (pad == nil) return;
-    [self setButton:pad.buttonA to:OSNXButtonA enabled:enabled];
-    [self setButton:pad.buttonB to:OSNXButtonB enabled:enabled];
-    [self setButton:pad.buttonX to:OSNXButtonX enabled:enabled];
-    [self setButton:pad.buttonY to:OSNXButtonY enabled:enabled];
-    [self setButton:pad.dpad.up to:OSNXButtonDPadUp enabled:enabled];
-    [self setButton:pad.dpad.down to:OSNXButtonDPadDown enabled:enabled];
-    [self setButton:pad.dpad.left to:OSNXButtonDPadLeft enabled:enabled];
-    [self setButton:pad.dpad.right to:OSNXButtonDPadRight enabled:enabled];
-    [self setButton:pad.leftShoulder to:OSNXButtonLeftShoulder enabled:enabled];
-    [self setButton:pad.rightShoulder to:OSNXButtonRightShoulder enabled:enabled];
-    [self setButton:pad.leftTrigger to:OSNXButtonLeftTrigger enabled:enabled];
-    [self setButton:pad.rightTrigger to:OSNXButtonRightTrigger enabled:enabled];
-    [self setButton:pad.leftThumbstickButton to:OSNXButtonLeftStick enabled:enabled];
-    [self setButton:pad.rightThumbstickButton to:OSNXButtonRightStick enabled:enabled];
-    [self setButton:pad.buttonMenu to:OSNXButtonStart enabled:enabled];
-    [self setButton:pad.buttonOptions to:OSNXButtonBack enabled:enabled];
-    [self setStick:pad.leftThumbstick stick:1 enabled:enabled];
-    [self setStick:pad.rightThumbstick stick:2 enabled:enabled];
-    if (enabled && pad.buttonHome != nil) {
+    memset(_physical, 0, sizeof(_physical));
+    memset(_stick, 0, sizeof(_stick));
+    if (!enabled) {
+        pad.valueChangedHandler = nil;
+        return;
+    }
+    __weak OSNXPad *weakSelf = self;
+    pad.valueChangedHandler = ^(GCExtendedGamepad *gamepad, GCControllerElement *element) {
+        [weakSelf readGamepad:gamepad];
+    };
+    if (pad.buttonHome != nil) {
         // Home abre el menú de OmniStation, no el de iOS.
         pad.buttonHome.preferredSystemGestureState = GCSystemGestureStateDisabled;
     }
+    [self readGamepad:pad];
 }
 
 - (void)bindController:(nullable GCController *)controller {
@@ -634,9 +686,26 @@ typedef NS_ENUM(int32_t, OSNXButton) {
 }
 
 - (void)reportSize {
+    CGSize size = self.bounds.size;
+    if (size.width < 1 || size.height < 1) return;
+    CAMetalLayer *layer = (CAMetalLayer *)self.layer;
+    CGSize drawable = CGSizeMake(size.width * layer.contentsScale, size.height * layer.contentsScale);
+    if (!CGSizeEqualToSize(layer.drawableSize, drawable)) layer.drawableSize = drawable;
     if (self.api && self.api->setViewSize) {
-        self.api->setViewSize((int32_t)self.bounds.size.width, (int32_t)self.bounds.size.height);
+        self.api->setViewSize((int32_t)size.width, (int32_t)size.height);
     }
+}
+
+- (void)didMoveToWindow {
+    [super didMoveToWindow];
+    // En la tele la escala es la de la tele.
+    UIScreen *screen = self.window.screen ?: UIScreen.mainScreen;
+    CGFloat scale = screen.nativeScale > 0 ? screen.nativeScale : screen.scale;
+    if (scale > 0) {
+        self.contentScaleFactor = scale;
+        self.layer.contentsScale = scale;
+    }
+    [self setNeedsLayout];
 }
 
 - (void)layoutSubviews {
@@ -744,7 +813,13 @@ static void OSNXSetTouchVisible(UIViewController *controller, BOOL visible) {
 /// Mando táctil (si va en la app) y si se enseña siempre o solo sin mando físico.
 @property (nonatomic, strong, nullable) UIViewController *touchController;
 @property (nonatomic, assign) BOOL touchAlways;
+/// HUD de rendimiento (nil si está apagado).
+@property (nonatomic, strong, nullable) OSPerfHUD *hud;
 - (void)updateTouchVisibility;
+/// Pone la pantalla del juego en la tele (si hay y el ajuste lo deja) o la devuelve al iPhone.
+- (void)updateExternalDisplay;
+/// Devuelve la pantalla al iPhone antes de cerrar.
+- (void)releaseExternalDisplay;
 - (void)showStatus:(NSString *)message sticky:(BOOL)sticky;
 - (void)hideStatus;
 - (void)openMenu;
@@ -760,6 +835,10 @@ static void OSNXSetTouchVisible(UIViewController *controller, BOOL visible) {
     CADisplayLink *_displayLink;
     BOOL _prevHome, _prevCombo, _prevUp, _prevDown, _prevA, _prevB;
     NSUInteger _statusToken;
+    UILabel *_tvLabel;
+    OSNXGameContainer *_tvContainer;
+    BOOL _onTV;
+    NSTimer *_hudTimer;
 }
 
 - (instancetype)init {
@@ -807,6 +886,20 @@ static void OSNXSetTouchVisible(UIViewController *controller, BOOL visible) {
         [root addSubview:self.gameContainer];
     }
     [self updateTouchVisibility];
+
+    _tvLabel = [UILabel new];
+    _tvLabel.text = [self t:@"Jugando en la tele" en:@"Playing on the TV"];
+    _tvLabel.textColor = [UIColor colorWithWhite:1 alpha:0.55];
+    _tvLabel.font = [UIFont systemFontOfSize:15 weight:UIFontWeightSemibold];
+    _tvLabel.textAlignment = NSTextAlignmentCenter;
+    _tvLabel.hidden = YES;
+    _tvLabel.userInteractionEnabled = NO;
+    [root addSubview:_tvLabel];
+
+    if (self.hud) {
+        [root addSubview:self.hud];
+        [self.hud refreshWithFPS:-1 frameTime:0 fifo:0];
+    }
 
     _menuButton = [UIButton buttonWithType:UIButtonTypeSystem];
     _menuButton.tintColor = UIColor.whiteColor;
@@ -858,6 +951,11 @@ static void OSNXSetTouchVisible(UIViewController *controller, BOOL visible) {
     CGFloat h = root.bounds.size.height;
     UIEdgeInsets safe = root.safeAreaInsets;
     _menuButton.frame = CGRectMake(safe.left + 10, safe.top + 8, 36, 36);
+    if (self.hud) {
+        CGSize hudSize = [self.hud fittingSize];
+        self.hud.frame = CGRectMake(safe.left + 54, safe.top + 8, hudSize.width, hudSize.height);
+    }
+    _tvLabel.frame = CGRectMake(0, h * 0.30, w, 24);
     CGFloat labelWidth = MIN(w * 0.7, 440);
     _statusLabel.frame = CGRectMake((w - labelWidth) * 0.5, safe.top + 12, labelWidth, 58);
     _menuView.frame = root.bounds;
@@ -875,20 +973,74 @@ static void OSNXSetTouchVisible(UIViewController *controller, BOOL visible) {
     [super viewDidAppear:animated];
     if (_displayLink == nil) {
         _displayLink = [CADisplayLink displayLinkWithTarget:self selector:@selector(pollController)];
+        // El menú no necesita más de 60 Hz: el resto del tiempo es para el juego.
+        _displayLink.preferredFrameRateRange = CAFrameRateRangeMake(30, 60, 60);
         [_displayLink addToRunLoop:NSRunLoop.mainRunLoop forMode:NSRunLoopCommonModes];
     }
+    if (self.hud && _hudTimer == nil) {
+        __weak OSNXGameViewController *weakSelf = self;
+        _hudTimer = [NSTimer scheduledTimerWithTimeInterval:0.5 repeats:YES block:^(NSTimer *timer) {
+            OSNXGameViewController *strongSelf = weakSelf;
+            if (!strongSelf || !strongSelf.hud) return;
+            [strongSelf.hud refreshWithFPS:gOSNXFps frameTime:gOSNXFrameTime fifo:gOSNXFifo];
+            [strongSelf.view setNeedsLayout];
+        }];
+    }
     UIApplication.sharedApplication.idleTimerDisabled = YES;
+    [self updateExternalDisplay];
 }
 
 - (void)viewWillDisappear:(BOOL)animated {
     [super viewWillDisappear:animated];
     [_displayLink invalidate];
     _displayLink = nil;
+    [_hudTimer invalidate];
+    _hudTimer = nil;
     UIApplication.sharedApplication.idleTimerDisabled = NO;
 }
 
 - (void)dealloc {
     [_displayLink invalidate];
+    [_hudTimer invalidate];
+}
+
+- (void)updateExternalDisplay {
+    OSExternalDisplay *display = OSExternalDisplay.shared;
+    BOOL wantTV = display.connected && OSExternalDisplay.enabled && !self.closing;
+    if (wantTV && !_onTV) {
+        if (_tvContainer == nil) {
+            _tvContainer = [[OSNXGameContainer alloc] initWithFrame:CGRectMake(0, 0, 1920, 1080)];
+            _tvContainer.backgroundColor = UIColor.blackColor;
+        }
+        // El contenedor del iPhone deja de colocar la pantalla: ahora la coloca el de la tele.
+        self.gameContainer.metalView = nil;
+        _tvContainer.metalView = self.metalView;
+        [_tvContainer addSubview:self.metalView];
+        if ([display hostView:_tvContainer]) {
+            _onTV = YES;
+            _tvLabel.hidden = NO;
+            [_tvContainer setNeedsLayout];
+        } else {
+            [self returnMetalViewToPhone];
+        }
+    } else if (!wantTV && _onTV) {
+        [self releaseExternalDisplay];
+    }
+}
+
+- (void)returnMetalViewToPhone {
+    _tvContainer.metalView = nil;
+    self.gameContainer.metalView = self.metalView;
+    [self.gameContainer addSubview:self.metalView];
+    [self.gameContainer setNeedsLayout];
+}
+
+- (void)releaseExternalDisplay {
+    if (!_onTV) return;
+    _onTV = NO;
+    _tvLabel.hidden = YES;
+    [self returnMetalViewToPhone];
+    [OSExternalDisplay.shared releaseView:_tvContainer];
 }
 
 /// Con mando físico conectado, el táctil se oculta (salvo que se pida siempre).
@@ -1193,6 +1345,8 @@ static void OSNXSetTouchVisible(UIViewController *controller, BOOL visible) {
     api.loadKeyset = (void (*)(void))dlsym(core, "load_keyset");
     api.setUnboundedFps = (void (*)(int32_t))dlsym(core, "set_unbounded_present_target_fps");
     api.reportMemoryPressure = (void (*)(uint8_t))dlsym(core, "report_memory_pressure");
+    api.registerCallback = (void (*)(const char *, void (*)(void *, void *), void *))dlsym(core, "RegisterCallback");
+    api.unregisterCallback = (void (*)(const char *))dlsym(core, "UnregisterCallback");
     void (*sdlSetMainReady)(void) = (void (*)(void))[self symbol:sdl name:"SDL_SetMainReady" missing:missing];
     void (*sdlSetEventPump)(bool) = (void (*)(bool))[self symbol:sdl name:"SDL_SetiOSEventPump" missing:missing];
     bool (*sdlInit)(uint32_t) = (bool (*)(uint32_t))[self symbol:sdl name:"SDL_Init" missing:missing];
@@ -1373,7 +1527,7 @@ static BOOL OSNXNeedsExtendedVirtualAddressing(void) {
 
 /// Opciones de la partida. El núcleo libera la estructura y sus textos con free(): todo con
 /// calloc/strdup. Los valores por defecto son los de MeloNX 2.7 (Options.swift).
-- (OptionsNative *)optionsForGame:(NSString *)path size:(CGSize)size language:(NSString *)language docked:(BOOL)docked {
+- (OptionsNative *)optionsForGame:(NSString *)path size:(CGSize)size language:(NSString *)language settings:(NSDictionary<NSString *, NSString *> *)settings {
     OptionsNative *options = calloc(1, sizeof(OptionsNative));
     if (options == NULL) return NULL;
     BOOL english = [language isEqualToString:@"en"];
@@ -1392,30 +1546,45 @@ static BOOL OSNXNeedsExtendedVirtualAddressing(void) {
     options->ControllerType7 = ControllerTypeProController;
     options->ControllerType8 = ControllerTypeProController;
     options->HideCursorMode = HideCursorMode_OnIdle;
-    options->VSyncMode = 0;
+    // Ajustes de emulación (Ajustes → MeloNX y los de cada juego). Sin valor: los de MeloNX 2.7.
+    int32_t vsync = (int32_t)OSNXNumber(settings, @"vsyncMode", 0);
+    options->VSyncMode = vsync;
+    options->DisableVSync = vsync == 1;
     options->CustomVSyncInterval = 120;
-    options->DisableShaderCache = true;
-    options->EnableTextureRecompression = true;
-    options->DisableDockedMode = !docked;
-    options->SystemLanguage = english ? SystemLanguage_AmericanEnglish : SystemLanguage_Spanish;
-    options->SystemRegion = english ? NativeRegionCode_USA : NativeRegionCode_Europe;
+    options->DisableShaderCache = !OSNXFlag(settings, @"shaderCache", NO);
+    options->EnableTextureRecompression = OSNXFlag(settings, @"textureRecompression", YES);
+    options->DisableDockedMode = !OSNXFlag(settings, @"docked", NO);
+    options->DisableMacroHLE = !OSNXFlag(settings, @"macroHLE", YES);
+    options->EnableAsyncShaderCompilation = OSNXFlag(settings, @"asyncShaders", NO);
+    options->DisablePTC = !OSNXFlag(settings, @"pptc", YES);
+    options->EnableInternetAccess = OSNXFlag(settings, @"internet", NO);
+    options->DisableFsIntegrityChecks = !OSNXFlag(settings, @"fsIntegrity", YES);
+    options->IgnoreMissingServices = OSNXFlag(settings, @"ignoreMissingServices", NO);
+    options->ExpandRAM = OSNXFlag(settings, @"expandRAM", NO);
+    SystemLanguage defaultLanguage = english ? SystemLanguage_AmericanEnglish : SystemLanguage_Spanish;
+    NativeRegionCode defaultRegion = english ? NativeRegionCode_USA : NativeRegionCode_Europe;
+    options->SystemLanguage = (SystemLanguage)(int32_t)OSNXNumber(settings, @"systemLanguage", defaultLanguage);
+    options->SystemRegion = (NativeRegionCode)(int32_t)OSNXNumber(settings, @"systemRegion", defaultRegion);
     options->SystemTimeZone = OSNXCopy(NSTimeZone.localTimeZone.name);
-    options->MemoryManagerMode = MemoryManagerMode_HostMappedUnsafe;
-    options->AudioVolume = 1.0f;
+    int32_t memoryMode = (int32_t)OSNXNumber(settings, @"memoryManager", MemoryManagerMode_HostMappedUnsafe);
+    if (memoryMode < 0 || memoryMode > 2) memoryMode = MemoryManagerMode_HostMappedUnsafe;
+    options->MemoryManagerMode = (MemoryManagerMode)memoryMode;
+    options->AudioVolume = (float)OSNXNumber(settings, @"audioVolume", 1.0);
     options->MultiplayerLanInterfaceId = OSNXCopy(@"0");
     options->LoggingGraphicsDebugLevel = GraphicsDebugLevel_None;
-    options->ResScale = 1.0f;
-    options->MaxAnisotropy = -1.0f;
-    options->AspectRatio = AspectRatio_Fixed16x9;
+    options->ResScale = (float)OSNXNumber(settings, @"resScale", 1.0);
+    if (options->ResScale <= 0) options->ResScale = 1.0f;
+    options->MaxAnisotropy = (float)OSNXNumber(settings, @"maxAnisotropy", -1.0);
+    options->AspectRatio = (AspectRatio)(int32_t)OSNXNumber(settings, @"aspectRatio", AspectRatio_Fixed16x9);
     // MeloNX lo fuerza a «On» al arrancar cada juego (RyujinxController.startGame).
     options->BackendThreading = BackendThreading_On;
     options->GraphicsBackend = GraphicsBackend_Vulkan;
     options->PreferredGPUVendor = OSNXCopy(@"");
-    options->AntiAliasing = AntiAliasing_None;
-    options->ScalingFilter = ScalingFilter_Bilinear;
-    options->ScalingFilterLevel = 60;
-    options->MetalFxUpscaleFactor = 2.0f;
-    options->EnableHostMemoryBudgetTracking = true;
+    options->AntiAliasing = (AntiAliasing)(int32_t)OSNXNumber(settings, @"antiAliasing", AntiAliasing_None);
+    options->ScalingFilter = (ScalingFilter)(int32_t)OSNXNumber(settings, @"scalingFilter", ScalingFilter_Bilinear);
+    options->ScalingFilterLevel = (int32_t)OSNXNumber(settings, @"scalingFilterLevel", 60);
+    options->MetalFxUpscaleFactor = (float)OSNXNumber(settings, @"metalFxUpscaleFactor", 2.0);
+    options->EnableHostMemoryBudgetTracking = OSNXFlag(settings, @"memoryBudget", YES);
     options->InputPath = OSNXCopy(path);
     return options;
 }
@@ -1492,6 +1661,11 @@ static BOOL OSNXNeedsExtendedVirtualAddressing(void) {
         OSMeloNXEngine *strongSelf = weakSelf;
         if (strongSelf && strongSelf.busy && strongSelf->_api.togglePause && !strongSelf->_menuOpen) strongSelf->_api.togglePause(false);
     }]];
+    // Tele conectada o desconectada en mitad de la partida (AirPlay o HDMI).
+    [_observers addObject:[center addObserverForName:OSExternalDisplayDidChangeNotification object:nil queue:NSOperationQueue.mainQueue usingBlock:^(NSNotification *note) {
+        OSMeloNXEngine *strongSelf = weakSelf;
+        if (strongSelf && strongSelf.busy) [strongSelf.gameController updateExternalDisplay];
+    }]];
     [_observers addObject:[center addObserverForName:UIApplicationDidReceiveMemoryWarningNotification object:nil queue:NSOperationQueue.mainQueue usingBlock:^(NSNotification *note) {
         OSMeloNXEngine *strongSelf = weakSelf;
         if (strongSelf && strongSelf.busy && strongSelf->_api.reportMemoryPressure) strongSelf->_api.reportMemoryPressure(0);
@@ -1525,8 +1699,11 @@ static BOOL OSNXNeedsExtendedVirtualAddressing(void) {
         [self.pads removeAllObjects];
         [self stopWatching];
         [self closeSession];
+        if (self->_api.unregisterCallback) self->_api.unregisterCallback("push_statistics");
         OSNXGameViewController *controller = self.gameController;
         self.gameController = nil;
+        controller.closing = YES;
+        [controller releaseExternalDisplay];
         void (^done)(void) = ^{
             self.busy = NO;
             if (completion) {
@@ -1550,7 +1727,7 @@ static BOOL OSNXNeedsExtendedVirtualAddressing(void) {
                    title:(NSString *)title
              pairingData:(NSData *)pairingData
                 language:(NSString *)language
-                  docked:(BOOL)docked
+                settings:(NSDictionary<NSString *, NSString *> *)settings
                 progress:(void (^)(NSString *))progress
               completion:(void (^)(BOOL, NSString *))completion
                    ended:(void (^)(void))ended {
@@ -1628,6 +1805,20 @@ static BOOL OSNXNeedsExtendedVirtualAddressing(void) {
             controller.language = language;
             controller.title = title;
             controller.touchAlways = [NSUserDefaults.standardUserDefaults boolForKey:@"melonxCoreTouchAlways"];
+            // HUD de rendimiento (como el «Performance Overlay» de MeloNX).
+            gOSNXFps = -1;
+            gOSNXFrameTime = 0;
+            gOSNXFifo = 0;
+            if (OSNXFlag(settings, @"hud", NO)) {
+                OSPerfHUD *hud = [[OSPerfHUD alloc] initWithFrame:CGRectZero];
+                hud.showFrameTime = OSNXFlag(settings, @"hudFrameTime", YES);
+                hud.showFifo = OSNXFlag(settings, @"hudFifo", NO);
+                hud.showMemory = OSNXFlag(settings, @"hudMemory", YES);
+                hud.showThermal = OSNXFlag(settings, @"hudThermal", YES);
+                hud.showBattery = OSNXFlag(settings, @"hudBattery", NO);
+                controller.hud = hud;
+                if (self->_api.registerCallback) self->_api.registerCallback("push_statistics", OSNXStatisticsCallback, NULL);
+            }
             __weak OSMeloNXEngine *weakSelf = self;
             __weak OSNXGameViewController *weakController = controller;
             // Mando táctil de MeloNX: va al mismo jugador 1 que el mando físico.
@@ -1693,13 +1884,13 @@ static BOOL OSNXNeedsExtendedVirtualAddressing(void) {
             if (self.busy && self->_api.setUnboundedFps) self->_api.setUnboundedFps((int32_t)MAX((NSInteger)1, UIScreen.mainScreen.maximumFramesPerSecond));
         });
 
-        OptionsNative *options = [self optionsForGame:gamePath size:size language:language docked:docked];
+        OptionsNative *options = [self optionsForGame:gamePath size:size language:language settings:settings];
         if (options == NULL) {
             [self finishSessionWithMessage:@"Sin memoria para las opciones de MeloNX." completion:nil];
             return;
         }
         printf("[OmniStation] Juego: %s · %dx%d · dock %d · memoria ampliada %d\n", gamePath.UTF8String,
-               (int)size.width, (int)size.height, docked, [OSMeloNXEngine hasIncreasedMemoryLimit]);
+               (int)size.width, (int)size.height, OSNXFlag(settings, @"docked", NO), [OSMeloNXEngine hasIncreasedMemoryLimit]);
         const OSNXCoreAPI *api = &self->_api;
         NSThread *thread = [[NSThread alloc] initWithBlock:^{
             // main_ryujinx_sdl libera las opciones (y sus textos) por su cuenta.

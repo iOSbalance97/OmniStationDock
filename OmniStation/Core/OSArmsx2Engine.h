@@ -40,7 +40,9 @@ NS_ASSUME_NONNULL_BEGIN
 /// Revisión de ARMSX2 del núcleo (vacía hasta que se carga).
 @property (nonatomic, readonly, copy) NSString *coreRevision;
 
-/// Arranca un juego (o la BIOS si `gamePath` es nil) a pantalla completa.
+/// Arranca un juego (o la BIOS si `gamePath` es nil) a pantalla completa. Los ajustes de
+/// emulación ya están en Datos/inis/PCSX2.ini; `hostOptions` son los de OmniStation (HUD propio,
+/// vibración del mando táctil).
 /// `progress` y `completion` llegan en el hilo principal; `ended`, al cerrar la partida.
 - (void)launchGameAtPath:(nullable NSString *)gamePath
                    title:(NSString *)title
@@ -49,6 +51,7 @@ NS_ASSUME_NONNULL_BEGIN
              pairingData:(NSData *)pairingData
                 language:(NSString *)language
      touchControlsAlways:(BOOL)touchControlsAlways
+             hostOptions:(NSDictionary<NSString *, NSString *> *)hostOptions
                 progress:(void (^)(NSString *message))progress
               completion:(void (^)(BOOL success, NSString *message))completion
                    ended:(void (^)(void))ended;

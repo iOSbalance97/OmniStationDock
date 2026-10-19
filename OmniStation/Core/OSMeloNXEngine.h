@@ -50,13 +50,14 @@ NS_ASSUME_NONNULL_BEGIN
 /// Versión de firmware instalada (vacía si no hay). `completion` en el hilo principal.
 - (void)readFirmwareVersion:(void (^)(NSString *version))completion;
 
-/// Arranca un juego a pantalla completa. `progress` y `completion` llegan en el hilo principal;
-/// `ended`, al cerrar la partida.
+/// Arranca un juego a pantalla completa. `settings`: ajustes de emulación de la partida (texto,
+/// ver EmulatorConfig.swift). `progress` y `completion` llegan en el hilo principal; `ended`, al
+/// cerrar la partida.
 - (void)launchGameAtPath:(NSString *)gamePath
                    title:(NSString *)title
              pairingData:(NSData *)pairingData
                 language:(NSString *)language
-                  docked:(BOOL)docked
+                settings:(NSDictionary<NSString *, NSString *> *)settings
                 progress:(void (^)(NSString *message))progress
               completion:(void (^)(BOOL success, NSString *message))completion
                    ended:(void (^)(void))ended;
