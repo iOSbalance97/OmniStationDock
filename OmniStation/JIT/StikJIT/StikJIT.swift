@@ -125,6 +125,33 @@ public enum StikJIT {
                               progress: progress)
     }
 
+    /// Cambio de OmniStation (como en NeoStation iOS): enganche clásico para núcleos que no usan
+    /// el protocolo universal de iOS 26. Engancha y suelta el depurador (queda CS_DEBUGGED) y no
+    /// ejecuta ningún script, aunque el iPhone tenga TXM.
+    public static func enableJITClassic(targetPID: Int32,
+                                        pairingFile: URL,
+                                        ddiPaths: DDIPaths,
+                                        configuration: Configuration = .default,
+                                        preparationProgress: @escaping (PreparationStage) -> Void = { _ in },
+                                        progress: @escaping (String) -> Void = { _ in }) throws {
+        let readiness = prepareDevice(pairingFile: pairingFile,
+                                      paths: ddiPaths,
+                                      configuration: configuration,
+                                      progress: preparationProgress)
+        switch readiness {
+        case .ready:
+            break
+        case .unreachable(let reason), .preparationFailed(let reason):
+            throw StikJITError.deviceNotReady(reason)
+        }
+        let session = JITSession(pairingFilePath: pairingFile.path, configuration: configuration)
+        try session.enableJIT(targetPID: targetPID,
+                              script: .universal,
+                              forceScript: false,
+                              txmPresence: .absent,
+                              progress: progress)
+    }
+
     public static var isTXMPresent: Bool? {
         ProcessInfo.processInfo.txmPresence.isPresent
     }

@@ -8,7 +8,10 @@ import idevice
 final class ScriptRunner {
 
     private static let jitPageSize: UInt64 = 16384
-    private static let jitPageCommandLength = 19
+    // Cambio de OmniStation (como en NeoStation iOS): direcciones de 64 bits completas en cada
+    // escritura de página (antes solo 9 cifras: las direcciones altas se cortaban).
+    private static let jitAddressHexDigits = 16
+    private static let jitPageCommandLength = 26
     private static let commandsPerBatch = 128
 
     private let targetPID: Int32
@@ -99,16 +102,31 @@ final class ScriptRunner {
                 return nil
             }
 
-            for _ in 0..<commandsInBatch {
+            // Se leen todas las respuestas del lote (para no desalinear la conexión) y se
+            // informa del primer fallo, también si debugserver rechaza una página.
+            var firstFailure: StikJITError?
+            for responseIndex in 0..<commandsInBatch {
                 var response: UnsafeMutablePointer<CChar>?
                 let readError = debug_proxy_read_response(debugProxy, &response)
+                var reply: String = ""
                 if let response {
+                    reply = String(cString: response)
                     idevice_string_free(response)
                 }
                 if let readError {
-                    recordExecutionError(IdeviceFFI.consume(readError, fallback: "debug_proxy_read_response"))
-                    return nil
+                    let error: StikJITError = IdeviceFFI.consume(readError, fallback: "debug_proxy_read_response")
+                    if firstFailure == nil { firstFailure = error }
+                    continue
                 }
+                if reply != "OK", firstFailure == nil {
+                    let pageAddress: UInt64 = address + UInt64(batchStart + responseIndex) * Self.jitPageSize
+                    let detail: String = reply.isEmpty ? "<empty>" : reply
+                    firstFailure = .scriptExecution("debugserver rejected JIT page 0x\(String(pageAddress, radix: 16)) with reply '\(detail)'")
+                }
+            }
+            if let firstFailure {
+                recordExecutionError(firstFailure)
+                return nil
             }
         }
 
@@ -133,21 +151,21 @@ final class ScriptRunner {
             buffer[start + 0] = UInt8(ascii: "$")
             buffer[start + 1] = UInt8(ascii: "M")
             writeHexAddress(pageAddress, into: &buffer, at: start + 2)
-            buffer[start + 11] = UInt8(ascii: ",")
-            buffer[start + 12] = UInt8(ascii: "1")
-            buffer[start + 13] = UInt8(ascii: ":")
-            buffer[start + 14] = UInt8(ascii: "6")
-            buffer[start + 15] = UInt8(ascii: "9")
-            buffer[start + 16] = UInt8(ascii: "#")
-            writeChecksum(into: &buffer, bodyStart: start + 1, hashIndex: start + 16)
+            buffer[start + 18] = UInt8(ascii: ",")
+            buffer[start + 19] = UInt8(ascii: "1")
+            buffer[start + 20] = UInt8(ascii: ":")
+            buffer[start + 21] = UInt8(ascii: "6")
+            buffer[start + 22] = UInt8(ascii: "9")
+            buffer[start + 23] = UInt8(ascii: "#")
+            writeChecksum(into: &buffer, bodyStart: start + 1, hashIndex: start + 23)
         }
 
         return buffer
     }
 
     private static func writeHexAddress(_ address: UInt64, into buffer: inout [UInt8], at index: Int) {
-        for nibble in 0..<9 {
-            let shift = UInt64((8 - nibble) * 4)
+        for nibble in 0..<Self.jitAddressHexDigits {
+            let shift = UInt64((Self.jitAddressHexDigits - 1 - nibble) * 4)
             buffer[index + nibble] = hexDigit(UInt8((address >> shift) & 0xf))
         }
     }
