@@ -1,0 +1,63 @@
+// MeloNX integrado en OmniStation Dock (Nintendo Switch).
+// SPDX-License-Identifier: GPL-3.0-or-later
+//
+// El runtime de MeloNX (núcleo Ryujinx compilado, MoltenVK, SDL2, FFmpeg y sus ayudantes) se
+// saca en el workflow de la IPA oficial de MeloNX (AGPL-3.0) y va en Frameworks/. OmniStation
+// lo carga con dlopen y lo maneja con las mismas funciones en C que usa la app MeloNX.
+#import <Foundation/Foundation.h>
+
+NS_ASSUME_NONNULL_BEGIN
+
+@interface OSMeloNXEngine : NSObject
+
+@property (class, nonatomic, readonly) OSMeloNXEngine *shared;
+
+/// ¿Va el runtime de MeloNX dentro de esta compilación?
+@property (class, nonatomic, readonly) BOOL runtimeBundled;
+
+/// Versión de MeloNX de la que sale el runtime (vacía si no va).
+@property (class, nonatomic, readonly, copy) NSString *runtimeVersion;
+
+/// ¿Puede correr en este iPhone? (iOS 18 o posterior y fuera de LiveContainer.)
+@property (class, nonatomic, readonly) BOOL supportedHere;
+
+/// ¿Va la extensión de JIT dentro de la app?
+@property (class, nonatomic, readonly) BOOL helperBundled;
+
+/// ¿Tiene OmniStation el permiso «Increased Memory Limit»?
+@property (class, nonatomic, readonly) BOOL hasIncreasedMemoryLimit;
+
+/// Memoria que puede usar todavía la app, en bytes (0 si no se sabe).
+@property (class, nonatomic, readonly) unsigned long long availableMemory;
+
+/// Carpeta de claves de Ryujinx (Documentos/system) y si ya está prod.keys.
+@property (class, nonatomic, readonly, copy) NSString *keysDirectory;
+@property (class, nonatomic, readonly) BOOL keysInstalled;
+
+/// Registro de la última partida (Documentos/MeloNX/Registro.txt).
+@property (class, nonatomic, readonly, copy) NSString *logPath;
+
+/// Hay una partida abierta o arrancando.
+@property (nonatomic, readonly) BOOL busy;
+
+/// Instala el firmware (zip, xci o carpeta). `completion` llega en el hilo principal.
+- (void)installFirmwareAtPath:(NSString *)path
+                   completion:(void (^)(BOOL success, NSString *message))completion;
+
+/// Versión de firmware instalada (vacía si no hay). `completion` en el hilo principal.
+- (void)readFirmwareVersion:(void (^)(NSString *version))completion;
+
+/// Arranca un juego a pantalla completa. `progress` y `completion` llegan en el hilo principal;
+/// `ended`, al cerrar la partida.
+- (void)launchGameAtPath:(NSString *)gamePath
+                   title:(NSString *)title
+             pairingData:(NSData *)pairingData
+                language:(NSString *)language
+                  docked:(BOOL)docked
+                progress:(void (^)(NSString *message))progress
+              completion:(void (^)(BOOL success, NSString *message))completion
+                   ended:(void (^)(void))ended;
+
+@end
+
+NS_ASSUME_NONNULL_END

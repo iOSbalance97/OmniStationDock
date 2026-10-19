@@ -1024,9 +1024,58 @@ static NSString *OSString(const char *text, NSString *fallback) {
     return self;
 }
 
-+ (NSString *)corePath {
+// Dos núcleos posibles: el de NeoStation (ARMSX2Core.framework) y el compilado por
+// OmniStation (ARMSX2CoreOmni.framework). Se elige en Ajustes; una vez cargado, no cambia
+// hasta volver a abrir la app (un núcleo nunca se descarga).
+static NSString *const kOSCoreFlavorKey = @"armsx2CoreFlavor";
+static NSString *const kOSFlavorNeoStation = @"neostation";
+static NSString *const kOSFlavorOmniStation = @"omnistation";
+static NSString *gLoadedCorePath = nil;
+static NSString *gLoadedFlavor = nil;
+
++ (NSString *)corePathForFlavor:(NSString *)flavor {
     NSString *frameworks = NSBundle.mainBundle.privateFrameworksPath ?: @"";
-    return [frameworks stringByAppendingPathComponent:@"ARMSX2Core.framework/ARMSX2Core"];
+    NSString *folder = [flavor isEqualToString:kOSFlavorOmniStation] ? @"ARMSX2CoreOmni.framework" : @"ARMSX2Core.framework";
+    return [frameworks stringByAppendingPathComponent:[folder stringByAppendingPathComponent:@"ARMSX2Core"]];
+}
+
++ (BOOL)neoStationCoreBundled {
+    return [NSFileManager.defaultManager isReadableFileAtPath:[self corePathForFlavor:kOSFlavorNeoStation]];
+}
+
++ (BOOL)omniStationCoreBundled {
+    return [NSFileManager.defaultManager isReadableFileAtPath:[self corePathForFlavor:kOSFlavorOmniStation]];
+}
+
++ (NSString *)coreFlavor {
+    if (gLoadedFlavor.length > 0) return gLoadedFlavor;
+    NSString *preferred = [NSUserDefaults.standardUserDefaults stringForKey:kOSCoreFlavorKey];
+    BOOL wantsOmni = [preferred isEqualToString:kOSFlavorOmniStation];
+    if (wantsOmni && [self omniStationCoreBundled]) return kOSFlavorOmniStation;
+    if (!wantsOmni && [self neoStationCoreBundled]) return kOSFlavorNeoStation;
+    if ([self neoStationCoreBundled]) return kOSFlavorNeoStation;
+    if ([self omniStationCoreBundled]) return kOSFlavorOmniStation;
+    return wantsOmni ? kOSFlavorOmniStation : kOSFlavorNeoStation;
+}
+
++ (NSString *)loadedCoreFlavor {
+    return gLoadedFlavor ?: @"";
+}
+
++ (NSString *)omniStationCoreDetails {
+    NSURL *url = [NSBundle.mainBundle URLForResource:@"ARMSX2CoreOmni" withExtension:@"json"];
+    NSData *data = url ? [NSData dataWithContentsOfURL:url] : nil;
+    id object = data ? [NSJSONSerialization JSONObjectWithData:data options:0 error:nil] : nil;
+    if (![object isKindOfClass:NSDictionary.class]) return @"";
+    NSDictionary *info = (NSDictionary *)object;
+    NSString *release = [info[@"release"] isKindOfClass:NSString.class] ? info[@"release"] : @"";
+    BOOL lto = [info[@"lto"] respondsToSelector:@selector(boolValue)] && [info[@"lto"] boolValue];
+    return [NSString stringWithFormat:@"%@%@", release, lto ? @" · LTO" : @""];
+}
+
++ (NSString *)corePath {
+    if (gLoadedCorePath.length > 0) return gLoadedCorePath;
+    return [self corePathForFlavor:[self coreFlavor]];
 }
 
 + (NSString *)resourcePath {
@@ -1074,6 +1123,8 @@ static NSString *OSString(const char *text, NSString *fallback) {
     }
     self.coreHandle = handle;
     self.api = api;
+    gLoadedCorePath = [path copy];
+    gLoadedFlavor = [path containsString:@"ARMSX2CoreOmni.framework"] ? kOSFlavorOmniStation : kOSFlavorNeoStation;
     self.coreRevision = OSString(api->source_revision, @"");
     return YES;
 }

@@ -15,6 +15,19 @@ NS_ASSUME_NONNULL_BEGIN
 /// ¿Va el núcleo dentro de esta compilación?
 @property (class, nonatomic, readonly) BOOL coreBundled;
 
+/// ¿Va cada versión del núcleo? NeoStation (ARMSX2Core.framework) u OmniStation (ARMSX2CoreOmni.framework).
+@property (class, nonatomic, readonly) BOOL neoStationCoreBundled;
+@property (class, nonatomic, readonly) BOOL omniStationCoreBundled;
+
+/// Versión que se usa: «neostation» u «omnistation» (la elegida en Ajustes si va en la app).
+@property (class, nonatomic, readonly, copy) NSString *coreFlavor;
+
+/// Versión ya cargada en este proceso (vacía si aún no se ha cargado ninguna).
+@property (class, nonatomic, readonly, copy) NSString *loadedCoreFlavor;
+
+/// Datos del núcleo de OmniStation (versión de ARMSX2 y si lleva LTO), o vacío.
+@property (class, nonatomic, readonly, copy) NSString *omniStationCoreDetails;
+
 /// ¿Puede correr en este iPhone? (iOS 18 o posterior y fuera de LiveContainer).
 @property (class, nonatomic, readonly) BOOL supportedHere;
 
