@@ -36,6 +36,37 @@ jobs:
           shasum -a 256 -c SHA256SUMS
           rm SHA256SUMS
 
+      # Núcleo de ARMSX2 integrado: ARMSX2Core.framework (ARMSX2 iOS 2.6, interfaz C v6) sacado de la
+      # IPA pública de NeoStation iOS 0.0.8. Va antes de compilar: si algo no cuadra, falla sin gastar
+      # minutos. Se comprueba la IPA, el binario y la huella de los 151 archivos del framework.
+      - name: Fetch ARMSX2 core (NeoStation iOS 0.0.8)
+        env:
+          NEOSTATION_IPA_URL: https://github.com/TarbleFR/neostation-ios/releases/download/0.0.8/NeoStation-0.0.8.ipa
+          NEOSTATION_IPA_SHA256: 2e9f1868e6dc98d3724740727286639909851cc9d2215380f68e7340ed39825c
+          ARMSX2CORE_BINARY_SHA256: a091badfb59302db8083bbd724a7265871b650b04b7f27f22595447aadb75819
+          ARMSX2CORE_FILES_SHA256: 4857aef56625e06600db3d48a11143eb1747122847f268cff79536168382b95d
+        run: |
+          set -euo pipefail
+          IPA="$RUNNER_TEMP/NeoStation-0.0.8.ipa"
+          curl -fsSL --retry 3 -o "$IPA" "$NEOSTATION_IPA_URL"
+          echo "$NEOSTATION_IPA_SHA256  $IPA" | shasum -a 256 -c -
+          rm -rf "$RUNNER_TEMP/neostation"
+          mkdir -p "$RUNNER_TEMP/neostation"
+          unzip -q "$IPA" 'Payload/NeoStation.app/Frameworks/ARMSX2Core.framework/*' -d "$RUNNER_TEMP/neostation"
+          rm -f "$IPA"
+          rm -rf Vendor/ARMSX2Core.framework
+          mkdir -p Vendor
+          cp -R "$RUNNER_TEMP/neostation/Payload/NeoStation.app/Frameworks/ARMSX2Core.framework" Vendor/
+          cd Vendor/ARMSX2Core.framework
+          echo "$ARMSX2CORE_BINARY_SHA256  ARMSX2Core" | shasum -a 256 -c -
+          FILES_SHA256=$(find . -type f | LC_ALL=C sort | while IFS= read -r f; do shasum -a 256 "$f"; done | shasum -a 256 | cut -d' ' -f1)
+          if [ "$FILES_SHA256" != "$ARMSX2CORE_FILES_SHA256" ]; then
+            echo "::error::Los archivos de ARMSX2Core.framework no coinciden ($FILES_SHA256)"
+            exit 1
+          fi
+          nm -gU ARMSX2Core | grep -q ' _NeoARMSX2_GetAPI$'
+          echo "ARMSX2Core.framework listo: $(find . -type f | wc -l | tr -d ' ') archivos"
+
       - name: Generate Xcode project
         run: xcodegen generate
 
@@ -57,6 +88,13 @@ jobs:
           test -d "$APP_PATH"
           mkdir -p Payload
           cp -R "$APP_PATH" Payload/
+          # El núcleo va en Frameworks/ (OSArmsx2Engine lo busca ahí y lo carga con dlopen).
+          # Se copia sin enlazar: SideStore/AltStore lo firman junto con la app.
+          mkdir -p Payload/OmniStationDock.app/Frameworks
+          cp -R Vendor/ARMSX2Core.framework Payload/OmniStationDock.app/Frameworks/
+          test -f Payload/OmniStationDock.app/Frameworks/ARMSX2Core.framework/ARMSX2Core
+          test -f Payload/OmniStationDock.app/Frameworks/ARMSX2Core.framework/Info.plist
+          test -d Payload/OmniStationDock.app/PlugIns/OmniStationJITHelper.appex
           /usr/bin/zip -qry OmniStationDock.ipa Payload
           test -s OmniStationDock.ipa
           unzip -t OmniStationDock.ipa
