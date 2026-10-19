@@ -134,6 +134,8 @@ struct HomeView: View {
     /// Switch: app MeloNX aparte («external») o MeloNX integrado («integrated»).
     @AppStorage(MeloNXMode.storageKey) private var melonxModeRaw = MeloNXMode.external.rawValue
     @AppStorage(MeloNXCoreFolders.dockedKey) private var melonxDocked = false
+    /// Mando táctil de MeloNX integrado siempre a la vista (aunque haya mando físico).
+    @AppStorage(MeloNXCoreFolders.touchAlwaysKey) private var melonxTouchAlways = false
     /// Firmware de Switch instalado (se lee al abrir sus ajustes).
     @State private var melonxFirmware = ""
     @AppStorage(JITLauncher.defaultKey) private var jitByDefault = false
@@ -2803,6 +2805,7 @@ struct HomeView: View {
             dialog = .memoryHelp
         }))
         items.append(toggleSetting("melonxCoreDocked", tr("Modo dock (TV)"), tr("Más resolución; si no, modo portátil"), "tv.fill", SettingTint.blue, $melonxDocked))
+        items.append(toggleSetting("melonxCoreTouchAlways", tr("Mando táctil siempre"), tr("Si no, se oculta al conectar un mando"), "hand.tap.fill", SettingTint.blue, $melonxTouchAlways))
         items.append(SettingItem(id: "melonxCoreFolder", title: tr("Carpeta MeloNX"), subtitle: tr("Abrir en Archivos"), symbol: "folder.fill", tint: SettingTint.blue, control: .symbol("arrow.up.forward"), action: {
             MeloNXCoreFolders.ensure()
             openExternal(MeloNXCoreFolders.filesAppURL, failure: tr("No se pudo abrir Archivos."))
@@ -2888,6 +2891,8 @@ struct HomeView: View {
             let ok: Bool = await Task.detached(priority: .userInitiated) { () -> Bool in
                 MeloNXCoreFolders.importKeys(urls)
             }.value
+            // Si MeloNX ya está cargado, que vuelva a leer las claves nuevas.
+            if ok { OSMeloNXEngine.shared.reloadKeys() }
             emulatorRevision += 1
             showToast(ok ? tr("Claves importadas") : tr("No se encontró prod.keys entre los archivos elegidos"), seconds: 3.5)
             if ok { refreshMeloNXFirmware() }

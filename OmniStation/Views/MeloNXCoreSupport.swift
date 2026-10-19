@@ -28,6 +28,8 @@ enum MeloNXCoreFolders {
     static let source = "core:melonx"
     static let idPrefix = "MeloNX/"
     static let dockedKey = "melonxCoreDocked"
+    /// Lo lee OSMeloNXEngine al abrir la partida (mismo nombre).
+    static let touchAlwaysKey = "melonxCoreTouchAlways"
 
     static let gameExtensions: Set<String> = ["nsp", "xci", "nro", "nca", "pfs0"]
 
