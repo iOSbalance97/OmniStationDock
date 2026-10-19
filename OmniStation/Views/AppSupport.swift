@@ -17,7 +17,7 @@ enum L10n {
     /// El español es el idioma base: la clave es el propio texto. En inglés se busca la traducción.
     static func tr(_ key: String, _ raw: String) -> String {
         guard resolve(raw) == "en" else { return key }
-        return english[key] ?? key
+        return english[key] ?? englishExtra[key] ?? key
     }
 
     static let english: [String: String] = [
@@ -586,15 +586,6 @@ struct Game: Identifiable {
     let tint: Color
     var launchURL: String? = nil
     var isCustom: Bool = false
-
-    static let samples: [Game] = [
-        Game(id: "God of War", name: "God of War", platform: "PS2", symbol: "flame.fill", tint: Color(red: 0.05, green: 0.42, blue: 1.0)),
-        Game(id: "Silent Hill 2", name: "Silent Hill 2", platform: "PS2", symbol: "moon.fill", tint: Color(red: 0.10, green: 0.30, blue: 0.78)),
-        Game(id: "Resident Evil 4", name: "Resident Evil 4", platform: "GameCube", symbol: "eye.fill", tint: Color(red: 0.06, green: 0.58, blue: 0.95)),
-        Game(id: "Pokémon Esmeralda", name: "Pokémon Esmeralda", platform: "GBA", symbol: "leaf.fill", tint: Color(red: 0.00, green: 0.72, blue: 1.0)),
-        Game(id: "Mario Kart DS", name: "Mario Kart DS", platform: "NDS", symbol: "flag.checkered", tint: Color(red: 0.10, green: 0.46, blue: 1.0)),
-        Game(id: "Pokémon Rojo Fuego", name: "Pokémon Rojo Fuego", platform: "GBA", symbol: "bolt.fill", tint: Color(red: 0.16, green: 0.82, blue: 1.0))
-    ]
 }
 
 /// Juego añadido por el usuario (escaneado de una carpeta o acceso directo por URL).
@@ -652,19 +643,6 @@ enum LibraryFolder {
     }
 }
 
-// MARK: - Vibración y sonido
-
-enum Feedback {
-    static func tap(haptics: Bool, sound: Bool) {
-        if haptics {
-            UIImpactFeedbackGenerator(style: .light).impactOccurred()
-        }
-        if sound {
-            AudioServicesPlaySystemSound(1104)
-        }
-    }
-}
-
 // MARK: - Orientación
 
 enum OrientationController {
@@ -712,7 +690,20 @@ final class ControllerMonitor: ObservableObject {
     }
 
     @Published private(set) var controllers: [Info] = []
-    var navigationEnabled = false
+    /// Durante una partida de un núcleo integrado está apagado: el mando es del juego y la
+    /// interfaz no toca sus manejadores (el núcleo pone los suyos). Al volver, se ponen otra vez.
+    var navigationEnabled = false {
+        didSet {
+            guard navigationEnabled != oldValue else { return }
+            if navigationEnabled {
+                GCController.controllers().forEach(bind)
+            } else {
+                heldDirection = nil
+                repeatTimer?.invalidate()
+                repeatTimer = nil
+            }
+        }
+    }
     /// L1/R1: cambiar plataforma.
     var onShoulder: ((Int) -> Void)?
     /// L2/R2: cambiar sección principal.
@@ -768,7 +759,7 @@ final class ControllerMonitor: ObservableObject {
                 charging: controller.battery?.batteryState == .charging
             )
         }
-        list.forEach(bind)
+        if navigationEnabled { list.forEach(bind) }
     }
 
     /// Dirección marcada: manda la cruceta; si está suelta, el stick izquierdo.

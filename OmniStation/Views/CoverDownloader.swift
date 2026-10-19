@@ -73,12 +73,6 @@ enum CoverDownloader {
         UserDefaults.standard.set(Array(ids), forKey: attemptedKey)
     }
 
-    static func unmarkAttempted(_ id: String) {
-        var ids: Set<String> = Set(UserDefaults.standard.stringArray(forKey: attemptedKey) ?? [])
-        ids.remove(id)
-        UserDefaults.standard.set(Array(ids), forKey: attemptedKey)
-    }
-
     /// Busca y descarga la carátula de un juego (nil si no hay ninguna que encaje).
     /// Orden: libretro-thumbnails; en Switch, el icono de la eShop por su Title ID; y si nada
     /// encaja, la portada de su artículo en Wikipedia.
@@ -327,9 +321,26 @@ final class BackdropStore {
 
     private let cache = NSCache<NSString, UIImage>()
     private var tried = Set<String>()
+    /// De dónde salió cada fondo guardado («hd»: SteamGridDB o banner de la eShop; «snap»: captura).
+    private static let qualityKey = "backdropQuality"
 
     private func fileURL(for id: String) -> URL {
         AppFolders.folder("Backdrops").appendingPathComponent(AppFolders.safeName(id) + ".jpg")
+    }
+
+    private func quality(_ id: String) -> String? {
+        (UserDefaults.standard.dictionary(forKey: Self.qualityKey) as? [String: String])?[id]
+    }
+
+    private func setQuality(_ id: String, _ value: String) {
+        var values: [String: String] = (UserDefaults.standard.dictionary(forKey: Self.qualityKey) as? [String: String]) ?? [:]
+        values[id] = value
+        UserDefaults.standard.set(values, forKey: Self.qualityKey)
+    }
+
+    /// Después de poner la clave de SteamGridDB: se vuelven a buscar los fondos de poca calidad.
+    func forgetMisses() {
+        tried.removeAll()
     }
 
     func cached(for id: String) -> UIImage? {
@@ -340,23 +351,50 @@ final class BackdropStore {
         return image
     }
 
-    /// La guardada o, si no hay, la busca y la guarda (una vez por sesión y juego).
+    /// ¿Merece la pena buscar uno mejor? (el guardado es una captura pequeña y hay SteamGridDB).
+    func wantsUpgrade(_ id: String) -> Bool {
+        quality(id) != "hd" && SteamGridDB.isConfigured && !tried.contains(id)
+    }
+
+    /// La guardada o, si no hay (o es de poca calidad), la busca y la guarda (una vez por sesión).
     @MainActor
     func image(id: String, name: String, platform: String, fileName: String?, titleID: String?) async -> UIImage? {
-        if let image = cached(for: id) { return image }
-        guard !tried.contains(id) else { return nil }
+        if let image = cached(for: id), !wantsUpgrade(id) { return image }
+        guard !tried.contains(id) else { return cached(for: id) }
         tried.insert(id)
-        guard let data = await Self.find(name: name, platform: platform, fileName: fileName, titleID: titleID),
-              let jpeg = ImageResizer.jpeg(from: data, maxSide: 1920) else { return nil }
+        guard let found = await Self.find(name: name, platform: platform, fileName: fileName, titleID: titleID) else {
+            return cached(for: id)
+        }
+        // Una captura no sustituye a un fondo bueno ya guardado.
+        if found.hd == false, cached(for: id) != nil { return cached(for: id) }
+        guard let jpeg = ImageResizer.jpeg(from: found.data, maxSide: 2560) else { return cached(for: id) }
         try? jpeg.write(to: fileURL(for: id), options: .atomic)
+        setQuality(id, found.hd ? "hd" : "snap")
+        cache.removeObject(forKey: id as NSString)
         return cached(for: id)
     }
 
-    private static func find(name: String, platform: String, fileName: String?, titleID: String?) async -> Data? {
+    func remove(for id: String) {
+        cache.removeObject(forKey: id as NSString)
+        try? FileManager.default.removeItem(at: fileURL(for: id))
+        tried.remove(id)
+    }
+
+    /// Por orden: SteamGridDB (fondo panorámico), banner de la eShop (Switch) y, si no hay nada,
+    /// una captura de libretro-thumbnails.
+    private static func find(name: String, platform: String, fileName: String?, titleID: String?) async -> (data: Data, hd: Bool)? {
+        if let hero = await SteamGridDB.heroURL(for: name), let data = try? await CoverDownloader.fetch(hero) {
+            return (data, true)
+        }
         if platform == "Switch", let titleID, let url = SwitchArtwork.bannerURL(titleID: titleID),
            let data = try? await CoverDownloader.fetch(url) {
-            return data
+            return (data, true)
         }
+        guard let data = await findSnapshot(name: name, platform: platform, fileName: fileName) else { return nil }
+        return (data, false)
+    }
+
+    private static func findSnapshot(name: String, platform: String, fileName: String?) async -> Data? {
         guard let repository = CoverDownloader.repository(for: platform) else { return nil }
         for folder in ["Named_Snaps", "Named_Titles"] {
             let names: [String] = (try? await CoverDownloader.imageNames(repository, folder: folder)) ?? []

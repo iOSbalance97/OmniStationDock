@@ -165,9 +165,6 @@ enum SoundKind: String, CaseIterable, Identifiable {
 
     var id: String { rawValue }
 
-    /// Nombre del archivo incluido en la app (Resources/Sounds), sin extensión.
-    var bundleName: String { "sound_\(rawValue)" }
-
     /// Nombres que se aceptan para cada sonido (sin extensión y sin distinguir mayúsculas).
     var aliases: [String] {
         switch self {
@@ -177,22 +174,6 @@ enum SoundKind: String, CaseIterable, Identifiable {
             return ["sound_select", "sound_selection", "select", "selection", "sound_seleccion", "seleccion", "sound_confirm", "confirm"]
         case .ambient:
             return ["sound_ambient", "ambient", "sound_music", "music", "bgm"]
-        }
-    }
-
-    var volumeKey: String {
-        switch self {
-        case .navigate: return "volumeNavigate"
-        case .select: return "volumeSelect"
-        case .ambient: return "volumeAmbient"
-        }
-    }
-
-    var defaultVolume: Double {
-        switch self {
-        case .navigate: return 0.5
-        case .select: return 0.7
-        case .ambient: return 0.3
         }
     }
 }
@@ -233,6 +214,13 @@ final class SoundManager {
         }
         return result
     }()
+
+    /// Al acabar una partida de un núcleo integrado (que usa el modo «reproducción»), vuelve al
+    /// modo «ambiente» de OmniStation.
+    func restoreSession() {
+        sessionReady = false
+        prepareSession()
+    }
 
     /// Modo «ambiente»: se mezcla con la música de otras apps y respeta el modo silencio.
     func prepareSession() {
@@ -275,10 +263,6 @@ final class SoundManager {
 
     func hasCustom(_ kind: SoundKind) -> Bool {
         customURL(for: kind) != nil
-    }
-
-    func hasSound(_ kind: SoundKind) -> Bool {
-        customURL(for: kind) != nil || bundledURL(for: kind) != nil
     }
 
     /// Qué archivo usa cada sonido, o por qué no suena.
