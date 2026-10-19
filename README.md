@@ -78,8 +78,9 @@ Un núcleo cargado no se descarga: si cambias de versión, se usa al volver a ab
 ## MeloNX integrado (Switch dentro de OmniStation)
 Se elige en Ajustes → MeloNX → *Modo de MeloNX*. Solo fuera de LiveContainer (SideStore/AltStore), iOS 18+.
 
-- **Runtime**: el workflow descarga la IPA oficial de MeloNX (su servidor Forgejo) y copia a `Frameworks/` su núcleo Ryujinx compilado y sus librerías (MoltenVK, SDL2, FFmpeg, RyujinxHelper, BreakpointJIT…), con `MeloNXRuntime.json`. Si subes tu propia `MeloNX.ipa` como release `melonx-runtime` de este repo, se usa esa. Si no se consigue, la app compila igual sin MeloNX integrado.
-- **Anfitrión propio** (`OmniStation/Core/OSMeloNXEngine.m`): carga el runtime, activa el JIT con la extensión de OmniStation (script universal de StikDebug en iOS 26), crea la pantalla (CAMetalLayer 16:9), pasa el mando y la pantalla táctil y arranca el juego. Menú con Home o SELECT+START: continuar o salir.
+- **Runtime**: el workflow descarga la IPA oficial de MeloNX (su servidor Forgejo) y copia a `Frameworks/` su núcleo Ryujinx compilado (`Ryujinx.Library.dylib`, MeloNX 2.7) y sus librerías (MoltenVK, SDL3, FFmpeg, BreakpointJIT), con `MeloNXRuntime.json`. Si subes tu propia `MeloNX.ipa` como release `melonx-runtime` de este repo, se usa esa. Si no se consigue, la app compila igual sin MeloNX integrado.
+- **Anfitrión propio** (`OmniStation/Core/OSMeloNXEngine.m`): carga el runtime, activa el JIT con la extensión de OmniStation (script universal de StikDebug en iOS 26), crea la pantalla (CAMetalLayer 16:9), pasa el mando y la pantalla táctil y arranca el juego con las opciones de MeloNX 2.7. Menú con Home o SELECT+START: continuar o salir.
+- **Mando táctil**: el mismo de MeloNX (Melo-Controller, en `Vendor/Melo-Controller`). Se ve sin mando físico y se oculta al conectar uno (Ajustes → MeloNX integrado → *Mando táctil siempre* para dejarlo fijo). El mando físico y el táctil son el mismo jugador 1: se puede conectar, desconectar o cambiar de mando en mitad de la partida. El botón Home del táctil abre el menú de OmniStation.
 - **Juegos**: Archivos → OmniStation Dock → `MeloNX/Juegos` (NSP, XCI, NRO, NCA).
 - **Claves y firmware**: Ajustes → MeloNX integrado → *Claves* (prod.keys, title.keys) y *Firmware* (zip). Ryujinx guarda sus datos (`system`, `bis`, `sdcard`, `games`…) en la raíz de OmniStation Dock.
 - **Registro**: `MeloNX/Registro.txt` (lo que escribe el núcleo en la última partida).
@@ -114,7 +115,8 @@ El workflow `.github/workflows/ios-build.yml` compila una IPA sin firmar y la pu
 ## Licencias
 - StikJIT: MPL-2.0 (código en `OmniStation/JIT/StikJIT`, licencia incluida). Su librería idevice y sus scripts conservan sus licencias.
 - ARMSX2 (GPL-3.0): el núcleo integrado `ARMSX2Core.framework` es ARMSX2 (https://github.com/ARMSX2/ARMSX2, etiqueta `iOSv2.6.0`) con el parche y el adaptador C de NeoStation iOS (https://github.com/TarbleFR/neostation-ios). La extensión de JIT (`Helper/`), el puente (`OmniStation/Core/`) y el script `Helper/Resources/armsx2-universal.js` están basados en NeoStation iOS (GPL-3.0-or-later). Con el núcleo integrado, OmniStation Dock en conjunto queda bajo GPL-3.0 (texto en `LICENSES/GPL-3.0.txt`): si se distribuye la IPA, hay que dar también su código fuente.
-- MeloNX (AGPL-3.0, https://melonx.org) y Ryujinx (MIT): el runtime se empaqueta tal cual desde la IPA oficial de MeloNX; el anfitrión de OmniStation usa sus mismas funciones en C.
+- MeloNX (AGPL-3.0, https://melonx.org) y Ryujinx (MIT): el runtime se empaqueta tal cual desde la IPA oficial de MeloNX; el anfitrión de OmniStation usa sus mismas funciones en C y `OmniStation/Core/OSMeloNXOptions.h` es su `NativeOptions.h`.
+- Melo-Controller (GPL-3.0, https://github.com/stossy11/Melo-Controller, revisión `c049ce8`): mando táctil, copiado sin cambios en `Vendor/Melo-Controller`.
 - Orbitron y Space Grotesk: SIL Open Font License 1.1.
 
 ## Tipografías

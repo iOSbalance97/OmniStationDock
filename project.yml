@@ -6,6 +6,11 @@ options:
     iOS: "17.0"
   createIntermediateGroups: true
 
+packages:
+  # Mando táctil de MeloNX (GPL-3.0, stossy11/Melo-Controller, revisión que usa MeloNX 2.7).
+  MeloController:
+    path: Vendor/Melo-Controller
+
 targets:
   OmniStationDock:
     type: application
@@ -42,6 +47,8 @@ targets:
     dependencies:
       # Extensión de JIT: engancha StikJIT a la propia OmniStation para sus núcleos integrados.
       - target: OmniStationJITHelper
+      - package: MeloController
+        product: Melo-Controller
       - sdk: GameController.framework
       - sdk: QuartzCore.framework
       - sdk: JavaScriptCore.framework
