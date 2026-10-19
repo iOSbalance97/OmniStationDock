@@ -64,8 +64,48 @@ jobs:
             echo "::error::Los archivos de ARMSX2Core.framework no coinciden ($FILES_SHA256)"
             exit 1
           fi
-          nm -gU ARMSX2Core | grep -q ' _NeoARMSX2_GetAPI$'
+          nm -gU ARMSX2Core | grep ' _NeoARMSX2_GetAPI$' >/dev/null
           echo "ARMSX2Core.framework listo: $(find . -type f | wc -l | tr -d ' ') archivos"
+
+      # Núcleo de ARMSX2 compilado por OmniStation (workflow «Build ARMSX2 core»). Opcional: si aún
+      # no se ha publicado la release «armsx2-core», la app solo lleva el de NeoStation.
+      - name: Fetch ARMSX2 core (OmniStation build, optional)
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          rm -rf Vendor/ARMSX2CoreOmni.framework Vendor/ARMSX2CoreOmni.json "$RUNNER_TEMP/omnicore"
+          mkdir -p "$RUNNER_TEMP/omnicore" Vendor
+          if ! gh release download armsx2-core --repo "$GITHUB_REPOSITORY" --pattern ARMSX2Core-OmniStation.zip --pattern identity.json --dir "$RUNNER_TEMP/omnicore" 2>/dev/null; then
+            echo "::notice::Aún no hay núcleo de ARMSX2 propio (release armsx2-core). Solo va el de NeoStation."
+            exit 0
+          fi
+          ditto -x -k "$RUNNER_TEMP/omnicore/ARMSX2Core-OmniStation.zip" "$RUNNER_TEMP/omnicore/x"
+          FW="$RUNNER_TEMP/omnicore/x/ARMSX2Core.framework"
+          if [ ! -f "$FW/ARMSX2Core" ] || [ ! -f "$FW/Info.plist" ] || ! nm -gU "$FW/ARMSX2Core" | grep ' _NeoARMSX2_GetAPI$' >/dev/null; then
+            echo "::warning::La release armsx2-core no trae un ARMSX2Core.framework válido. Se ignora."
+            exit 0
+          fi
+          cp -R "$FW" Vendor/ARMSX2CoreOmni.framework
+          cp "$RUNNER_TEMP/omnicore/identity.json" Vendor/ARMSX2CoreOmni.json
+          echo "Núcleo propio listo:"; cat Vendor/ARMSX2CoreOmni.json
+
+      # Runtime de MeloNX (núcleo Ryujinx compilado y sus librerías) sacado de la IPA oficial.
+      # Opcional: si no se consigue, la app se compila sin MeloNX integrado. Si subes tu propia
+      # IPA como release «melonx-runtime» de este repo, se usa esa.
+      - name: Fetch MeloNX runtime (optional)
+        env:
+          GH_TOKEN: ${{ github.token }}
+          MELONX_TAG: ""
+        run: |
+          set -uo pipefail
+          rm -rf Vendor/MeloNX "$RUNNER_TEMP/melonx-ipa"
+          mkdir -p "$RUNNER_TEMP/melonx-ipa" Vendor
+          LOCAL=""
+          if gh release download melonx-runtime --repo "$GITHUB_REPOSITORY" --pattern '*.ipa' --dir "$RUNNER_TEMP/melonx-ipa" 2>/dev/null; then
+            LOCAL="$(ls "$RUNNER_TEMP"/melonx-ipa/*.ipa | head -1)"
+          fi
+          python3 -I tools/fetch_melonx_runtime.py Vendor/MeloNX "$LOCAL"
 
       - name: Generate Xcode project
         run: xcodegen generate
@@ -95,6 +135,35 @@ jobs:
           test -f Payload/OmniStationDock.app/Frameworks/ARMSX2Core.framework/ARMSX2Core
           test -f Payload/OmniStationDock.app/Frameworks/ARMSX2Core.framework/Info.plist
           test -d Payload/OmniStationDock.app/PlugIns/OmniStationJITHelper.appex
+          # Núcleo de ARMSX2 propio (si se descargó).
+          if [ -d Vendor/ARMSX2CoreOmni.framework ]; then
+            cp -R Vendor/ARMSX2CoreOmni.framework Payload/OmniStationDock.app/Frameworks/ARMSX2CoreOmni.framework
+            cp Vendor/ARMSX2CoreOmni.json Payload/OmniStationDock.app/ARMSX2CoreOmni.json
+          fi
+          # Runtime de MeloNX (si se descargó): todo a Frameworks/, sin pisar nada de OmniStation.
+          if [ -f Vendor/MeloNX/MeloNXRuntime.json ]; then
+            for item in Vendor/MeloNX/Frameworks/*; do
+              name="$(basename "$item")"
+              if [ -e "Payload/OmniStationDock.app/Frameworks/$name" ]; then
+                echo "::warning::$name ya existe en la app; no se copia el de MeloNX."
+                continue
+              fi
+              cp -R "$item" "Payload/OmniStationDock.app/Frameworks/$name"
+            done
+            cp Vendor/MeloNX/MeloNXRuntime.json Payload/OmniStationDock.app/MeloNXRuntime.json
+          fi
+          # Permisos de la app (get-task-allow y más memoria). SideStore los conserva al firmar
+          # si el perfil los permite; «Increased Memory Limit» se añade al App ID con GetMoreRam.
+          if command -v ldid >/dev/null 2>&1 || HOMEBREW_NO_AUTO_UPDATE=1 brew install ldid >/dev/null 2>&1; then
+            if ldid -SConfig/OmniStation.entitlements Payload/OmniStationDock.app/OmniStationDock; then
+              ldid -e Payload/OmniStationDock.app/OmniStationDock || true
+            else
+              echo "::warning::ldid no pudo añadir los permisos; la IPA va sin el permiso de más memoria."
+            fi
+          else
+            echo "::warning::No se pudo instalar ldid: la IPA va sin el permiso de más memoria."
+          fi
+          du -sh Payload/OmniStationDock.app
           /usr/bin/zip -qry OmniStationDock.ipa Payload
           test -s OmniStationDock.ipa
           unzip -t OmniStationDock.ipa
