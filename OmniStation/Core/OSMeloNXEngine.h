@@ -44,6 +44,9 @@ NS_ASSUME_NONNULL_BEGIN
 - (void)installFirmwareAtPath:(NSString *)path
                    completion:(void (^)(BOOL success, NSString *message))completion;
 
+/// Vuelve a leer las claves (después de importarlas) si MeloNX ya está cargado.
+- (void)reloadKeys;
+
 /// Versión de firmware instalada (vacía si no hay). `completion` en el hilo principal.
 - (void)readFirmwareVersion:(void (^)(NSString *version))completion;
 

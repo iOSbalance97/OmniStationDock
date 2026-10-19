@@ -1,13 +1,18 @@
 // MeloNX integrado en OmniStation Dock (Nintendo Switch).
 // SPDX-License-Identifier: GPL-3.0-or-later
 //
-// Anfitrión propio de OmniStation para el runtime de MeloNX (AGPL-3.0, https://melonx.org;
-// Ryujinx, MIT). Hace lo mismo que la app MeloNX antes de jugar:
-//  1. Carga el runtime de Frameworks/ (SDL2, MoltenVK, ayudantes y el núcleo) y llama a initialize.
+// Anfitrión propio de OmniStation para el runtime de MeloNX 2.7 (AGPL-3.0, https://melonx.org;
+// Ryujinx, MIT). Sigue lo que hace la app MeloNX 2.7 (src/MeloNX/MeloNX/Core/Ryujinx.swift,
+// RyujinxController.swift y MeloNXApp.swift) antes de jugar:
+//  1. Carga el runtime de Frameworks/ (SDL3, MoltenVK, FFmpeg, BreakpointJIT y
+//     Ryujinx.Library.dylib), prepara SDL y las variables de entorno y llama a initialize.
 //  2. La extensión de JIT de OmniStation engancha StikJIT (script universal en iOS 26).
-//  3. initialize-dualmapped (iOS 26), set_native_window con la CAMetalLayer, mandos y
-//     main_ryujinx_sdl en un hilo propio hasta que se cierra la partida.
+//  3. init_dualmapping (iOS 26), set_native_window con la CAMetalLayer, el jugador 1
+//     (attach_gamepad) y main_ryujinx_sdl con OptionsNative en un hilo propio.
 #import "OSMeloNXEngine.h"
+#import "OSMeloNXOptions.h"
+
+#import <AVFoundation/AVFoundation.h>
 
 #import <UIKit/UIKit.h>
 #import <GameController/GameController.h>
@@ -21,6 +26,7 @@
 #import <sys/socket.h>
 #import <sys/types.h>
 #import <sys/sysctl.h>
+#import <sys/mman.h>
 #import <sys/utsname.h>
 #import <os/proc.h>
 #import <fcntl.h>
@@ -71,8 +77,8 @@ static NSString *OSNXEntryWithLength(NSString *directory, NSUInteger length) {
     return nil;
 }
 
-/// ¿Tiene este iPhone TXM? (La misma comprobación que hace MeloNX.)
-static BOOL OSNXHasTXM(void) {
+/// TXM por archivo (la comprobación clásica de MeloNX).
+static BOOL OSNXHasTXMClassic(void) {
     NSString *image = @"usr/standalone/firmware/FUD/Ap,TrustedExecutionMonitor.img4";
     NSString *boot = OSNXEntryWithLength(@"/System/Volumes/Preboot", 36);
     if (boot != nil) {
@@ -82,6 +88,36 @@ static BOOL OSNXHasTXM(void) {
     NSString *preboot = OSNXEntryWithLength(@"/private/preboot", 96);
     if (preboot == nil) return NO;
     return access([preboot stringByAppendingPathComponent:image].fileSystemRepresentation, F_OK) == 0;
+}
+
+/// Chip del iPhone según Metal («Apple A17 Pro GPU» → A, 17). Devuelve NO si no se reconoce.
+static BOOL OSNXChipInfo(unichar *series, NSInteger *number) {
+    id<MTLDevice> device = MTLCreateSystemDefaultDevice();
+    NSString *name = device.name.uppercaseString ?: @"";
+    NSRegularExpression *regex = [NSRegularExpression regularExpressionWithPattern:@"APPLE\\s+([MA])(\\d+)" options:0 error:nil];
+    NSTextCheckingResult *match = [regex firstMatchInString:name options:0 range:NSMakeRange(0, name.length)];
+    if (match == nil || match.numberOfRanges < 3) return NO;
+    *series = [name characterAtIndex:[match rangeAtIndex:1].location];
+    *number = [[name substringWithRange:[match rangeAtIndex:2]] integerValue];
+    return *number > 0;
+}
+
+/// ¿Tiene este iPhone TXM? Igual que MeloNX 2.7: desde iOS 26.6 la comprobación por archivo
+/// puede fallar y se decide por el chip (A15+ o M2+; en iOS 27, todo lo posterior al A12).
+static BOOL OSNXHasTXM(void) {
+    NSOperatingSystemVersion version = NSProcessInfo.processInfo.operatingSystemVersion;
+    unichar series = 0;
+    NSInteger number = 0;
+    if (version.majorVersion >= 27) {
+        if (OSNXChipInfo(&series, &number) && series == 'A') return number > 12;
+        return YES;
+    }
+    BOOL atLeast266 = version.majorVersion > 26 || (version.majorVersion == 26 && version.minorVersion >= 6);
+    if (atLeast266 && !OSNXHasTXMClassic()) {
+        if (!OSNXChipInfo(&series, &number)) return NO;
+        return series == 'M' ? number >= 2 : number >= 15;
+    }
+    return OSNXHasTXMClassic();
 }
 
 static NSString *OSNXText(NSString *language, NSString *spanish, NSString *english) {
@@ -421,24 +457,25 @@ static BOOL OSNXLaunchHelper(OSNXJitSession *session, NSData *pairingData, NSStr
 
 typedef struct {
     void (*initialize)(void);
-    bool (*initializeDualMapped)(void);
-    int32_t (*mainRyujinx)(int32_t argc, char **argv);
+    bool (*initDualMapping)(void);
+    int32_t (*mainRyujinx)(OptionsNative *options);
     void (*setNativeWindow)(void *layer);
-    void (*pauseEmulation)(bool pause);
+    void (*togglePause)(bool pause);
     void (*stopEmulation)(void);
+    void (*loadKeyset)(void);
     char *(*installFirmware)(const char *path);
     char *(*installedFirmwareVersion)(void);
     void (*freeFirmwareVersion)(char *text);
-    void *(*attachGamepad)(const char *name, void *identifier);
+    void *(*attachGamepad)(const char *name, void *identifier, int32_t playerIndex, int32_t controllerType);
     void (*detachGamepad)(void *identifier);
     void (*setButtonState)(void *identifier, int32_t button, uint8_t pressed);
     void (*setStickAxis)(void *identifier, int32_t stick, float x, float y);
-    void (*setGamepadConfiguration)(int32_t argc, char **argv);
     void (*touchBegan)(float x, float y, int32_t index);
     void (*touchMoved)(float x, float y, int32_t index);
     void (*touchEnded)(int32_t index);
     void (*setViewSize)(int32_t width, int32_t height);
-    void (*registerCallback)(NSString *identifier, void (^callback)(NSString *result));
+    void (*setUnboundedFps)(int32_t fps);
+    void (*reportMemoryPressure)(uint8_t critical);
 } OSNXCoreAPI;
 
 // Botones tal como los numera MeloNX (VirtualControllerButton).
@@ -448,18 +485,6 @@ typedef NS_ENUM(int32_t, OSNXButton) {
     OSNXButtonDPadUp, OSNXButtonDPadDown, OSNXButtonDPadLeft, OSNXButtonDPadRight,
     OSNXButtonLeftTrigger, OSNXButtonRightTrigger, OSNXButtonCount
 };
-
-/// Llama a una función del núcleo con una lista de argumentos (copias en C que se liberan después).
-static int32_t OSNXCallWithArguments(NSArray<NSString *> *arguments, int32_t (^body)(int32_t, char **)) {
-    int32_t count = (int32_t)arguments.count;
-    char **argv = calloc((size_t)count + 1, sizeof(char *));
-    if (argv == NULL) return -1;
-    for (int32_t index = 0; index < count; index++) argv[index] = strdup(arguments[(NSUInteger)index].UTF8String ?: "");
-    int32_t result = body(count, argv);
-    for (int32_t index = 0; index < count; index++) free(argv[index]);
-    free(argv);
-    return result;
-}
 
 // MARK: - Mando físico → núcleo
 
@@ -473,6 +498,8 @@ static int32_t OSNXCallWithArguments(NSArray<NSString *> *arguments, int32_t (^b
 @property (nonatomic, assign) BOOL suspended;
 - (instancetype)initWithAPI:(const OSNXCoreAPI *)api;
 - (void)bindController:(nullable GCController *)controller;
+- (void)send:(OSNXButton)button pressed:(BOOL)pressed;
+- (void)moveStick:(int32_t)stick x:(float)x y:(float)y;
 - (void)releaseAll;
 - (void)detach;
 @end
@@ -484,7 +511,8 @@ static int32_t OSNXCallWithArguments(NSArray<NSString *> *arguments, int32_t (^b
     if (self) {
         _api = api;
         _identifier = [NSString stringWithFormat:@"%llX", (unsigned long long)(uintptr_t)(__bridge void *)self];
-        api->attachGamepad("OmniStation Controller", (__bridge void *)self);
+        // Jugador 1 (índice 0) como mando Pro (ControllerTypeProController).
+        api->attachGamepad("OmniStation Controller", (__bridge void *)self, 0, (int32_t)ControllerTypeProController);
     }
     return self;
 }
@@ -492,6 +520,11 @@ static int32_t OSNXCallWithArguments(NSArray<NSString *> *arguments, int32_t (^b
 - (void)send:(OSNXButton)button pressed:(BOOL)pressed {
     if (self.suspended && pressed) return;
     self.api->setButtonState((__bridge void *)self, button, pressed ? 1 : 0);
+}
+
+- (void)moveStick:(int32_t)stick x:(float)x y:(float)y {
+    if (self.suspended) { x = 0; y = 0; }
+    self.api->setStickAxis((__bridge void *)self, stick, x, y);
 }
 
 - (void)setButton:(GCControllerButtonInput *)input to:(OSNXButton)button enabled:(BOOL)enabled {
@@ -650,15 +683,68 @@ static int32_t OSNXCallWithArguments(NSArray<NSString *> *arguments, int32_t (^b
 
 @end
 
+// MARK: - Contenedor de la pantalla del juego
+
+/// Ocupa toda la pantalla y centra dentro la vista 16:9 del juego. Con mando táctil, este
+/// contenedor va dentro de SwiftUI (debajo del mando de MeloNX), como en la app MeloNX.
+@interface OSNXGameContainer : UIView
+@property (nonatomic, strong) OSNXMetalView *metalView;
++ (CGRect)gameRectInBounds:(CGRect)bounds;
+@end
+
+@implementation OSNXGameContainer
+
++ (CGRect)gameRectInBounds:(CGRect)bounds {
+    CGFloat w = bounds.size.width;
+    CGFloat h = bounds.size.height;
+    CGFloat targetW = w;
+    CGFloat targetH = floor(w * 9.0 / 16.0);
+    if (targetH > h) {
+        targetH = h;
+        targetW = floor(h * 16.0 / 9.0);
+    }
+    return CGRectMake(floor((w - targetW) * 0.5), floor((h - targetH) * 0.5), targetW, targetH);
+}
+
+- (void)layoutSubviews {
+    [super layoutSubviews];
+    if (self.bounds.size.width > 1 && self.bounds.size.height > 1) {
+        self.metalView.frame = [OSNXGameContainer gameRectInBounds:self.bounds];
+    }
+}
+
+@end
+
+// Mando táctil de MeloNX (Melo-Controller). Lo crea OSNXTouchScreenFactory (Swift) por su nombre.
+static UIViewController *OSNXMakeTouchScreen(UIView *gameView, void (^button)(NSInteger, BOOL), void (^stick)(BOOL, double, double)) {
+    Class factory = NSClassFromString(@"OSNXTouchScreenFactory");
+    SEL selector = NSSelectorFromString(@"makeWithGameView:button:stick:");
+    if (factory == Nil || ![factory respondsToSelector:selector]) return nil;
+    UIViewController *(*make)(id, SEL, UIView *, id, id) = (UIViewController *(*)(id, SEL, UIView *, id, id))objc_msgSend;
+    return make(factory, selector, gameView, button, stick);
+}
+
+static void OSNXSetTouchVisible(UIViewController *controller, BOOL visible) {
+    SEL selector = NSSelectorFromString(@"setTouchVisible:");
+    if (controller == nil || ![controller respondsToSelector:selector]) return;
+    void (*setVisible)(id, SEL, BOOL) = (void (*)(id, SEL, BOOL))objc_msgSend;
+    setVisible(controller, selector, visible);
+}
+
 // MARK: - Pantalla de juego
 
 @interface OSNXGameViewController : UIViewController
 @property (nonatomic, assign) const OSNXCoreAPI *api;
 @property (nonatomic, copy) NSString *language;
 @property (nonatomic, strong, readonly) OSNXMetalView *metalView;
+@property (nonatomic, strong, readonly) OSNXGameContainer *gameContainer;
 @property (nonatomic, assign) BOOL closing;
 @property (nonatomic, copy, nullable) void (^menuChanged)(BOOL open);
 @property (nonatomic, copy, nullable) void (^quitRequested)(void);
+/// Mando táctil (si va en la app) y si se enseña siempre o solo sin mando físico.
+@property (nonatomic, strong, nullable) UIViewController *touchController;
+@property (nonatomic, assign) BOOL touchAlways;
+- (void)updateTouchVisibility;
 - (void)showStatus:(NSString *)message sticky:(BOOL)sticky;
 - (void)hideStatus;
 - (void)openMenu;
@@ -683,6 +769,10 @@ static int32_t OSNXCallWithArguments(NSArray<NSString *> *arguments, int32_t (^b
         self.modalTransitionStyle = UIModalTransitionStyleCrossDissolve;
         _language = @"es";
         _metalView = [[OSNXMetalView alloc] initWithFrame:CGRectMake(0, 0, 16, 9)];
+        _gameContainer = [[OSNXGameContainer alloc] initWithFrame:UIScreen.mainScreen.bounds];
+        _gameContainer.backgroundColor = UIColor.blackColor;
+        _gameContainer.metalView = _metalView;
+        [_gameContainer addSubview:_metalView];
     }
     return self;
 }
@@ -703,7 +793,20 @@ static int32_t OSNXCallWithArguments(NSArray<NSString *> *arguments, int32_t (^b
     self.view = root;
     self.metalView.api = self.api;
     self.metalView.touchEnabled = YES;
-    [root addSubview:self.metalView];
+    UIViewController *touch = self.touchController;
+    if (touch != nil) {
+        // El contenedor del juego ya va dentro de la vista SwiftUI del mando táctil.
+        [self addChildViewController:touch];
+        touch.view.frame = root.bounds;
+        touch.view.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
+        [root addSubview:touch.view];
+        [touch didMoveToParentViewController:self];
+    } else {
+        self.gameContainer.frame = root.bounds;
+        self.gameContainer.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
+        [root addSubview:self.gameContainer];
+    }
+    [self updateTouchVisibility];
 
     _menuButton = [UIButton buttonWithType:UIButtonTypeSystem];
     _menuButton.tintColor = UIColor.whiteColor;
@@ -753,14 +856,6 @@ static int32_t OSNXCallWithArguments(NSArray<NSString *> *arguments, int32_t (^b
     UIView *root = self.view;
     CGFloat w = root.bounds.size.width;
     CGFloat h = root.bounds.size.height;
-    // Pantalla 16:9 centrada (la de la Switch).
-    CGFloat targetW = w;
-    CGFloat targetH = floor(w * 9.0 / 16.0);
-    if (targetH > h) {
-        targetH = h;
-        targetW = floor(h * 16.0 / 9.0);
-    }
-    self.metalView.frame = CGRectMake(floor((w - targetW) * 0.5), floor((h - targetH) * 0.5), targetW, targetH);
     UIEdgeInsets safe = root.safeAreaInsets;
     _menuButton.frame = CGRectMake(safe.left + 10, safe.top + 8, 36, 36);
     CGFloat labelWidth = MIN(w * 0.7, 440);
@@ -794,6 +889,15 @@ static int32_t OSNXCallWithArguments(NSArray<NSString *> *arguments, int32_t (^b
 
 - (void)dealloc {
     [_displayLink invalidate];
+}
+
+/// Con mando físico conectado, el táctil se oculta (salvo que se pida siempre).
+- (void)updateTouchVisibility {
+    BOOL hasController = NO;
+    for (GCController *controller in GCController.controllers) {
+        if (controller.extendedGamepad != nil) hasController = YES;
+    }
+    OSNXSetTouchVisible(self.touchController, !hasController || self.touchAlways);
 }
 
 - (void)showStatus:(NSString *)message sticky:(BOOL)sticky {
@@ -906,8 +1010,7 @@ static int32_t OSNXCallWithArguments(NSArray<NSString *> *arguments, int32_t (^b
     BOOL _dualMapped;
     dispatch_queue_t _queue;
     NSMutableArray<id> *_observers;
-    void (^_exitCallback)(NSString *);
-    void (^_firstFrameCallback)(NSString *);
+    BOOL _menuOpen;
 }
 
 + (OSMeloNXEngine *)shared {
@@ -942,7 +1045,7 @@ static int32_t OSNXCallWithArguments(NSArray<NSString *> *arguments, int32_t (^b
 }
 
 + (NSString *)corePath {
-    NSString *core = [self.manifest[@"core"] isKindOfClass:NSString.class] ? self.manifest[@"core"] : @"Ryujinx.Headless.SDL2.dylib";
+    NSString *core = [self.manifest[@"core"] isKindOfClass:NSString.class] ? self.manifest[@"core"] : @"Ryujinx.Library.dylib";
     return [self.frameworksPath stringByAppendingPathComponent:core];
 }
 
@@ -1015,24 +1118,34 @@ static int32_t OSNXCallWithArguments(NSArray<NSString *> *arguments, int32_t (^b
     }
     [self redirectOutput];
     NSString *frameworks = [OSMeloNXEngine frameworksPath];
-    // El núcleo abre sus ayudantes por ruta relativa ("RyujinxHelper.framework/RyujinxHelper").
+    // El núcleo abre algunas librerías por ruta relativa ("BreakpointJIT.framework/BreakpointJIT").
     chdir(frameworks.fileSystemRepresentation);
 
+    // Variables de entorno: las mismas que pone MeloNX 2.7 (initEnvironmentVariables).
     BOOL txm = OSNXHasTXM();
-    _dualMapped = OSNXUsesScript();
-    setenv("HAS_TXM", txm ? "1" : "0", 1);
-    setenv("DUAL_MAPPED_JIT", _dualMapped ? "1" : "0", 1);
+    _dualMapped = NSProcessInfo.processInfo.operatingSystemVersion.majorVersion >= 19;
+    setenv("MVK_CONFIG_MAX_ACTIVE_METAL_COMMAND_BUFFERS_PER_QUEUE", "32", 1);
     id<MTLDevice> device = MTLCreateSystemDefaultDevice();
     BOOL tier2 = device != nil && device.argumentBuffersSupport >= MTLArgumentBuffersTier2;
     setenv("MVK_CONFIG_USE_METAL_ARGUMENT_BUFFERS", tier2 ? "1" : "0", 1);
-    printf("[OmniStation] MeloNX %s · iOS %s · TXM %d · dual-mapped %d\n",
+    setenv("MVK_SUPPORTS_EXT_DYN_STATE", (device != nil && [device supportsFamily:MTLGPUFamilyApple4]) ? "1" : "0", 1);
+    setenv("HAS_TXM", (_dualMapped && txm) ? "1" : "0", 1);
+    setenv("DUAL_MAPPED_JIT", _dualMapped ? "1" : "0", 1);
+    printf("[OmniStation] MeloNX %s · iOS %s · GPU %s · TXM %d · dual-mapped %d\n",
            [OSMeloNXEngine runtimeVersion].UTF8String,
-           NSProcessInfo.processInfo.operatingSystemVersionString.UTF8String, txm, _dualMapped);
+           NSProcessInfo.processInfo.operatingSystemVersionString.UTF8String,
+           device.name.UTF8String ?: "?", txm, _dualMapped);
 
+    // Lo que la app MeloNX enlaza al arrancar: se carga antes del núcleo y con RTLD_GLOBAL, para
+    // que el núcleo encuentre cada librería ya cargada (SDL3 la pide como @rpath/SDL3.framework/SDL3).
     void *sdl = NULL;
-    void *helper = NULL;
-    for (NSString *relative in @[@"SDL2.framework/SDL2", @"libMoltenVK.dylib", @"MoltenVK.framework/MoltenVK",
-                                 @"RyujinxHelper.framework/RyujinxHelper", @"BreakpointJIT.framework/BreakpointJIT"]) {
+    NSArray<NSString *> *preload = @[
+        @"libavutil.framework/libavutil", @"libswresample.framework/libswresample", @"libswscale.framework/libswscale",
+        @"libavcodec.framework/libavcodec", @"libavformat.framework/libavformat", @"libavfilter.framework/libavfilter",
+        @"libavutil.dylib", @"libavcodec.dylib", @"libMoltenVK.dylib",
+        @"SDL3.framework/SDL3", @"BreakpointJIT.framework/BreakpointJIT",
+    ];
+    for (NSString *relative in preload) {
         NSString *path = [frameworks stringByAppendingPathComponent:relative];
         if (![NSFileManager.defaultManager fileExistsAtPath:path]) continue;
         void *handle = dlopen(path.fileSystemRepresentation, RTLD_NOW | RTLD_GLOBAL);
@@ -1041,8 +1154,11 @@ static int32_t OSNXCallWithArguments(NSArray<NSString *> *arguments, int32_t (^b
             printf("[OmniStation] No se pudo cargar %s: %s\n", relative.UTF8String, detail ? detail : "?");
             continue;
         }
-        if ([relative hasPrefix:@"SDL2."]) sdl = handle;
-        if ([relative hasPrefix:@"RyujinxHelper."]) helper = handle;
+        if ([relative hasPrefix:@"SDL3."]) sdl = handle;
+    }
+    if (sdl == NULL) {
+        if (error) *error = @"Falta SDL3 en el runtime de MeloNX.";
+        return NO;
     }
     dlerror();
     void *core = dlopen([OSMeloNXEngine corePath].fileSystemRepresentation, RTLD_NOW | RTLD_GLOBAL);
@@ -1051,46 +1167,44 @@ static int32_t OSNXCallWithArguments(NSArray<NSString *> *arguments, int32_t (^b
         if (error) *error = [NSString stringWithFormat:@"No se pudo cargar el núcleo de MeloNX: %s", detail ? detail : "desconocido"];
         return NO;
     }
-    if (sdl == NULL || helper == NULL) {
-        if (error) *error = @"Faltan SDL2 o RyujinxHelper en el runtime de MeloNX.";
-        return NO;
-    }
     NSMutableArray<NSString *> *missing = [NSMutableArray new];
     OSNXCoreAPI api;
     memset(&api, 0, sizeof(api));
     api.initialize = (void (*)(void))[self symbol:core name:"initialize" missing:missing];
-    api.mainRyujinx = (int32_t (*)(int32_t, char **))[self symbol:core name:"main_ryujinx_sdl" missing:missing];
+    api.mainRyujinx = (int32_t (*)(OptionsNative *))[self symbol:core name:"main_ryujinx_sdl" missing:missing];
     api.setNativeWindow = (void (*)(void *))[self symbol:core name:"set_native_window" missing:missing];
-    api.pauseEmulation = (void (*)(bool))dlsym(core, "pause_emulation");  // opcional (no en MeloNX 2.7)
     api.stopEmulation = (void (*)(void))[self symbol:core name:"stop_emulation" missing:missing];
     api.installFirmware = (char *(*)(const char *))[self symbol:core name:"install_firmware" missing:missing];
     api.installedFirmwareVersion = (char *(*)(void))[self symbol:core name:"installed_firmware_version" missing:missing];
     api.freeFirmwareVersion = (void (*)(char *))[self symbol:core name:"free_firmware_version" missing:missing];
-    api.attachGamepad = (void *(*)(const char *, void *))[self symbol:core name:"attach_gamepad" missing:missing];
+    api.attachGamepad = (void *(*)(const char *, void *, int32_t, int32_t))[self symbol:core name:"attach_gamepad" missing:missing];
     api.detachGamepad = (void (*)(void *))[self symbol:core name:"detach_gamepad" missing:missing];
     api.setButtonState = (void (*)(void *, int32_t, uint8_t))[self symbol:core name:"set_gamepad_button_state" missing:missing];
     api.setStickAxis = (void (*)(void *, int32_t, float, float))[self symbol:core name:"set_gamepad_stick_axis" missing:missing];
-    api.setGamepadConfiguration = (void (*)(int32_t, char **))dlsym(core, "set_gamepad_configuration");  // opcional
     api.touchBegan = (void (*)(float, float, int32_t))[self symbol:core name:"touch_began" missing:missing];
     api.touchMoved = (void (*)(float, float, int32_t))[self symbol:core name:"touch_moved" missing:missing];
     api.touchEnded = (void (*)(int32_t))[self symbol:core name:"touch_ended" missing:missing];
     api.setViewSize = (void (*)(int32_t, int32_t))[self symbol:core name:"set_view_size" missing:missing];
     if (_dualMapped) {
-        api.initializeDualMapped = (bool (*)(void))[self symbol:core name:"initialize-dualmapped" missing:missing];
+        api.initDualMapping = (bool (*)(void))[self symbol:core name:"init_dualmapping" missing:missing];
     }
-    api.registerCallback = (void (*)(NSString *, void (^)(NSString *)))[self symbol:helper name:"RegisterCallback" missing:missing];
+    // Opcionales: si faltan, se sigue sin ellas.
+    api.togglePause = (void (*)(bool))dlsym(core, "toggle_pause_emulation");
+    api.loadKeyset = (void (*)(void))dlsym(core, "load_keyset");
+    api.setUnboundedFps = (void (*)(int32_t))dlsym(core, "set_unbounded_present_target_fps");
+    api.reportMemoryPressure = (void (*)(uint8_t))dlsym(core, "report_memory_pressure");
     void (*sdlSetMainReady)(void) = (void (*)(void))[self symbol:sdl name:"SDL_SetMainReady" missing:missing];
-    void (*sdlSetEventPump)(int) = (void (*)(int))[self symbol:sdl name:"SDL_iPhoneSetEventPump" missing:missing];
-    int (*sdlInit)(uint32_t) = (int (*)(uint32_t))[self symbol:sdl name:"SDL_Init" missing:missing];
+    void (*sdlSetEventPump)(bool) = (void (*)(bool))[self symbol:sdl name:"SDL_SetiOSEventPump" missing:missing];
+    bool (*sdlInit)(uint32_t) = (bool (*)(uint32_t))[self symbol:sdl name:"SDL_Init" missing:missing];
     if (missing.count > 0) {
         if (error) *error = [@"El runtime de MeloNX no es compatible con esta versión de OmniStation. Falta: " stringByAppendingString:[missing componentsJoinedByString:@", "]];
         return NO;
     }
     _api = api;
-    // Como MeloNX al arrancar: SDL (eventos y audio) y después el núcleo.
+    // Como MeloNX 2.7 al arrancar (AppDelegate): SDL de eventos y después el núcleo.
     sdlSetMainReady();
-    sdlSetEventPump(1);
-    sdlInit(0x00004000u | 0x00000010u);
+    sdlSetEventPump(true);
+    sdlInit(0x00004000u);
     _api.initialize();
     _loaded = YES;
     return YES;
@@ -1130,16 +1244,33 @@ static int32_t OSNXCallWithArguments(NSArray<NSString *> *arguments, int32_t (^b
         return;
     }
     dispatch_async(_queue, ^{
+        // MeloNX 2.7: NULL si se instaló; si no, el texto del error.
+        if (self->_api.loadKeyset) self->_api.loadKeyset();
         char *raw = self->_api.installFirmware(path.fileSystemRepresentation);
-        NSString *text = raw ? ([NSString stringWithUTF8String:raw] ?: @"") : @"";
-        if (raw) self->_api.freeFirmwareVersion(raw);
-        BOOL failed = raw == NULL || [text containsString:@"✖"];
-        NSCharacterSet *trim = [NSCharacterSet characterSetWithCharactersInString:@"✖✔ \n\t"];
-        NSString *clean = [text stringByTrimmingCharactersInSet:trim];
+        NSString *failure = nil;
+        if (raw != NULL) {
+            NSString *text = [NSString stringWithUTF8String:raw] ?: @"";
+            self->_api.freeFirmwareVersion(raw);
+            failure = [text componentsSeparatedByCharactersInSet:NSCharacterSet.newlineCharacterSet].firstObject;
+            if (failure.length == 0) failure = @"No se pudo instalar el firmware.";
+        }
+        NSString *version = @"";
+        if (failure == nil) {
+            char *installed = self->_api.installedFirmwareVersion();
+            if (installed != NULL) {
+                version = [NSString stringWithUTF8String:installed] ?: @"";
+                self->_api.freeFirmwareVersion(installed);
+            }
+        }
         dispatch_async(dispatch_get_main_queue(), ^{
-            completion(!failed, clean.length ? clean : (failed ? @"No se pudo instalar el firmware." : @"Firmware instalado."));
+            completion(failure == nil, failure ?: (version.length ? version : @"Firmware instalado."));
         });
     });
+}
+
+- (void)reloadKeys {
+    if (!_loaded || self.busy || _api.loadKeyset == NULL) return;
+    dispatch_async(_queue, ^{ self->_api.loadKeyset(); });
 }
 
 - (void)readFirmwareVersion:(void (^)(NSString *))completion {
@@ -1226,40 +1357,67 @@ static int32_t OSNXCallWithArguments(NSArray<NSString *> *arguments, int32_t (^b
     return [NSString stringWithUTF8String:info.machine] ?: @"iPhone";
 }
 
-- (NSArray<NSString *> *)inputArguments {
-    NSMutableArray<NSString *> *arguments = [NSMutableArray new];
-    NSUInteger slot = 1;
-    for (OSNXPad *pad in self.pads) {
-        if (slot > 8) break;
-        [arguments addObjectsFromArray:@[[NSString stringWithFormat:@"--input-id-%lu", (unsigned long)slot], pad.identifier,
-                                         [NSString stringWithFormat:@"--controller-type-%lu", (unsigned long)slot], @"ProController"]];
-        slot += 1;
-    }
-    return arguments;
+static char *OSNXCopy(NSString *text) {
+    return text.length ? strdup(text.UTF8String) : NULL;
 }
 
-- (NSArray<NSString *> *)argumentsForGame:(NSString *)path size:(CGSize)size language:(NSString *)language docked:(BOOL)docked {
+/// ¿Puede reservar 4 GB de direcciones? Si no, iOS exige «Extended Virtual Addressing»
+/// (la misma prueba que hace MeloNX 2.7 antes de jugar).
+static BOOL OSNXNeedsExtendedVirtualAddressing(void) {
+    size_t fourGB = (size_t)4 * 1024 * 1024 * 1024;
+    void *address = mmap(NULL, fourGB, PROT_NONE, MAP_PRIVATE | MAP_ANON, -1, 0);
+    if (address == MAP_FAILED) return YES;
+    munmap(address, fourGB);
+    return NO;
+}
+
+/// Opciones de la partida. El núcleo libera la estructura y sus textos con free(): todo con
+/// calloc/strdup. Los valores por defecto son los de MeloNX 2.7 (Options.swift).
+- (OptionsNative *)optionsForGame:(NSString *)path size:(CGSize)size language:(NSString *)language docked:(BOOL)docked {
+    OptionsNative *options = calloc(1, sizeof(OptionsNative));
+    if (options == NULL) return NULL;
     BOOL english = [language isEqualToString:@"en"];
-    NSMutableArray<NSString *> *arguments = [NSMutableArray arrayWithObject:path];
-    [arguments addObjectsFromArray:@[@"--graphics-backend", @"Vulkan",
-                                     @"--memory-manager-mode", @"HostMappedUnsafe",
-                                     @"--exclusive-fullscreen", @"true",
-                                     @"--exclusive-fullscreen-width", [NSString stringWithFormat:@"%d", (int)size.width],
-                                     @"--exclusive-fullscreen-height", [NSString stringWithFormat:@"%d", (int)size.height],
-                                     @"--device-model", [OSMeloNXEngine machineName],
-                                     @"--device-display-name", UIDevice.currentDevice.model]];
-    if ([OSMeloNXEngine hasIncreasedMemoryLimit]) [arguments addObject:@"--has-memory-entitlement"];
-    [arguments addObjectsFromArray:@[@"--system-language", english ? @"AmericanEnglish" : @"Spanish",
-                                     @"--system-region", english ? @"USA" : @"Europe",
-                                     @"--aspect-ratio", @"Stretched",
-                                     @"--system-timezone", NSTimeZone.localTimeZone.name,
-                                     @"--correct-controller",
-                                     @"--max-anisotropy", @"1.0",
-                                     @"--disable-macro-hle",
-                                     @"--disable-shader-cache"]];
-    if (!docked) [arguments addObject:@"--disable-docked-mode"];
-    [arguments addObjectsFromArray:[self inputArguments]];
-    return arguments;
+    options->IsExclusiveFullscreen = false;
+    options->ExclusiveFullscreenWidth = (int32_t)size.width;
+    options->ExclusiveFullscreenHeight = (int32_t)size.height;
+    options->DeviceModel = OSNXCopy([OSMeloNXEngine machineName]);
+    options->MemoryEnt = [OSMeloNXEngine hasIncreasedMemoryLimit];
+    options->DisplayName = OSNXCopy(UIDevice.currentDevice.model);
+    options->ControllerType1 = ControllerTypeProController;
+    options->ControllerType2 = ControllerTypeProController;
+    options->ControllerType3 = ControllerTypeProController;
+    options->ControllerType4 = ControllerTypeProController;
+    options->ControllerType5 = ControllerTypeProController;
+    options->ControllerType6 = ControllerTypeProController;
+    options->ControllerType7 = ControllerTypeProController;
+    options->ControllerType8 = ControllerTypeProController;
+    options->HideCursorMode = HideCursorMode_OnIdle;
+    options->VSyncMode = 0;
+    options->CustomVSyncInterval = 120;
+    options->DisableShaderCache = true;
+    options->EnableTextureRecompression = true;
+    options->DisableDockedMode = !docked;
+    options->SystemLanguage = english ? SystemLanguage_AmericanEnglish : SystemLanguage_Spanish;
+    options->SystemRegion = english ? NativeRegionCode_USA : NativeRegionCode_Europe;
+    options->SystemTimeZone = OSNXCopy(NSTimeZone.localTimeZone.name);
+    options->MemoryManagerMode = MemoryManagerMode_HostMappedUnsafe;
+    options->AudioVolume = 1.0f;
+    options->MultiplayerLanInterfaceId = OSNXCopy(@"0");
+    options->LoggingGraphicsDebugLevel = GraphicsDebugLevel_None;
+    options->ResScale = 1.0f;
+    options->MaxAnisotropy = -1.0f;
+    options->AspectRatio = AspectRatio_Fixed16x9;
+    // MeloNX lo fuerza a «On» al arrancar cada juego (RyujinxController.startGame).
+    options->BackendThreading = BackendThreading_On;
+    options->GraphicsBackend = GraphicsBackend_Vulkan;
+    options->PreferredGPUVendor = OSNXCopy(@"");
+    options->AntiAliasing = AntiAliasing_None;
+    options->ScalingFilter = ScalingFilter_Bilinear;
+    options->ScalingFilterLevel = 60;
+    options->MetalFxUpscaleFactor = 2.0f;
+    options->EnableHostMemoryBudgetTracking = true;
+    options->InputPath = OSNXCopy(path);
+    return options;
 }
 
 - (UIViewController *)topViewController {
@@ -1303,35 +1461,40 @@ static int32_t OSNXCallWithArguments(NSArray<NSString *> *arguments, int32_t (^b
         OSNXPad *player = strongSelf.pads.firstObject;
         GCController *connected = [note.object isKindOfClass:GCController.class] ? (GCController *)note.object : nil;
         if (!strongSelf || !strongSelf.busy || player == nil || connected.extendedGamepad == nil) return;
-        // Sin mando (o tras una desconexión), el que se conecta pasa a ser el jugador 1.
+        // Sin mando físico (o tras una desconexión), el que se conecta pasa a ser el jugador 1.
         if (player.controller == nil) {
             [player bindController:connected];
             [strongSelf.gameController showStatus:OSNXText(strongSelf.gameController.language, @"Mando conectado", @"Controller connected") sticky:NO];
         }
+        [strongSelf.gameController updateTouchVisibility];
     }]];
     [_observers addObject:[center addObserverForName:GCControllerDidDisconnectNotification object:nil queue:NSOperationQueue.mainQueue usingBlock:^(NSNotification *note) {
         OSMeloNXEngine *strongSelf = weakSelf;
         OSNXPad *player = strongSelf.pads.firstObject;
-        if (!strongSelf || !strongSelf.busy || player == nil || note.object != player.controller) return;
-        [player bindController:nil];
-        GCController *other = [strongSelf preferredController];
-        if (other != nil && other != note.object) {
-            [player bindController:other];
-            return;
+        if (!strongSelf || !strongSelf.busy || player == nil) return;
+        if (note.object == player.controller) {
+            [player bindController:nil];
+            GCController *other = [strongSelf preferredController];
+            if (other != nil && other != note.object) {
+                [player bindController:other];
+            } else {
+                // Sin mando físico: se sigue con el mando táctil, en el mismo jugador 1.
+                [strongSelf.gameController showStatus:OSNXText(strongSelf.gameController.language, @"Mando desconectado: sigue con el táctil o vuelve a conectarlo", @"Controller disconnected: keep playing with touch or reconnect it") sticky:NO];
+            }
         }
-        // Sin mando: menú abierto (y el juego en pausa si esta versión de MeloNX lo permite).
-        [strongSelf.gameController openMenu];
-        [strongSelf.gameController showStatus:OSNXText(strongSelf.gameController.language, @"Mando desconectado: vuelve a conectarlo para seguir", @"Controller disconnected: reconnect it to continue") sticky:YES];
+        [strongSelf.gameController updateTouchVisibility];
     }]];
     [_observers addObject:[center addObserverForName:UIApplicationWillResignActiveNotification object:nil queue:NSOperationQueue.mainQueue usingBlock:^(NSNotification *note) {
         OSMeloNXEngine *strongSelf = weakSelf;
-        if (strongSelf && strongSelf.busy && strongSelf->_api.pauseEmulation) strongSelf->_api.pauseEmulation(true);
+        if (strongSelf && strongSelf.busy && strongSelf->_api.togglePause) strongSelf->_api.togglePause(true);
     }]];
     [_observers addObject:[center addObserverForName:UIApplicationDidBecomeActiveNotification object:nil queue:NSOperationQueue.mainQueue usingBlock:^(NSNotification *note) {
         OSMeloNXEngine *strongSelf = weakSelf;
-        if (strongSelf && strongSelf.busy && strongSelf->_api.pauseEmulation && strongSelf.gameController.presentedViewController == nil) {
-            strongSelf->_api.pauseEmulation(false);
-        }
+        if (strongSelf && strongSelf.busy && strongSelf->_api.togglePause && !strongSelf->_menuOpen) strongSelf->_api.togglePause(false);
+    }]];
+    [_observers addObject:[center addObserverForName:UIApplicationDidReceiveMemoryWarningNotification object:nil queue:NSOperationQueue.mainQueue usingBlock:^(NSNotification *note) {
+        OSMeloNXEngine *strongSelf = weakSelf;
+        if (strongSelf && strongSelf.busy && strongSelf->_api.reportMemoryPressure) strongSelf->_api.reportMemoryPressure(0);
     }]];
 }
 
@@ -1409,6 +1572,12 @@ static int32_t OSNXCallWithArguments(NSArray<NSString *> *arguments, int32_t (^b
         completion(NO, OSNXText(language, @"No se puede leer el archivo del juego.", @"The game file cannot be read."));
         return;
     }
+    // Como MeloNX 2.7: si iOS no deja reservar 4 GB, hace falta «Extended Virtual Addressing».
+    if (OSNXNeedsExtendedVirtualAddressing()) {
+        completion(NO, OSNXText(language, @"Este iPhone necesita el permiso «Extended Virtual Addressing» para MeloNX y OmniStation no lo tiene.",
+                                @"This iPhone needs the “Extended Virtual Addressing” entitlement for MeloNX and OmniStation does not have it."));
+        return;
+    }
     NSString *loadError = nil;
     if (![self loadRuntimeOnMain:&loadError]) {
         completion(NO, loadError ?: @"No se pudo cargar MeloNX.");
@@ -1416,6 +1585,7 @@ static int32_t OSNXCallWithArguments(NSArray<NSString *> *arguments, int32_t (^b
     }
     self.busy = YES;
     self.endedHandler = ended;
+    _menuOpen = NO;
     void (^report)(NSString *) = ^(NSString *message) {
         dispatch_async(dispatch_get_main_queue(), ^{ progress(message); });
     };
@@ -1430,65 +1600,82 @@ static int32_t OSNXCallWithArguments(NSArray<NSString *> *arguments, int32_t (^b
             dispatch_async(dispatch_get_main_queue(), ^{ completion(NO, error ?: @"El JIT no se pudo activar."); });
             return;
         }
-        if (self->_dualMapped && self->_api.initializeDualMapped) {
+        if (self->_dualMapped && self->_api.initDualMapping) {
             report(OSNXText(language, @"Preparando la memoria del JIT…", @"Preparing JIT memory…"));
-            if (!self->_api.initializeDualMapped()) {
+            if (!self->_api.initDualMapping()) {
                 [self finishSessionWithMessage:OSNXText(language, @"MeloNX no pudo preparar la memoria del JIT.",
                                                         @"MeloNX could not prepare JIT memory.")
                                     completion:completion];
                 return;
             }
         }
+        if (self->_api.loadKeyset) self->_api.loadKeyset();
 
         __block CGSize size = CGSizeZero;
         __block BOOL presented = NO;
         dispatch_sync(dispatch_get_main_queue(), ^{
             UIViewController *root = [self topViewController];
             if (root == nil || root.view.window == nil) return;
+            // Audio como MeloNX 2.7 (configureAudioSession).
+            AVAudioSession *session = AVAudioSession.sharedInstance;
+            [session setCategory:AVAudioSessionCategoryPlayback withOptions:AVAudioSessionCategoryOptionMixWithOthers error:nil];
+            [session setPreferredSampleRate:48000 error:nil];
+            [session setPreferredIOBufferDuration:0.005 error:nil];
+            [session setActive:YES error:nil];
+
             OSNXGameViewController *controller = [OSNXGameViewController new];
             controller.api = &self->_api;
             controller.language = language;
             controller.title = title;
+            controller.touchAlways = [NSUserDefaults.standardUserDefaults boolForKey:@"melonxCoreTouchAlways"];
             __weak OSMeloNXEngine *weakSelf = self;
+            __weak OSNXGameViewController *weakController = controller;
+            // Mando táctil de MeloNX: va al mismo jugador 1 que el mando físico.
+            controller.touchController = OSNXMakeTouchScreen(controller.gameContainer, ^(NSInteger button, BOOL pressed) {
+                OSMeloNXEngine *strongSelf = weakSelf;
+                OSNXPad *player = strongSelf.pads.firstObject;
+                if (button == OSNXButtonGuide) {
+                    if (pressed) [weakController openMenu];
+                    return;
+                }
+                if (player != nil && button >= 0 && button < OSNXButtonCount) [player send:(OSNXButton)button pressed:pressed];
+            }, ^(BOOL right, double x, double y) {
+                OSNXPad *player = weakSelf.pads.firstObject;
+                [player moveStick:right ? 2 : 1 x:(float)x y:(float)-y];
+            });
             controller.menuChanged = ^(BOOL open) {
                 OSMeloNXEngine *strongSelf = weakSelf;
                 if (!strongSelf) return;
+                strongSelf->_menuOpen = open;
                 for (OSNXPad *pad in strongSelf.pads) {
                     pad.suspended = open;
                     if (open) [pad releaseAll];
                 }
-                if (strongSelf->_api.pauseEmulation) strongSelf->_api.pauseEmulation(open);
+                if (strongSelf->_api.togglePause) strongSelf->_api.togglePause(open);
             };
             controller.quitRequested = ^{
                 OSMeloNXEngine *strongSelf = weakSelf;
                 if (strongSelf) strongSelf->_api.stopEmulation();
             };
+            [self preparePlayerPad];
             [controller loadViewIfNeeded];
             [root presentViewController:controller animated:NO completion:nil];
-            [controller.view setNeedsLayout];
-            [controller.view layoutIfNeeded];
             self.gameController = controller;
-            size = controller.metalView.bounds.size;
-            [self preparePlayerPad];
+            // Tamaño de la pantalla 16:9 en horizontal (no depende de cuándo coloque SwiftUI la vista).
+            CGRect screen = UIScreen.mainScreen.bounds;
+            CGRect landscape = CGRectMake(0, 0, MAX(screen.size.width, screen.size.height), MIN(screen.size.width, screen.size.height));
+            CGRect game = [OSNXGameContainer gameRectInBounds:landscape];
+            controller.metalView.frame = game;
+            size = game.size;
             [self watchControllersAndApp];
             CAMetalLayer *layer = (CAMetalLayer *)controller.metalView.layer;
+            layer.framebufferOnly = NO;
             layer.drawableSize = CGSizeMake(size.width * layer.contentsScale, size.height * layer.contentsScale);
             self->_api.setNativeWindow((__bridge void *)layer);
             self->_api.setViewSize((int32_t)size.width, (int32_t)size.height);
-            self->_exitCallback = ^(NSString *result) {
-                OSMeloNXEngine *strongSelf = weakSelf;
-                if (strongSelf) strongSelf->_api.stopEmulation();
-            };
-            self->_firstFrameCallback = ^(NSString *result) {
-                dispatch_async(dispatch_get_main_queue(), ^{
-                    OSMeloNXEngine *strongSelf = weakSelf;
-                    [strongSelf.gameController showStatus:OSNXText(language, @"Home o SELECT+START: menú", @"Home or SELECT+START: menu") sticky:NO];
-                });
-            };
-            self->_api.registerCallback(@"exit-emulation", self->_exitCallback);
-            self->_api.registerCallback(@"ran-first-frame", self->_firstFrameCallback);
+            if (self->_api.setUnboundedFps) self->_api.setUnboundedFps((int32_t)MAX((NSInteger)1, UIScreen.mainScreen.maximumFramesPerSecond));
             BOOL noController = self.pads.firstObject.controller == nil;
-            NSString *loading = noController ? OSNXText(language, @"Cargando el juego… Conecta un mando para jugar.", @"Loading the game… Connect a controller to play.")
+            NSString *loading = noController ? OSNXText(language, @"Cargando el juego… Sin mando: usa los controles táctiles.", @"Loading the game… No controller: use the touch controls.")
                                              : OSNXText(language, @"Cargando el juego…", @"Loading the game…");
             [controller showStatus:loading sticky:YES];
             presented = YES;
@@ -1499,14 +1686,24 @@ static int32_t OSNXCallWithArguments(NSArray<NSString *> *arguments, int32_t (^b
             return;
         }
         dispatch_async(dispatch_get_main_queue(), ^{ completion(YES, @""); });
+        // El núcleo no avisa del primer fotograma: el aviso de carga se cambia por la ayuda del menú.
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(8 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+            [self.gameController showStatus:OSNXText(language, @"Home o SELECT+START: menú", @"Home or SELECT+START: menu") sticky:NO];
+            // Ya hay partida: el núcleo solo acepta el objetivo de fps con el juego en marcha.
+            if (self.busy && self->_api.setUnboundedFps) self->_api.setUnboundedFps((int32_t)MAX((NSInteger)1, UIScreen.mainScreen.maximumFramesPerSecond));
+        });
 
-        NSArray<NSString *> *arguments = [self argumentsForGame:gamePath size:size language:language docked:docked];
-        printf("[OmniStation] Argumentos: %s\n", [arguments componentsJoinedByString:@" "].UTF8String);
+        OptionsNative *options = [self optionsForGame:gamePath size:size language:language docked:docked];
+        if (options == NULL) {
+            [self finishSessionWithMessage:@"Sin memoria para las opciones de MeloNX." completion:nil];
+            return;
+        }
+        printf("[OmniStation] Juego: %s · %dx%d · dock %d · memoria ampliada %d\n", gamePath.UTF8String,
+               (int)size.width, (int)size.height, docked, [OSMeloNXEngine hasIncreasedMemoryLimit]);
         const OSNXCoreAPI *api = &self->_api;
         NSThread *thread = [[NSThread alloc] initWithBlock:^{
-            int32_t result = OSNXCallWithArguments(arguments, ^int32_t(int32_t argc, char **argv) {
-                return api->mainRyujinx(argc, argv);
-            });
+            // main_ryujinx_sdl libera las opciones (y sus textos) por su cuenta.
+            int32_t result = api->mainRyujinx(options);
             printf("[OmniStation] main_ryujinx_sdl terminó con %d\n", result);
             fflush(stdout);
             if (result != 0) {
