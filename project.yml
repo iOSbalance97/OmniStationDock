@@ -15,8 +15,8 @@ targets:
     settings:
       base:
         
-        MARKETING_VERSION: "0.3.4"
-        CURRENT_PROJECT_VERSION: "34"
+        MARKETING_VERSION: "0.4.0"
+        CURRENT_PROJECT_VERSION: "40"
         PRODUCT_BUNDLE_IDENTIFIER: com.omnistation.dock
         PRODUCT_NAME: OmniStationDock
         SWIFT_VERSION: "5.0"
@@ -30,6 +30,47 @@ targets:
         ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
         IPHONEOS_DEPLOYMENT_TARGET: "17.0"
         # JIT integrado (StikJIT): idevice se descarga en el workflow a Vendor/idevice.
+        SWIFT_INCLUDE_PATHS: "$(inherited) $(SRCROOT)/Vendor/idevice"
+        HEADER_SEARCH_PATHS: "$(inherited) $(SRCROOT)/Vendor/idevice"
+        LIBRARY_SEARCH_PATHS: "$(inherited) $(SRCROOT)/Vendor/idevice"
+        OTHER_LDFLAGS: "$(inherited) -lidevice_ffi"
+        DEAD_CODE_STRIPPING: YES
+        # Núcleo de ARMSX2 integrado: puente Objective-C (OmniStation/Core).
+        SWIFT_OBJC_BRIDGING_HEADER: OmniStation/Core/OmniStation-Bridging-Header.h
+        CLANG_ENABLE_OBJC_ARC: YES
+        CLANG_ENABLE_MODULES: YES
+    dependencies:
+      # Extensión de JIT: engancha StikJIT a la propia OmniStation para sus núcleos integrados.
+      - target: OmniStationJITHelper
+      - sdk: GameController.framework
+      - sdk: QuartzCore.framework
+      - sdk: JavaScriptCore.framework
+      - sdk: Network.framework
+      - sdk: Security.framework
+      - sdk: CFNetwork.framework
+      - sdk: SystemConfiguration.framework
+
+  # Extensión de JIT (proceso aparte): engancha el depurador a OmniStation con StikJIT.
+  OmniStationJITHelper:
+    type: app-extension
+    platform: iOS
+    deploymentTarget: "17.4"
+    sources:
+      - path: Helper
+      - path: OmniStation/JIT/StikJIT
+    settings:
+      base:
+        MARKETING_VERSION: "0.4.0"
+        CURRENT_PROJECT_VERSION: "40"
+        PRODUCT_BUNDLE_IDENTIFIER: com.omnistation.dock.jithelper
+        PRODUCT_NAME: OmniStationJITHelper
+        SWIFT_VERSION: "5.0"
+        TARGETED_DEVICE_FAMILY: "1"
+        GENERATE_INFOPLIST_FILE: NO
+        INFOPLIST_FILE: Config/JITHelperInfo.plist
+        IPHONEOS_DEPLOYMENT_TARGET: "17.4"
+        APPLICATION_EXTENSION_API_ONLY: YES
+        SKIP_INSTALL: YES
         SWIFT_INCLUDE_PATHS: "$(inherited) $(SRCROOT)/Vendor/idevice"
         HEADER_SEARCH_PATHS: "$(inherited) $(SRCROOT)/Vendor/idevice"
         LIBRARY_SEARCH_PATHS: "$(inherited) $(SRCROOT)/Vendor/idevice"

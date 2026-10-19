@@ -1,4 +1,4 @@
-# OmniStation Dock — versión 0.3.4
+# OmniStation Dock — versión 0.4.0
 
 Lanzador de juegos y emuladores para iPhone con interfaz espacial/Liquid Glass, control completo con mando y **Modo Dock** (carrusel en horizontal, también al conectar HDMI).
 
@@ -47,6 +47,30 @@ La primera vez (y en Ajustes → Juegos → Emuladores) la app pregunta qué emu
 - **Con la app StikDebug**: OmniStation abre el juego y el emulador pide el JIT a StikDebug por su cuenta.
 - **Versiones nuevas** (cada emulador por separado, como mucho cada 6 h): ARMSX2 desde GitHub (solo las *nightly* traen IPA de iOS) y MeloNX desde su servidor Forgejo. La IPA se manda a LiveContainer o a SideStore/AltStore, que la instalan tras confirmar.
 
+## ARMSX2 integrado (PS2 dentro de OmniStation)
+Desde la 0.4.0 hay tres formas de jugar a PS2, separadas por completo (cada una con sus juegos y sus ajustes; ninguna depende de otra):
+
+| Forma | Dónde están los juegos | JIT |
+|---|---|---|
+| App ARMSX2 en LiveContainer | La carpeta de juegos de ARMSX2 que vincules | LiveContainer + StikDebug |
+| App ARMSX2 instalada con SideStore | La carpeta de juegos de ARMSX2 que vincules | JIT integrado / StikDebug |
+| **Núcleo integrado en OmniStation** | `ARMSX2/Juegos` dentro de OmniStation | **Extensión de JIT propia** |
+
+Se elige en Ajustes → ARMSX2 → *Modo de ARMSX2*. Cada modo enseña en Ajustes solo lo suyo. El integrado solo existe fuera de LiveContainer (las extensiones de iOS no corren dentro).
+
+**Carpeta propia** (Archivos → En mi iPhone → OmniStation Dock → `ARMSX2`):
+- `Juegos/`: ISO, CHD, CSO, ZSO, GZ, ELF… (también en subcarpetas). Se leen solos al abrir la app; *Importar juegos* los copia desde Archivos.
+- `BIOS/`: tu BIOS de PS2 (Ajustes → ARMSX2 integrado → BIOS la importa).
+- `Datos/`: lo crea el núcleo: tarjetas de memoria (`Saves/Memory Cards`), estados (`Saves/Savestates`), texturas, trucos, parches, ajustes por juego, caché, capturas y registros.
+
+**Cómo consigue el JIT** (la técnica de NeoStation iOS): una app no puede ser su propio depurador, así que OmniStation lleva una extensión invisible (`OmniStationJITHelper.appex`) que iOS ejecuta como proceso aparte. OmniStation le pasa su PID y el archivo RPPairing por un puerto local; la extensión engancha StikJIT a OmniStation por LocalDevVPN. En iOS 26 una instrucción de prueba con una clave comprueba que el depurador responde y solo entonces se carga el núcleo (`dlopen`); después el núcleo prepara su memoria ejecutable y pide soltar el depurador. Antes de iOS 26 basta con enganchar y soltar.
+
+**Requisitos**: OmniStation instalada con SideStore/AltStore **sin quitarle sus extensiones**, iOS 18+, Modo desarrollador, archivo RPPairing, VPN LocalDevVPN y tu BIOS.
+
+**Durante la partida**: el mando lo lee el propio núcleo. Mando táctil como el de ARMSX2 (cruceta, botones, dos sticks, L1/L2/R1/R2, START/SELECT), oculto con un mando conectado salvo que actives *Controles táctiles siempre*. Menú de pausa con el botón ☰, el botón Home del mando o SELECT+START: continuar, ranura 1–5, guardar y cargar estado, controles táctiles y salir.
+
+**El núcleo**: `ARMSX2Core.framework` (ARMSX2 iOS 2.6, interfaz C versión 6) compilado por NeoStation iOS 0.0.8. El workflow lo saca de su IPA pública y comprueba la huella del binario y de todos sus archivos. Más adelante se podrá sustituir por uno compilado por nosotros con la misma interfaz.
+
 ## Carátulas automáticas
 Para los juegos sin carátula, OmniStation busca la suya en la colección pública **libretro-thumbnails** (PS1, PS2, PSP, GB/GBC/GBA, NDS, 3DS, NES, SNES, N64, GameCube, Wii, Mega Drive, Master System, Game Gear, Dreamcast y Saturn) y la descarga sola, emparejando por nombre y prefiriendo la región de tu idioma. En Switch usa los iconos de MeloNX (instalado aparte) o, dentro de LiveContainer, el icono de la eShop (api.nlib.cc, si el archivo lleva el Title ID) o la portada del artículo de Wikipedia. Si un juego no está en libretro-thumbnails, *Descargar* prueba también con Wikipedia. Las carátulas que elijas a mano nunca se sustituyen. En las opciones del juego, *Cambiar carátula* → **Descargar** la busca en ese momento (en Switch con MeloNX aparte, se la pide a MeloNX; dentro de LiveContainer, el icono de la eShop por su Title ID o la portada de Wikipedia), **Importar foto** abre la galería e **Importar archivo** abre Archivos. Se activa o desactiva en Ajustes → Juegos → Carátulas automáticas.
 
@@ -75,13 +99,13 @@ El workflow `.github/workflows/ios-build.yml` compila una IPA sin firmar y la pu
 
 ## Licencias
 - StikJIT: MPL-2.0 (código en `OmniStation/JIT/StikJIT`, licencia incluida). Su librería idevice y sus scripts conservan sus licencias.
-- ARMSX2 no va incluido: se abre como app aparte (GPL-3.0).
+- ARMSX2 (GPL-3.0): el núcleo integrado `ARMSX2Core.framework` es ARMSX2 (https://github.com/ARMSX2/ARMSX2, etiqueta `iOSv2.6.0`) con el parche y el adaptador C de NeoStation iOS (https://github.com/TarbleFR/neostation-ios). La extensión de JIT (`Helper/`), el puente (`OmniStation/Core/`) y el script `Helper/Resources/armsx2-universal.js` están basados en NeoStation iOS (GPL-3.0-or-later). Con el núcleo integrado, OmniStation Dock en conjunto queda bajo GPL-3.0 (texto en `LICENSES/GPL-3.0.txt`): si se distribuye la IPA, hay que dar también su código fuente.
 - Orbitron y Space Grotesk: SIL Open Font License 1.1.
 
 ## Tipografías
 Orbitron y Space Grotesk (Google Fonts), licencia SIL Open Font License 1.1, en `OmniStation/Resources/Fonts`.
 
 ## Versión
-- Marketing version: `0.3.4`
-- Build: `34`
+- Marketing version: `0.4.0`
+- Build: `40`
 - Bundle ID: `com.omnistation.dock`
