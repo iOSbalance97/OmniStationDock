@@ -40,6 +40,16 @@ private enum TextEntryTarget: Equatable {
     case emulatorGame(String)
 }
 
+/// Para qué se abre el selector de Archivos.
+private enum ImporterPurpose: Equatable {
+    case folder
+    case cover(String)
+    /// BIOS del núcleo integrado de ARMSX2.
+    case coreBIOS
+    /// Juegos para ARMSX2/Juegos.
+    case coreGames
+}
+
 /// Para qué se abre el selector de fotos.
 private enum PhotoPurpose: Equatable {
     case staticBackground
@@ -52,6 +62,7 @@ private enum SettingsDialog {
     case assignPlatform, externalFolder
     case jitEnabler, jitScript, emulatorLocation, emulatorBundle, emulatorUpdate, emulatorFolder, emulatorHelp
     case coverOptions
+    case armsx2Mode, armsx2CoreGames, armsx2CoreHelp
 }
 
 private struct Toast: Identifiable {
@@ -110,6 +121,9 @@ struct HomeView: View {
     @AppStorage("volumeAmbient") private var volumeAmbient = 0.3
     @AppStorage("backgroundMode") private var backgroundMode = "default"
     @AppStorage(InstallMethod.storageKey) private var installMethodRaw = ""
+    /// PS2: app ARMSX2 aparte («external») o núcleo integrado («integrated»).
+    @AppStorage(ARMSX2Mode.storageKey) private var armsx2ModeRaw = ARMSX2Mode.external.rawValue
+    @AppStorage(ARMSX2CoreFolders.touchAlwaysKey) private var armsx2TouchAlways = false
     @AppStorage(JITLauncher.defaultKey) private var jitByDefault = false
     @AppStorage(JITEnabler.storageKey) private var jitEnablerRaw = JITEnabler.builtIn.rawValue
     @AppStorage("emulatorSetupDone") private var emulatorSetupDone = false
@@ -160,8 +174,8 @@ struct HomeView: View {
     @State private var emulatorRevision = 0
     @State private var checkingEmulators: Set<String> = []
     @State private var downloadingCovers = false
-    /// Juego al que se le pone una carátula desde Archivos (nil: el selector es de carpetas).
-    @State private var coverFilePick: String?
+    /// Para qué se abre el selector de Archivos (carpetas, una carátula o archivos del núcleo).
+    @State private var importerPurpose: ImporterPurpose = .folder
     /// Juegos de Switch cuya carátula se pidió a MeloNX a mano: se sustituye aunque fuera propia.
     @State private var forcedCoverIDs: Set<String> = []
     /// Ya hay una petición de biblioteca (MeloNX o ARMSX2) a punto de abrirse.
@@ -212,7 +226,14 @@ struct HomeView: View {
     }
 
     private func refreshLibrary() {
-        let built = Self.makeLibrary(library: libraryGames, samples: showSampleGames, counts: playCounts, meta: gameMeta)
+        // Cada modo de ARMSX2 enseña solo sus juegos: los de la app aparte o los del núcleo.
+        let integrated: Bool = armsx2Integrated
+        let visible: [LibraryGame] = libraryGames.filter { item in
+            if item.source == ARMSX2CoreFolders.source { return integrated }
+            if item.source == "emu:" + Emulator.armsx2.rawValue { return !integrated }
+            return true
+        }
+        let built = Self.makeLibrary(library: visible, samples: showSampleGames, counts: playCounts, meta: gameMeta)
         games = built.games
         featured = built.featured
         featuredIndex = 0
@@ -429,7 +450,7 @@ struct HomeView: View {
     private func withPresentations<V: View>(_ view: V) -> some View {
         view
             .photosPicker(isPresented: $showPhotoPicker, selection: $photoItem, matching: pickerFilter)
-            .fileImporter(isPresented: $showFolderImporter, allowedContentTypes: importerTypes, allowsMultipleSelection: false) { result in
+            .fileImporter(isPresented: $showFolderImporter, allowedContentTypes: importerTypes, allowsMultipleSelection: importerMultiple) { result in
                 handleFolderPick(result)
             }
             .sheet(item: $sheet) { kind in
@@ -892,8 +913,11 @@ struct HomeView: View {
             if !PairingFile.exists { _ = PairingFile.importFromDocuments() }
             jitStatus.autoPrepare()
         }
+        if armsx2Integrated { scanCoreGames(silent: true) }
         downloadMissingCovers()
         for emulator in Emulator.allCases where EmulatorStore.isEnabled(emulator) {
+            // Con el núcleo integrado, la app ARMSX2 aparte no se toca.
+            if emulator == .armsx2 && armsx2Integrated { continue }
             if EmulatorStore.folderBookmark(emulator) != nil { scanEmulator(emulator, silent: true) }
             if EmulatorStore.autoCheck(emulator) && EmulatorStore.shouldCheck(emulator) {
                 checkEmulatorUpdate(emulator, manual: false)
@@ -1160,6 +1184,14 @@ struct HomeView: View {
             return gameOptionsMenu(cancel)
         case .coverOptions:
             return coverOptionsMenu(cancel)
+        case .armsx2Mode:
+            return armsx2ModeMenu(cancel)
+        case .armsx2CoreGames:
+            return armsx2CoreGamesMenu(cancel)
+        case .armsx2CoreHelp:
+            return (tr("ARMSX2 integrado"), tr("Necesita:\n• OmniStation instalada con SideStore o AltStore (no en LiveContainer), sin quitarle su extensión de JIT.\n• iOS 18 o posterior y Modo desarrollador.\n• Archivo de emparejamiento RPPairing y la VPN LocalDevVPN conectada.\n• Tu BIOS de PS2 en ARMSX2 → BIOS.\nTodo lo de ARMSX2 (juegos, BIOS, tarjetas de memoria, estados, texturas, trucos) queda en Archivos → OmniStation Dock → ARMSX2.\nCon mando: Home o SELECT+START abre el menú del juego."), [
+                PadMenuItem(title: tr("Entendido"), kind: .cancel) { closePadMenu() }
+            ])
         case .jitEnabler:
             return jitEnablerMenu(cancel)
         case .jitScript:
@@ -1466,7 +1498,7 @@ struct HomeView: View {
         })
         items.append(PadMenuItem(title: tr("Importar archivo")) {
             closePadMenu()
-            coverFilePick = id
+            importerPurpose = .cover(id)
             showFolderImporter = true
         })
         items.append(cancel)
@@ -2119,6 +2151,17 @@ struct HomeView: View {
     /// Abre el juego en su emulador o app.
     private func launch(_ game: Game) {
         feedback()
+        if let item = libraryGames.first(where: { $0.id == game.id }), item.source == ARMSX2CoreFolders.source {
+            playCounts[game.id, default: 0] += 1
+            UserDefaults.standard.set(playCounts, forKey: "playCounts")
+            launchIntegratedARMSX2(game, item: item)
+            return
+        }
+        // Con el núcleo integrado, los juegos de PS2 tienen que estar en su carpeta propia.
+        if armsx2Integrated && game.isCustom && game.launchURL == nil && game.platform == Emulator.armsx2.platform {
+            showToast(tr("Con el núcleo integrado, los juegos de PS2 van en Archivos → OmniStation Dock → ARMSX2 → Juegos."), seconds: 4.5)
+            return
+        }
         playCounts[game.id, default: 0] += 1
         UserDefaults.standard.set(playCounts, forKey: "playCounts")
         if let emulator = emulatorFor(game) {
@@ -2337,7 +2380,7 @@ struct HomeView: View {
 
     /// Lo mismo con ARMSX2: sus juegos sin nombre reconocido.
     private func requestARMSX2LibraryIfNeeded() -> Bool {
-        guard EmulatorStore.isEnabled(.armsx2),
+        guard !armsx2Integrated, EmulatorStore.isEnabled(.armsx2),
               EmulatorStore.location(.armsx2, installMethod: installMethodRaw) == .native else { return false }
         let pending: [String] = libraryGames
             .filter { $0.source == "emu:" + Emulator.armsx2.rawValue && gameMeta[$0.id]?.name == nil }
@@ -2421,6 +2464,215 @@ struct HomeView: View {
     /// Pide a MeloNX su lista de juegos (solo con MeloNX instalado aparte: LiveContainer no la devuelve).
     private func requestMeloNXLibrary() {
         openExternal(MeloNXLibrary.requestURL, failure: tr("No se pudo abrir %@. ¿Está instalado?", Emulator.melonx.name))
+    }
+
+    // MARK: - ARMSX2 integrado (núcleo dentro de OmniStation)
+
+    /// ¿Se juega a PS2 con el núcleo integrado? (Nunca dentro de LiveContainer.)
+    private var armsx2Integrated: Bool {
+        ARMSX2Mode.effective(armsx2ModeRaw) == .integrated
+    }
+
+    /// Ajustes de ARMSX2 según el modo: los de la app aparte o los del núcleo integrado.
+    private var emulatorGroups: [SettingGroup] {
+        Emulator.allCases.map { (emulator: Emulator) -> SettingGroup in
+            if emulator == .armsx2 && armsx2Integrated { return armsx2CoreSettings }
+            return emulatorSettings(emulator)
+        }
+    }
+
+    private var armsx2ModeItem: SettingItem {
+        let subtitle: String = armsx2Integrated ? tr("Núcleo integrado") : tr("App aparte (LiveContainer / SideStore)")
+        return SettingItem(id: "armsx2Mode", title: tr("Modo de ARMSX2"), subtitle: subtitle, symbol: "switch.2", tint: SettingTint.violet, control: .symbol("chevron.right"), action: {
+            dialog = .armsx2Mode
+        })
+    }
+
+    private var armsx2CoreSettings: SettingGroup {
+        _ = emulatorRevision
+        var items: [SettingItem] = [armsx2ModeItem]
+        let bundled: Bool = OSArmsx2Engine.coreBundled
+        let revision: String = OSArmsx2Engine.shared.coreRevision
+        let coreText: String = bundled ? (revision.isEmpty ? "ARMSX2 iOS 2.6" : "ARMSX2 " + String(revision.prefix(8))) : tr("No incluido en esta compilación")
+        let coreControl: SettingControl = bundled ? .badge("OK", Color.green) : .badge(tr("FALTA"), Color.orange)
+        items.append(SettingItem(id: "armsx2CoreStatus", title: tr("Núcleo"), subtitle: coreText, symbol: "cpu", tint: SettingTint.blue, control: coreControl, action: {
+            dialog = .armsx2CoreHelp
+        }))
+        let count: Int = libraryGames.filter { $0.source == ARMSX2CoreFolders.source }.count
+        items.append(SettingItem(id: "armsx2CoreGames", title: tr("Juegos"), subtitle: "ARMSX2/Juegos", symbol: "externaldrive.fill", tint: SettingTint.blue, control: .badge("\(count)", Color.green), action: {
+            dialog = .armsx2CoreGames
+        }))
+        let biosFiles: [String] = ARMSX2CoreFolders.biosFiles()
+        let biosControl: SettingControl = biosFiles.isEmpty ? .badge(tr("FALTA"), Color.orange) : .badge("OK", Color.green)
+        items.append(SettingItem(id: "armsx2CoreBIOS", title: "BIOS", subtitle: biosFiles.first ?? tr("Importa tu BIOS de PS2"), symbol: "memorychip", tint: SettingTint.blue, control: biosControl, action: {
+            openCoreImporter(.coreBIOS)
+        }))
+        items.append(toggleSetting("armsx2CoreTouch", tr("Controles táctiles siempre"), tr("Si no, se ocultan con un mando conectado"), "hand.tap.fill", SettingTint.blue, $armsx2TouchAlways))
+        items.append(SettingItem(id: "armsx2CoreBoot", title: tr("Arrancar la BIOS"), subtitle: tr("Prueba el núcleo sin juego"), symbol: "play.circle.fill", tint: SettingTint.blue, control: .symbol("play.fill"), action: {
+            startIntegratedARMSX2(gamePath: nil, title: "PS2 BIOS")
+        }))
+        items.append(SettingItem(id: "armsx2CoreFolder", title: tr("Carpeta ARMSX2"), subtitle: tr("Abrir en Archivos"), symbol: "folder.fill", tint: SettingTint.blue, control: .symbol("arrow.up.forward"), action: {
+            ARMSX2CoreFolders.ensure()
+            openExternal(ARMSX2CoreFolders.filesAppURL, failure: tr("No se pudo abrir Archivos."))
+        }))
+        items.append(SettingItem(id: "armsx2CoreHelp", title: tr("Requisitos"), subtitle: tr("Qué necesita el núcleo integrado"), symbol: "questionmark.circle.fill", tint: SettingTint.blue, control: .symbol("chevron.right"), action: {
+            dialog = .armsx2CoreHelp
+        }))
+        return SettingGroup(id: "armsx2core", title: tr("ARMSX2 integrado (PS2)"), isSubsection: true, items: items)
+    }
+
+    private func armsx2ModeMenu(_ cancel: PadMenuItem) -> PadMenuContent {
+        let integrated: Bool = armsx2Integrated
+        var items: [PadMenuItem] = []
+        items.append(PadMenuItem(title: checked(tr("App ARMSX2 aparte (LiveContainer / SideStore)"), !integrated)) {
+            armsx2ModeRaw = ARMSX2Mode.external.rawValue
+            emulatorRevision += 1
+            refreshLibrary()
+            closePadMenu()
+        })
+        items.append(PadMenuItem(title: checked(tr("Núcleo integrado en OmniStation"), integrated)) {
+            closePadMenu()
+            guard ARMSX2Mode.integratedAvailable else {
+                showToast(tr("El núcleo integrado no funciona dentro de LiveContainer: instala OmniStation con SideStore."), seconds: 4)
+                return
+            }
+            armsx2ModeRaw = ARMSX2Mode.integrated.rawValue
+            emulatorRevision += 1
+            ARMSX2CoreFolders.ensure()
+            refreshLibrary()
+            scanCoreGames(silent: true)
+        })
+        items.append(cancel)
+        return (tr("Modo de ARMSX2"), tr("Son caminos separados: cada uno con sus juegos y sus ajustes."), items)
+    }
+
+    private func armsx2CoreGamesMenu(_ cancel: PadMenuItem) -> PadMenuContent {
+        var items: [PadMenuItem] = []
+        items.append(PadMenuItem(title: tr("Volver a escanear")) {
+            closePadMenu()
+            scanCoreGames(silent: false)
+        })
+        items.append(PadMenuItem(title: tr("Importar juegos")) {
+            closePadMenu()
+            openCoreImporter(.coreGames)
+        })
+        items.append(PadMenuItem(title: tr("Abrir la carpeta en Archivos")) {
+            closePadMenu()
+            ARMSX2CoreFolders.ensure()
+            openExternal(ARMSX2CoreFolders.filesAppURL, failure: tr("No se pudo abrir Archivos."))
+        })
+        items.append(cancel)
+        return (tr("Juegos de ARMSX2 integrado"), "Archivos → OmniStation Dock → ARMSX2 → Juegos", items)
+    }
+
+    /// Lee ARMSX2/Juegos (carpeta local: es rápido) y sustituye los juegos del núcleo.
+    private func scanCoreGames(silent: Bool) {
+        ARMSX2CoreFolders.ensure()
+        Task {
+            let found: [LibraryGame] = await Task.detached(priority: .utility) { () -> [LibraryGame] in
+                ARMSX2CoreFolders.scanGames()
+            }.value
+            let kept: [LibraryGame] = libraryGames.filter { $0.source != ARMSX2CoreFolders.source }
+            setLibrary(kept + found)
+            emulatorRevision += 1
+            if !silent {
+                showToast(tr("ARMSX2 integrado: %ld juegos", found.count), seconds: 3)
+            }
+            downloadMissingCovers()
+        }
+    }
+
+    /// Copia a ARMSX2/BIOS o ARMSX2/Juegos los archivos elegidos en Archivos.
+    private func importCoreFiles(_ result: Result<[URL], Error>, bios: Bool) {
+        guard case .success(let urls) = result, !urls.isEmpty else { return }
+        let folder: URL = bios ? ARMSX2CoreFolders.bios : ARMSX2CoreFolders.games
+        showToast(bios ? tr("Copiando la BIOS…") : tr("Copiando %ld juegos…", urls.count), seconds: 60)
+        Task {
+            let copied: Int = await Task.detached(priority: .userInitiated) { () -> Int in
+                ARMSX2CoreFolders.copy(urls, into: folder)
+            }.value
+            emulatorRevision += 1
+            if bios {
+                showToast(copied > 0 ? tr("BIOS importada") : tr("No se pudo copiar la BIOS"), seconds: 3)
+            } else {
+                showToast(tr("%ld juegos copiados a ARMSX2/Juegos", copied), seconds: 3)
+                scanCoreGames(silent: true)
+            }
+        }
+    }
+
+    private func launchIntegratedARMSX2(_ game: Game, item: LibraryGame) {
+        guard armsx2Integrated else {
+            showToast(tr("Activa el núcleo integrado en Ajustes → ARMSX2."), seconds: 3.5)
+            return
+        }
+        guard let file = item.fileName else {
+            showToast(tr("Vuelve a escanear ARMSX2/Juegos."), seconds: 3)
+            return
+        }
+        startIntegratedARMSX2(gamePath: ARMSX2CoreFolders.path(for: file), title: game.name)
+    }
+
+    /// Arranca el núcleo integrado (un juego o, con `gamePath` nil, la BIOS).
+    private func startIntegratedARMSX2(gamePath: String?, title: String) {
+        guard !OSArmsx2Engine.shared.busy else { return }
+        guard OSArmsx2Engine.coreBundled else {
+            showToast(tr("Esta compilación no incluye el núcleo de ARMSX2."), seconds: 4)
+            return
+        }
+        guard OSArmsx2Engine.supportedHere else {
+            showToast(tr("El núcleo integrado necesita iOS 18 y OmniStation instalada con SideStore (no en LiveContainer)."), seconds: 4.5)
+            return
+        }
+        guard OSArmsx2Engine.helperBundled else {
+            showToast(tr("Falta la extensión de JIT. Reinstala OmniStation con SideStore sin quitar sus extensiones."), seconds: 5)
+            return
+        }
+        guard let pairing = PairingFile.data() else {
+            showToast(tr("Importa el archivo de emparejamiento en Ajustes → Depuración."), seconds: 4)
+            return
+        }
+        ARMSX2CoreFolders.ensure()
+        guard !ARMSX2CoreFolders.biosFiles().isEmpty else {
+            showToast(tr("Falta la BIOS: impórtala en Ajustes → ARMSX2 integrado → BIOS."), seconds: 4.5)
+            return
+        }
+        let language: String = L10n.resolve(appLanguage)
+        // Durante la partida el mando es del juego, no de la interfaz.
+        controllers.navigationEnabled = false
+        SoundManager.shared.updateAmbient(volume: 0)
+        showToast(tr("Activando el JIT…"), seconds: 60)
+        OSArmsx2Engine.shared.launchGame(
+            atPath: gamePath,
+            title: title,
+            dataDirectory: ARMSX2CoreFolders.data.path,
+            biosDirectory: ARMSX2CoreFolders.bios.path,
+            pairingData: pairing,
+            language: language,
+            touchControlsAlways: armsx2TouchAlways,
+            progress: { message in
+                showToast(message, seconds: 60)
+            },
+            completion: { success, message in
+                if success {
+                    toast = nil
+                } else {
+                    endIntegratedSession()
+                    showToast(message.isEmpty ? tr("No se pudo arrancar el juego.") : message, seconds: 7)
+                }
+            },
+            ended: {
+                endIntegratedSession()
+            }
+        )
+    }
+
+    /// Al cerrar la partida, la interfaz vuelve a responder al mando.
+    private func endIntegratedSession() {
+        controllers.refresh()
+        controllers.navigationEnabled = true
+        SoundManager.shared.updateAmbient(volume: volumeAmbient)
+        emulatorRevision += 1
     }
 
     // MARK: - Carátulas automáticas
@@ -2776,19 +3028,42 @@ struct HomeView: View {
     /// Un solo selector de Archivos (iOS solo presenta uno por vista): carpetas o, para una
     /// carátula, imágenes.
     private var importerTypes: [UTType] {
-        coverFilePick == nil ? [.folder] : [.image]
+        switch importerPurpose {
+        case .folder: return [.folder]
+        case .cover: return [.image]
+        case .coreBIOS, .coreGames: return [.data]
+        }
+    }
+
+    private var importerMultiple: Bool {
+        importerPurpose == .coreBIOS || importerPurpose == .coreGames
     }
 
     private func openFolderImporter() {
-        coverFilePick = nil
+        importerPurpose = .folder
+        showFolderImporter = true
+    }
+
+    private func openCoreImporter(_ purpose: ImporterPurpose) {
+        importerPurpose = purpose
         showFolderImporter = true
     }
 
     private func handleFolderPick(_ result: Result<[URL], Error>) {
-        if let coverID = coverFilePick {
-            coverFilePick = nil
+        let purpose: ImporterPurpose = importerPurpose
+        importerPurpose = .folder
+        switch purpose {
+        case .cover(let coverID):
             applyCoverFile(result, id: coverID)
             return
+        case .coreBIOS:
+            importCoreFiles(result, bios: true)
+            return
+        case .coreGames:
+            importCoreFiles(result, bios: false)
+            return
+        case .folder:
+            break
         }
         let emulatorTarget: Emulator? = folderPickEmulator
         folderPickEmulator = nil
@@ -3560,7 +3835,7 @@ struct HomeView: View {
     // así no pueden desincronizarse al añadir o quitar ajustes.
 
     private var settingGroups: [SettingGroup] {
-        [generalSettings, appearanceSettings, gameSettings] + Emulator.allCases.map { emulatorSettings($0) } + [debugSettings, liveContainerSettings]
+        [generalSettings, appearanceSettings, gameSettings] + emulatorGroups + [debugSettings, liveContainerSettings]
     }
 
     private var allSettingItems: [SettingItem] {
@@ -3703,6 +3978,7 @@ struct HomeView: View {
             emulatorRevision += 1
         })
         var items: [SettingItem] = []
+        if emulator == .armsx2 { items.append(armsx2ModeItem) }
         items.append(toggleSetting(key + "On", tr("%@ con %@", emulator.platform, emulator.name), tr("Abre sus juegos directamente"), emulator.symbol, SettingTint.blue, enabled))
         items.append(emulatorFolderItem(emulator))
         let whereText: String = location == .liveContainer ? "LiveContainer" : tr("SideStore / AltStore")
