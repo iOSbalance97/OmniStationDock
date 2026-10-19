@@ -15,12 +15,6 @@ enum LiveContainerJIT {
         DebugSupport.isInsideLiveContainer && userDefaults != nil && bundleID != nil
     }
 
-    /// ¿Se puede pedir el JIT desde aquí? (activador de LiveContainer: StikDebug o SideStore).
-    static var canRequestJIT: Bool {
-        guard isAvailable, let liveContainerID = bundleID else { return false }
-        return enablerURL(liveContainerID: liveContainerID, script: nil) != nil
-    }
-
     // MARK: Datos de LiveContainer (los publica LiveContainer en NSUserDefaults)
 
     private static func classProperty(_ name: String) -> AnyObject? {
