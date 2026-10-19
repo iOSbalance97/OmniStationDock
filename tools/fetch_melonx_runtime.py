@@ -30,12 +30,13 @@ OTOOL = os.environ.get('OTOOL', 'otool')
 
 # Lo que OmniStation llama del núcleo (ver OSMeloNXEngine.m). Si falta alguno, no se empaqueta.
 REQUIRED_EXPORTS = [
-    '_initialize', '_main_ryujinx_sdl', '_set_native_window', '_stop_emulation', '_pause_emulation',
+    '_initialize', '_main_ryujinx_sdl', '_set_native_window', '_stop_emulation',
     '_install_firmware', '_installed_firmware_version', '_free_firmware_version',
     '_attach_gamepad', '_detach_gamepad', '_set_gamepad_button_state', '_set_gamepad_stick_axis',
-    '_set_gamepad_configuration', '_touch_began', '_touch_moved', '_touch_ended', '_set_view_size',
+    '_touch_began', '_touch_moved', '_touch_ended', '_set_view_size',
 ]
-OPTIONAL_EXPORTS = ['_initialize-dualmapped', '_get_current_fps', '_set_gamepad_motion_axis',
+OPTIONAL_EXPORTS = ['_pause_emulation', '_set_gamepad_configuration',
+                    '_initialize-dualmapped', '_get_current_fps', '_set_gamepad_motion_axis',
                     '_refresh_account_manager', '_get_game_info', '_free_game_info']
 # Ayudantes que el núcleo abre por su ruta relativa (DllImport).
 REQUIRED_HELPERS = ['RyujinxHelper.framework/RyujinxHelper', 'BreakpointJIT.framework/BreakpointJIT',
@@ -181,6 +182,8 @@ def main():
         app_name = extract(ipa, staging)
         core = find_core(staging)
         exports = exports_of(core)
+        # Lista completa en el log (sirve para adaptar OmniStation a versiones nuevas de MeloNX).
+        log('Funciones del núcleo: ' + ' '.join(sorted(s[1:] for s in exports if s.startswith('_') and not s.startswith('_$'))[:400]))
         missing = [symbol for symbol in REQUIRED_EXPORTS if symbol not in exports]
         if missing:
             raise Failure('El núcleo de MeloNX no tiene lo que usa OmniStation: ' + ', '.join(missing))
