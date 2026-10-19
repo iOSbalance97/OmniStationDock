@@ -1,7 +1,7 @@
 import SwiftUI
 
 /// Permite cambiar en tiempo de ejecución las orientaciones admitidas
-/// (ajustes «Bloquear horizontal» y «Dock con HDMI»).
+/// (ajustes «Bloquear horizontal» y «Dock con HDMI») y da su escena a la tele.
 final class AppDelegate: NSObject, UIApplicationDelegate {
     static var orientationMask: UIInterfaceOrientationMask = {
         UserDefaults.standard.bool(forKey: "keepLandscape") ? .landscape : .allButUpsideDown
@@ -9,6 +9,21 @@ final class AppDelegate: NSObject, UIApplicationDelegate {
 
     func application(_ application: UIApplication, supportedInterfaceOrientationsFor window: UIWindow?) -> UIInterfaceOrientationMask {
         AppDelegate.orientationMask
+    }
+
+    /// Con una tele (AirPlay o HDMI), su escena es de OSExternalDisplay: duplica el iPhone
+    /// salvo durante una partida de los núcleos integrados, que se ve a pantalla completa.
+    func application(_ application: UIApplication,
+                     configurationForConnecting connectingSceneSession: UISceneSession,
+                     options: UIScene.ConnectionOptions) -> UISceneConfiguration {
+        let role: UISceneSession.Role = connectingSceneSession.role
+        if role == .windowExternalDisplayNonInteractive {
+            let configuration = UISceneConfiguration(name: "OmniStation TV", sessionRole: role)
+            configuration.delegateClass = OSExternalDisplaySceneDelegate.self
+            return configuration
+        }
+        // La de la app la sigue creando SwiftUI (WindowGroup).
+        return UISceneConfiguration(name: nil, sessionRole: role)
     }
 }
 
