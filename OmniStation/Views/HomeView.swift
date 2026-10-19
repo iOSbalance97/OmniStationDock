@@ -48,6 +48,10 @@ private enum ImporterPurpose: Equatable {
     case coreBIOS
     /// Juegos para ARMSX2/Juegos.
     case coreGames
+    /// MeloNX integrado: claves (prod.keys), firmware y juegos para MeloNX/Juegos.
+    case melonxKeys
+    case melonxFirmware
+    case melonxGames
 }
 
 /// Para qué se abre el selector de fotos.
@@ -62,7 +66,8 @@ private enum SettingsDialog {
     case assignPlatform, externalFolder
     case jitEnabler, jitScript, emulatorLocation, emulatorBundle, emulatorUpdate, emulatorFolder, emulatorHelp
     case coverOptions
-    case armsx2Mode, armsx2CoreGames, armsx2CoreHelp
+    case armsx2Mode, armsx2CoreGames, armsx2CoreHelp, armsx2CoreFlavor
+    case melonxMode, melonxCoreGames, melonxCoreHelp, memoryHelp
 }
 
 private struct Toast: Identifiable {
@@ -124,6 +129,13 @@ struct HomeView: View {
     /// PS2: app ARMSX2 aparte («external») o núcleo integrado («integrated»).
     @AppStorage(ARMSX2Mode.storageKey) private var armsx2ModeRaw = ARMSX2Mode.external.rawValue
     @AppStorage(ARMSX2CoreFolders.touchAlwaysKey) private var armsx2TouchAlways = false
+    /// Núcleo de ARMSX2 integrado: el de NeoStation o el compilado por OmniStation.
+    @AppStorage("armsx2CoreFlavor") private var armsx2CoreFlavorRaw = "neostation"
+    /// Switch: app MeloNX aparte («external») o MeloNX integrado («integrated»).
+    @AppStorage(MeloNXMode.storageKey) private var melonxModeRaw = MeloNXMode.external.rawValue
+    @AppStorage(MeloNXCoreFolders.dockedKey) private var melonxDocked = false
+    /// Firmware de Switch instalado (se lee al abrir sus ajustes).
+    @State private var melonxFirmware = ""
     @AppStorage(JITLauncher.defaultKey) private var jitByDefault = false
     @AppStorage(JITEnabler.storageKey) private var jitEnablerRaw = JITEnabler.builtIn.rawValue
     @AppStorage("emulatorSetupDone") private var emulatorSetupDone = false
@@ -228,9 +240,12 @@ struct HomeView: View {
     private func refreshLibrary() {
         // Cada modo de ARMSX2 enseña solo sus juegos: los de la app aparte o los del núcleo.
         let integrated: Bool = armsx2Integrated
+        let switchIntegrated: Bool = melonxIntegrated
         let visible: [LibraryGame] = libraryGames.filter { item in
             if item.source == ARMSX2CoreFolders.source { return integrated }
             if item.source == "emu:" + Emulator.armsx2.rawValue { return !integrated }
+            if item.source == MeloNXCoreFolders.source { return switchIntegrated }
+            if item.source == "emu:" + Emulator.melonx.rawValue { return !switchIntegrated }
             return true
         }
         let built = Self.makeLibrary(library: visible, samples: showSampleGames, counts: playCounts, meta: gameMeta)
@@ -914,10 +929,12 @@ struct HomeView: View {
             jitStatus.autoPrepare()
         }
         if armsx2Integrated { scanCoreGames(silent: true) }
+        if melonxIntegrated { scanMeloNXGames(silent: true) }
         downloadMissingCovers()
         for emulator in Emulator.allCases where EmulatorStore.isEnabled(emulator) {
-            // Con el núcleo integrado, la app ARMSX2 aparte no se toca.
+            // Con el núcleo integrado, la app aparte no se toca.
             if emulator == .armsx2 && armsx2Integrated { continue }
+            if emulator == .melonx && melonxIntegrated { continue }
             if EmulatorStore.folderBookmark(emulator) != nil { scanEmulator(emulator, silent: true) }
             if EmulatorStore.autoCheck(emulator) && EmulatorStore.shouldCheck(emulator) {
                 checkEmulatorUpdate(emulator, manual: false)
@@ -1190,6 +1207,20 @@ struct HomeView: View {
             return armsx2CoreGamesMenu(cancel)
         case .armsx2CoreHelp:
             return (tr("ARMSX2 integrado"), tr("Necesita:\n• OmniStation instalada con SideStore o AltStore (no en LiveContainer), sin quitarle su extensión de JIT.\n• iOS 18 o posterior y Modo desarrollador.\n• Archivo de emparejamiento RPPairing y la VPN LocalDevVPN conectada.\n• Tu BIOS de PS2 en ARMSX2 → BIOS.\nTodo lo de ARMSX2 (juegos, BIOS, tarjetas de memoria, estados, texturas, trucos) queda en Archivos → OmniStation Dock → ARMSX2.\nCon mando: Home o SELECT+START abre el menú del juego."), [
+                PadMenuItem(title: tr("Entendido"), kind: .cancel) { closePadMenu() }
+            ])
+        case .armsx2CoreFlavor:
+            return armsx2CoreFlavorMenu(cancel)
+        case .melonxMode:
+            return melonxModeMenu(cancel)
+        case .melonxCoreGames:
+            return melonxCoreGamesMenu(cancel)
+        case .melonxCoreHelp:
+            return (tr("MeloNX integrado"), tr("Necesita:\n• OmniStation instalada con SideStore o AltStore (no en LiveContainer), sin quitarle su extensión de JIT.\n• iOS 18 o posterior y Modo desarrollador.\n• Archivo de emparejamiento RPPairing y la VPN LocalDevVPN conectada.\n• Tus claves (prod.keys) y el firmware de tu Switch.\n• Un mando conectado.\nLos juegos van en Archivos → OmniStation Dock → MeloNX → Juegos. Ryujinx guarda claves, firmware y partidas en la raíz de OmniStation Dock (carpetas system, bis, sdcard…).\nCon mando: Home o SELECT+START abre el menú del juego."), [
+                PadMenuItem(title: tr("Entendido"), kind: .cancel) { closePadMenu() }
+            ])
+        case .memoryHelp:
+            return (tr("Más memoria para MeloNX"), tr("Esta versión de OmniStation pide el permiso «Increased Memory Limit». Para que iOS lo conceda:\n1. Abre la app GetMoreRam, inicia sesión con la cuenta con la que firmas OmniStation y añade «Increased Memory Limit» al App ID de OmniStation.\n2. En SideStore, refresca o reinstala OmniStation.\n3. Vuelve aquí: la tarjeta «Memoria» se pondrá en verde."), [
                 PadMenuItem(title: tr("Entendido"), kind: .cancel) { closePadMenu() }
             ])
         case .jitEnabler:
@@ -2157,6 +2188,16 @@ struct HomeView: View {
             launchIntegratedARMSX2(game, item: item)
             return
         }
+        if let item = libraryGames.first(where: { $0.id == game.id }), item.source == MeloNXCoreFolders.source {
+            playCounts[game.id, default: 0] += 1
+            UserDefaults.standard.set(playCounts, forKey: "playCounts")
+            launchIntegratedMeloNX(game, item: item)
+            return
+        }
+        if melonxIntegrated && game.isCustom && game.launchURL == nil && game.platform == Emulator.melonx.platform {
+            showToast(tr("Con MeloNX integrado, los juegos de Switch van en Archivos → OmniStation Dock → MeloNX → Juegos."), seconds: 4.5)
+            return
+        }
         // Con el núcleo integrado, los juegos de PS2 tienen que estar en su carpeta propia.
         if armsx2Integrated && game.isCustom && game.launchURL == nil && game.platform == Emulator.armsx2.platform {
             showToast(tr("Con el núcleo integrado, los juegos de PS2 van en Archivos → OmniStation Dock → ARMSX2 → Juegos."), seconds: 4.5)
@@ -2477,6 +2518,7 @@ struct HomeView: View {
     private var emulatorGroups: [SettingGroup] {
         Emulator.allCases.map { (emulator: Emulator) -> SettingGroup in
             if emulator == .armsx2 && armsx2Integrated { return armsx2CoreSettings }
+            if emulator == .melonx && melonxIntegrated { return melonxCoreSettings }
             return emulatorSettings(emulator)
         }
     }
@@ -2493,10 +2535,15 @@ struct HomeView: View {
         var items: [SettingItem] = [armsx2ModeItem]
         let bundled: Bool = OSArmsx2Engine.coreBundled
         let revision: String = OSArmsx2Engine.shared.coreRevision
-        let coreText: String = bundled ? (revision.isEmpty ? "ARMSX2 iOS 2.6" : "ARMSX2 " + String(revision.prefix(8))) : tr("No incluido en esta compilación")
+        let flavorName: String = OSArmsx2Engine.coreFlavor == "omnistation" ? "OmniStation" : "NeoStation"
+        let baseText: String = revision.isEmpty ? "ARMSX2 iOS 2.6" : "ARMSX2 " + String(revision.prefix(8))
+        let coreText: String = bundled ? baseText + " · " + flavorName : tr("No incluido en esta compilación")
         let coreControl: SettingControl = bundled ? .badge("OK", Color.green) : .badge(tr("FALTA"), Color.orange)
         items.append(SettingItem(id: "armsx2CoreStatus", title: tr("Núcleo"), subtitle: coreText, symbol: "cpu", tint: SettingTint.blue, control: coreControl, action: {
             dialog = .armsx2CoreHelp
+        }))
+        items.append(SettingItem(id: "armsx2CoreFlavor", title: tr("Versión del núcleo"), subtitle: armsx2FlavorSubtitle, symbol: "square.stack.3d.up.fill", tint: SettingTint.blue, control: .symbol("chevron.right"), action: {
+            dialog = .armsx2CoreFlavor
         }))
         let count: Int = libraryGames.filter { $0.source == ARMSX2CoreFolders.source }.count
         items.append(SettingItem(id: "armsx2CoreGames", title: tr("Juegos"), subtitle: "ARMSX2/Juegos", symbol: "externaldrive.fill", tint: SettingTint.blue, control: .badge("\(count)", Color.green), action: {
@@ -2673,6 +2720,278 @@ struct HomeView: View {
         controllers.navigationEnabled = true
         SoundManager.shared.updateAmbient(volume: volumeAmbient)
         emulatorRevision += 1
+    }
+
+    // MARK: - Versión del núcleo de ARMSX2 (NeoStation u OmniStation)
+
+    private var armsx2FlavorSubtitle: String {
+        _ = emulatorRevision
+        let chosen: String = OSArmsx2Engine.coreFlavor == "omnistation" ? "OmniStation" : "NeoStation"
+        let details: String = OSArmsx2Engine.coreFlavor == "omnistation" ? OSArmsx2Engine.omniStationCoreDetails : ""
+        return details.isEmpty ? chosen : chosen + " · " + details
+    }
+
+    private func armsx2CoreFlavorMenu(_ cancel: PadMenuItem) -> PadMenuContent {
+        let current: String = OSArmsx2Engine.coreFlavor
+        let loaded: String = OSArmsx2Engine.loadedCoreFlavor
+        var items: [PadMenuItem] = []
+        let options: [(flavor: String, title: String, bundled: Bool)] = [
+            ("neostation", tr("NeoStation (compilado por NeoStation iOS)"), OSArmsx2Engine.neoStationCoreBundled),
+            ("omnistation", tr("OmniStation (compilado por nosotros)"), OSArmsx2Engine.omniStationCoreBundled),
+        ]
+        for option in options {
+            let title: String = option.bundled ? option.title : option.title + " — " + tr("no incluido")
+            items.append(PadMenuItem(title: checked(title, current == option.flavor)) {
+                closePadMenu()
+                guard option.bundled else {
+                    showToast(tr("Esa versión no va en esta compilación."), seconds: 3.5)
+                    return
+                }
+                armsx2CoreFlavorRaw = option.flavor
+                emulatorRevision += 1
+                if !loaded.isEmpty && loaded != option.flavor {
+                    showToast(tr("Se usará al volver a abrir OmniStation (ya hay un núcleo cargado)."), seconds: 4.5)
+                }
+            })
+        }
+        items.append(cancel)
+        let message: String = tr("Mismo ARMSX2 2.6; el de OmniStation se compila con LTO, como la app oficial. Prueba los dos y quédate con el que vaya mejor.")
+        return (tr("Versión del núcleo"), message, items)
+    }
+
+    // MARK: - MeloNX integrado (Switch dentro de OmniStation)
+
+    private var melonxIntegrated: Bool {
+        MeloNXMode.effective(melonxModeRaw) == .integrated
+    }
+
+    private var melonxModeItem: SettingItem {
+        let subtitle: String = melonxIntegrated ? tr("Integrado en OmniStation") : tr("App aparte (LiveContainer / SideStore)")
+        return SettingItem(id: "melonxMode", title: tr("Modo de MeloNX"), subtitle: subtitle, symbol: "switch.2", tint: SettingTint.violet, control: .symbol("chevron.right"), action: {
+            dialog = .melonxMode
+        })
+    }
+
+    private var melonxCoreSettings: SettingGroup {
+        _ = emulatorRevision
+        var items: [SettingItem] = [melonxModeItem]
+        let bundled: Bool = OSMeloNXEngine.runtimeBundled
+        let version: String = OSMeloNXEngine.runtimeVersion
+        let coreText: String = bundled ? "MeloNX " + (version.isEmpty ? "" : version) : tr("No incluido en esta compilación")
+        items.append(SettingItem(id: "melonxCoreStatus", title: tr("Núcleo"), subtitle: coreText, symbol: "cpu", tint: SettingTint.blue, control: bundled ? .badge("OK", Color.green) : .badge(tr("FALTA"), Color.orange), action: {
+            dialog = .melonxCoreHelp
+        }))
+        let count: Int = libraryGames.filter { $0.source == MeloNXCoreFolders.source }.count
+        items.append(SettingItem(id: "melonxCoreGames", title: tr("Juegos"), subtitle: "MeloNX/Juegos", symbol: "externaldrive.fill", tint: SettingTint.blue, control: .badge("\(count)", Color.green), action: {
+            dialog = .melonxCoreGames
+        }))
+        let keys: Bool = OSMeloNXEngine.keysInstalled
+        items.append(SettingItem(id: "melonxCoreKeys", title: tr("Claves"), subtitle: keys ? "prod.keys" : tr("Importa prod.keys (y title.keys)"), symbol: "key.fill", tint: SettingTint.blue, control: keys ? .badge("OK", Color.green) : .badge(tr("FALTA"), Color.orange), action: {
+            openCoreImporter(.melonxKeys)
+        }))
+        // La versión se lee al cargar MeloNX (al importar claves, instalar firmware o jugar).
+        let firmwareText: String = melonxFirmware.isEmpty ? tr("Instala el firmware de tu Switch (zip)") : melonxFirmware
+        items.append(SettingItem(id: "melonxCoreFirmware", title: tr("Firmware"), subtitle: firmwareText, symbol: "memorychip", tint: SettingTint.blue, control: melonxFirmware.isEmpty ? .symbol("plus") : .badge("OK", Color.green), action: {
+            guard OSMeloNXEngine.keysInstalled else {
+                showToast(tr("Primero importa tus claves (prod.keys)."), seconds: 3.5)
+                return
+            }
+            openCoreImporter(.melonxFirmware)
+        }))
+        let memoryOK: Bool = OSMeloNXEngine.hasIncreasedMemoryLimit
+        items.append(SettingItem(id: "melonxCoreMemory", title: tr("Memoria"), subtitle: (memoryOK ? tr("Límite ampliado") : tr("Límite normal")) + " · " + tr("libre: %@", MeloNXCoreFolders.availableMemoryText), symbol: "gauge.with.dots.needle.67percent", tint: SettingTint.blue, control: memoryOK ? .badge("OK", Color.green) : .badge(tr("NORMAL"), Color.orange), action: {
+            dialog = .memoryHelp
+        }))
+        items.append(toggleSetting("melonxCoreDocked", tr("Modo dock (TV)"), tr("Más resolución; si no, modo portátil"), "tv.fill", SettingTint.blue, $melonxDocked))
+        items.append(SettingItem(id: "melonxCoreFolder", title: tr("Carpeta MeloNX"), subtitle: tr("Abrir en Archivos"), symbol: "folder.fill", tint: SettingTint.blue, control: .symbol("arrow.up.forward"), action: {
+            MeloNXCoreFolders.ensure()
+            openExternal(MeloNXCoreFolders.filesAppURL, failure: tr("No se pudo abrir Archivos."))
+        }))
+        items.append(SettingItem(id: "melonxCoreHelp", title: tr("Requisitos"), subtitle: tr("Qué necesita MeloNX integrado"), symbol: "questionmark.circle.fill", tint: SettingTint.blue, control: .symbol("chevron.right"), action: {
+            dialog = .melonxCoreHelp
+        }))
+        return SettingGroup(id: "melonxcore", title: tr("MeloNX integrado (Switch)"), isSubsection: true, items: items)
+    }
+
+    private func melonxModeMenu(_ cancel: PadMenuItem) -> PadMenuContent {
+        let integrated: Bool = melonxIntegrated
+        var items: [PadMenuItem] = []
+        items.append(PadMenuItem(title: checked(tr("App MeloNX aparte (LiveContainer / SideStore)"), !integrated)) {
+            melonxModeRaw = MeloNXMode.external.rawValue
+            emulatorRevision += 1
+            refreshLibrary()
+            closePadMenu()
+        })
+        items.append(PadMenuItem(title: checked(tr("MeloNX integrado en OmniStation"), integrated)) {
+            closePadMenu()
+            guard MeloNXMode.integratedAvailable else {
+                showToast(tr("MeloNX integrado no funciona dentro de LiveContainer: instala OmniStation con SideStore."), seconds: 4)
+                return
+            }
+            melonxModeRaw = MeloNXMode.integrated.rawValue
+            emulatorRevision += 1
+            MeloNXCoreFolders.ensure()
+            refreshLibrary()
+            scanMeloNXGames(silent: true)
+            refreshMeloNXFirmware()
+        })
+        items.append(cancel)
+        return (tr("Modo de MeloNX"), tr("Son caminos separados: cada uno con sus juegos y sus ajustes."), items)
+    }
+
+    private func melonxCoreGamesMenu(_ cancel: PadMenuItem) -> PadMenuContent {
+        var items: [PadMenuItem] = []
+        items.append(PadMenuItem(title: tr("Volver a escanear")) {
+            closePadMenu()
+            scanMeloNXGames(silent: false)
+        })
+        items.append(PadMenuItem(title: tr("Importar juegos")) {
+            closePadMenu()
+            openCoreImporter(.melonxGames)
+        })
+        items.append(PadMenuItem(title: tr("Abrir la carpeta en Archivos")) {
+            closePadMenu()
+            MeloNXCoreFolders.ensure()
+            openExternal(MeloNXCoreFolders.filesAppURL, failure: tr("No se pudo abrir Archivos."))
+        })
+        items.append(cancel)
+        return (tr("Juegos de MeloNX integrado"), "Archivos → OmniStation Dock → MeloNX → Juegos", items)
+    }
+
+    private func scanMeloNXGames(silent: Bool) {
+        MeloNXCoreFolders.ensure()
+        Task {
+            let found: [LibraryGame] = await Task.detached(priority: .utility) { () -> [LibraryGame] in
+                MeloNXCoreFolders.scanGames()
+            }.value
+            let kept: [LibraryGame] = libraryGames.filter { $0.source != MeloNXCoreFolders.source }
+            setLibrary(kept + found)
+            emulatorRevision += 1
+            if !silent {
+                showToast(tr("MeloNX integrado: %ld juegos", found.count), seconds: 3)
+            }
+            downloadMissingCovers()
+        }
+    }
+
+    private func refreshMeloNXFirmware() {
+        guard OSMeloNXEngine.runtimeBundled, OSMeloNXEngine.keysInstalled, !OSMeloNXEngine.shared.busy else { return }
+        OSMeloNXEngine.shared.readFirmwareVersion { version in
+            melonxFirmware = version
+            emulatorRevision += 1
+        }
+    }
+
+    private func importMeloNXKeys(_ result: Result<[URL], Error>) {
+        guard case .success(let urls) = result, !urls.isEmpty else { return }
+        Task {
+            let ok: Bool = await Task.detached(priority: .userInitiated) { () -> Bool in
+                MeloNXCoreFolders.importKeys(urls)
+            }.value
+            emulatorRevision += 1
+            showToast(ok ? tr("Claves importadas") : tr("No se encontró prod.keys entre los archivos elegidos"), seconds: 3.5)
+            if ok { refreshMeloNXFirmware() }
+        }
+    }
+
+    private func installMeloNXFirmware(_ result: Result<[URL], Error>) {
+        guard case .success(let urls) = result, let url = urls.first else { return }
+        showToast(tr("Instalando el firmware…"), seconds: 120)
+        Task {
+            let staged: URL? = await Task.detached(priority: .userInitiated) { () -> URL? in
+                MeloNXCoreFolders.stageFirmware(url)
+            }.value
+            guard let staged else {
+                showToast(tr("No se pudo leer el firmware."), seconds: 4)
+                return
+            }
+            OSMeloNXEngine.shared.installFirmware(atPath: staged.path) { success, message in
+                try? FileManager.default.removeItem(at: staged.deletingLastPathComponent())
+                showToast(success ? tr("Firmware instalado: %@", message) : message, seconds: 5)
+                refreshMeloNXFirmware()
+            }
+        }
+    }
+
+    private func importMeloNXGames(_ result: Result<[URL], Error>) {
+        guard case .success(let urls) = result, !urls.isEmpty else { return }
+        showToast(tr("Copiando %ld juegos…", urls.count), seconds: 600)
+        Task {
+            let copied: Int = await Task.detached(priority: .userInitiated) { () -> Int in
+                MeloNXCoreFolders.copy(urls, into: MeloNXCoreFolders.games)
+            }.value
+            showToast(tr("%ld juegos copiados a MeloNX/Juegos", copied), seconds: 3)
+            scanMeloNXGames(silent: true)
+        }
+    }
+
+    private func launchIntegratedMeloNX(_ game: Game, item: LibraryGame) {
+        guard melonxIntegrated else {
+            showToast(tr("Activa MeloNX integrado en Ajustes → MeloNX."), seconds: 3.5)
+            return
+        }
+        guard let file = item.fileName else {
+            showToast(tr("Vuelve a escanear MeloNX/Juegos."), seconds: 3)
+            return
+        }
+        guard !OSMeloNXEngine.shared.busy, !OSArmsx2Engine.shared.busy else { return }
+        guard OSMeloNXEngine.runtimeBundled else {
+            showToast(tr("Esta compilación no incluye MeloNX."), seconds: 4)
+            return
+        }
+        guard OSMeloNXEngine.supportedHere else {
+            showToast(tr("MeloNX integrado necesita iOS 18 y OmniStation instalada con SideStore (no en LiveContainer)."), seconds: 4.5)
+            return
+        }
+        guard OSMeloNXEngine.helperBundled else {
+            showToast(tr("Falta la extensión de JIT. Reinstala OmniStation con SideStore sin quitar sus extensiones."), seconds: 5)
+            return
+        }
+        guard let pairing = PairingFile.data() else {
+            showToast(tr("Importa el archivo de emparejamiento en Ajustes → Depuración."), seconds: 4)
+            return
+        }
+        guard OSMeloNXEngine.keysInstalled else {
+            showToast(tr("Faltan tus claves: impórtalas en Ajustes → MeloNX integrado → Claves."), seconds: 4.5)
+            return
+        }
+        let language: String = L10n.resolve(appLanguage)
+        let path: String = MeloNXCoreFolders.path(for: file)
+        let docked: Bool = melonxDocked
+        controllers.navigationEnabled = false
+        SoundManager.shared.updateAmbient(volume: 0)
+        // La Switch es horizontal: se gira antes de abrir el juego.
+        OrientationController.apply(landscape: true)
+        showToast(tr("Activando el JIT…"), seconds: 60)
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) {
+            OSMeloNXEngine.shared.launchGame(
+                atPath: path,
+                title: game.name,
+                pairingData: pairing,
+                language: language,
+                docked: docked,
+                progress: { message in
+                    showToast(message, seconds: 60)
+                },
+                completion: { success, message in
+                    if success {
+                        toast = nil
+                    } else {
+                        endMeloNXSession()
+                        showToast(message.isEmpty ? tr("No se pudo arrancar el juego.") : message, seconds: 7)
+                    }
+                },
+                ended: {
+                    endMeloNXSession()
+                }
+            )
+        }
+    }
+
+    private func endMeloNXSession() {
+        if !keepLandscape { OrientationController.apply(landscape: false) }
+        endIntegratedSession()
+        refreshMeloNXFirmware()
     }
 
     // MARK: - Carátulas automáticas
@@ -3031,12 +3350,13 @@ struct HomeView: View {
         switch importerPurpose {
         case .folder: return [.folder]
         case .cover: return [.image]
-        case .coreBIOS, .coreGames: return [.data]
+        case .coreBIOS, .coreGames, .melonxKeys, .melonxGames: return [.data]
+        case .melonxFirmware: return [.zip, .data, .folder]
         }
     }
 
     private var importerMultiple: Bool {
-        importerPurpose == .coreBIOS || importerPurpose == .coreGames
+        importerPurpose == .coreBIOS || importerPurpose == .coreGames || importerPurpose == .melonxKeys || importerPurpose == .melonxGames
     }
 
     private func openFolderImporter() {
@@ -3061,6 +3381,15 @@ struct HomeView: View {
             return
         case .coreGames:
             importCoreFiles(result, bios: false)
+            return
+        case .melonxKeys:
+            importMeloNXKeys(result)
+            return
+        case .melonxFirmware:
+            installMeloNXFirmware(result)
+            return
+        case .melonxGames:
+            importMeloNXGames(result)
             return
         case .folder:
             break
@@ -3979,6 +4308,7 @@ struct HomeView: View {
         })
         var items: [SettingItem] = []
         if emulator == .armsx2 { items.append(armsx2ModeItem) }
+        if emulator == .melonx { items.append(melonxModeItem) }
         items.append(toggleSetting(key + "On", tr("%@ con %@", emulator.platform, emulator.name), tr("Abre sus juegos directamente"), emulator.symbol, SettingTint.blue, enabled))
         items.append(emulatorFolderItem(emulator))
         let whereText: String = location == .liveContainer ? "LiveContainer" : tr("SideStore / AltStore")
