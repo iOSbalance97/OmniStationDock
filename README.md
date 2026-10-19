@@ -69,7 +69,21 @@ Se elige en Ajustes → ARMSX2 → *Modo de ARMSX2*. Cada modo enseña en Ajuste
 
 **Durante la partida**: el mando lo lee el propio núcleo. Mando táctil como el de ARMSX2 (cruceta, botones, dos sticks, L1/L2/R1/R2, START/SELECT), oculto con un mando conectado salvo que actives *Controles táctiles siempre*. Menú de pausa con el botón ☰, el botón Home del mando o SELECT+START: continuar, ranura 1–5, guardar y cargar estado, controles táctiles y salir.
 
-**El núcleo**: `ARMSX2Core.framework` (ARMSX2 iOS 2.6, interfaz C versión 6) compilado por NeoStation iOS 0.0.8. El workflow lo saca de su IPA pública y comprueba la huella del binario y de todos sus archivos. Más adelante se podrá sustituir por uno compilado por nosotros con la misma interfaz.
+**El núcleo** (dos versiones, se elige en Ajustes → ARMSX2 integrado → *Versión del núcleo*):
+- **NeoStation**: `ARMSX2Core.framework` (ARMSX2 iOS 2.6, interfaz C versión 6) compilado por NeoStation iOS 0.0.8. El workflow lo saca de su IPA pública y comprueba la huella del binario y de todos sus archivos.
+- **OmniStation**: `ARMSX2CoreOmni.framework`, el mismo ARMSX2 2.6 con el parche y el adaptador de NeoStation (en `Cores/ARMSX2`), compilado por nosotros con **LTO** (como la app oficial de ARMSX2; NeoStation lo compila sin LTO). Se compila con el workflow **Build ARMSX2 core** (`armsx2-core.yml`, a mano, 40–90 min) y se publica como release `armsx2-core`; el workflow de la app lo descarga de ahí si existe.
+
+Un núcleo cargado no se descarga: si cambias de versión, se usa al volver a abrir OmniStation.
+
+## MeloNX integrado (Switch dentro de OmniStation)
+Se elige en Ajustes → MeloNX → *Modo de MeloNX*. Solo fuera de LiveContainer (SideStore/AltStore), iOS 18+.
+
+- **Runtime**: el workflow descarga la IPA oficial de MeloNX (su servidor Forgejo) y copia a `Frameworks/` su núcleo Ryujinx compilado y sus librerías (MoltenVK, SDL2, FFmpeg, RyujinxHelper, BreakpointJIT…), con `MeloNXRuntime.json`. Si subes tu propia `MeloNX.ipa` como release `melonx-runtime` de este repo, se usa esa. Si no se consigue, la app compila igual sin MeloNX integrado.
+- **Anfitrión propio** (`OmniStation/Core/OSMeloNXEngine.m`): carga el runtime, activa el JIT con la extensión de OmniStation (script universal de StikDebug en iOS 26), crea la pantalla (CAMetalLayer 16:9), pasa el mando y la pantalla táctil y arranca el juego. Menú con Home o SELECT+START: continuar o salir.
+- **Juegos**: Archivos → OmniStation Dock → `MeloNX/Juegos` (NSP, XCI, NRO, NCA).
+- **Claves y firmware**: Ajustes → MeloNX integrado → *Claves* (prod.keys, title.keys) y *Firmware* (zip). Ryujinx guarda sus datos (`system`, `bis`, `sdcard`, `games`…) en la raíz de OmniStation Dock.
+- **Registro**: `MeloNX/Registro.txt` (lo que escribe el núcleo en la última partida).
+- **Memoria**: la IPA pide `com.apple.developer.kernel.increased-memory-limit` (se añade con `ldid` al empaquetar). Para que iOS lo conceda, usa la app **GetMoreRam** para añadir «Increased Memory Limit» al App ID de OmniStation y refresca la app en SideStore. Ajustes → MeloNX integrado → *Memoria* indica si está activo y cuánta memoria queda libre.
 
 ## Carátulas automáticas
 Para los juegos sin carátula, OmniStation busca la suya en la colección pública **libretro-thumbnails** (PS1, PS2, PSP, GB/GBC/GBA, NDS, 3DS, NES, SNES, N64, GameCube, Wii, Mega Drive, Master System, Game Gear, Dreamcast y Saturn) y la descarga sola, emparejando por nombre y prefiriendo la región de tu idioma. En Switch usa los iconos de MeloNX (instalado aparte) o, dentro de LiveContainer, el icono de la eShop (api.nlib.cc, si el archivo lleva el Title ID) o la portada del artículo de Wikipedia. Si un juego no está en libretro-thumbnails, *Descargar* prueba también con Wikipedia. Las carátulas que elijas a mano nunca se sustituyen. En las opciones del juego, *Cambiar carátula* → **Descargar** la busca en ese momento (en Switch con MeloNX aparte, se la pide a MeloNX; dentro de LiveContainer, el icono de la eShop por su Title ID o la portada de Wikipedia), **Importar foto** abre la galería e **Importar archivo** abre Archivos. Se activa o desactiva en Ajustes → Juegos → Carátulas automáticas.
@@ -100,12 +114,13 @@ El workflow `.github/workflows/ios-build.yml` compila una IPA sin firmar y la pu
 ## Licencias
 - StikJIT: MPL-2.0 (código en `OmniStation/JIT/StikJIT`, licencia incluida). Su librería idevice y sus scripts conservan sus licencias.
 - ARMSX2 (GPL-3.0): el núcleo integrado `ARMSX2Core.framework` es ARMSX2 (https://github.com/ARMSX2/ARMSX2, etiqueta `iOSv2.6.0`) con el parche y el adaptador C de NeoStation iOS (https://github.com/TarbleFR/neostation-ios). La extensión de JIT (`Helper/`), el puente (`OmniStation/Core/`) y el script `Helper/Resources/armsx2-universal.js` están basados en NeoStation iOS (GPL-3.0-or-later). Con el núcleo integrado, OmniStation Dock en conjunto queda bajo GPL-3.0 (texto en `LICENSES/GPL-3.0.txt`): si se distribuye la IPA, hay que dar también su código fuente.
+- MeloNX (AGPL-3.0, https://melonx.org) y Ryujinx (MIT): el runtime se empaqueta tal cual desde la IPA oficial de MeloNX; el anfitrión de OmniStation usa sus mismas funciones en C.
 - Orbitron y Space Grotesk: SIL Open Font License 1.1.
 
 ## Tipografías
 Orbitron y Space Grotesk (Google Fonts), licencia SIL Open Font License 1.1, en `OmniStation/Resources/Fonts`.
 
 ## Versión
-- Marketing version: `0.4.0`
-- Build: `40`
+- Marketing version: `0.4.5`
+- Build: `45`
 - Bundle ID: `com.omnistation.dock`
