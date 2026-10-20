@@ -144,6 +144,15 @@ void initialize_settings() {
   ARMSX2RepairIOSARM64JITSettings(&si,"neostation");
   ARMSX2ApplyIOSMultitapConfig("neostation");
   ARMSX2SanitizeFrameLimiterConfig("neostation");
+  // Botones del mando físico (como la app ARMSX2 al abrir su escena): [ARMSX2iOS/GamepadMapping]
+  // ButtonN = botón SDL de cada botón de PS2. OmniStation lo escribe con el mapa de cada juego.
+  {
+    for (int i=0;i<16;i++) {
+      const std::string key="Button"+std::to_string(i);
+      const int value=si.GetIntValue("ARMSX2iOS/GamepadMapping",key.c_str(),s_defaultMap[i]);
+      s_buttonMap[i]=(value>=-1 && value<SDL_GAMEPAD_BUTTON_COUNT) ? value : s_defaultMap[i];
+    }
+  }
   DarwinMisc::iPSX2_FORCE_EE_INTERP = 0;
   setenv("ARMSX2_JIT_PROTOCOL","universal",1);
 
