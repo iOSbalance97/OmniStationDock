@@ -20,8 +20,8 @@ targets:
     settings:
       base:
         
-        MARKETING_VERSION: "0.4.5"
-        CURRENT_PROJECT_VERSION: "45"
+        MARKETING_VERSION: "0.4.6"
+        CURRENT_PROJECT_VERSION: "46"
         PRODUCT_BUNDLE_IDENTIFIER: com.omnistation.dock
         PRODUCT_NAME: OmniStationDock
         SWIFT_VERSION: "5.0"
@@ -47,6 +47,8 @@ targets:
     dependencies:
       # Extensión de JIT: engancha StikJIT a la propia OmniStation para sus núcleos integrados.
       - target: OmniStationJITHelper
+      # Donación de RAM de MeloNX 2.7: procesos de ayuda que guardan la RAM de la Switch.
+      - target: OmniStationRamDonor
       - package: MeloController
         product: Melo-Controller
       - sdk: GameController.framework
@@ -67,8 +69,8 @@ targets:
       - path: OmniStation/JIT/StikJIT
     settings:
       base:
-        MARKETING_VERSION: "0.4.5"
-        CURRENT_PROJECT_VERSION: "45"
+        MARKETING_VERSION: "0.4.6"
+        CURRENT_PROJECT_VERSION: "46"
         PRODUCT_BUNDLE_IDENTIFIER: com.omnistation.dock.jithelper
         PRODUCT_NAME: OmniStationJITHelper
         SWIFT_VERSION: "5.0"
@@ -89,3 +91,24 @@ targets:
       - sdk: Security.framework
       - sdk: CFNetwork.framework
       - sdk: SystemConfiguration.framework
+
+  # Ayudante de memoria de MeloNX 2.7 (proceso aparte): presta su límite de RAM a la partida.
+  OmniStationRamDonor:
+    type: app-extension
+    platform: iOS
+    sources:
+      - path: RamDonor
+    settings:
+      base:
+        MARKETING_VERSION: "0.4.6"
+        CURRENT_PROJECT_VERSION: "46"
+        PRODUCT_BUNDLE_IDENTIFIER: com.omnistation.dock.ramdonor
+        PRODUCT_NAME: OmniStationRamDonor
+        TARGETED_DEVICE_FAMILY: "1"
+        GENERATE_INFOPLIST_FILE: NO
+        INFOPLIST_FILE: Config/RamDonorInfo.plist
+        IPHONEOS_DEPLOYMENT_TARGET: "17.0"
+        SKIP_INSTALL: YES
+        CLANG_ENABLE_MODULES: YES
+        CLANG_ENABLE_OBJC_ARC: YES
+        DEAD_CODE_STRIPPING: YES
