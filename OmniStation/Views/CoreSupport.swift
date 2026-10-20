@@ -45,9 +45,37 @@ enum ARMSX2CoreFolders {
     static var bios: URL { root.appendingPathComponent("BIOS", isDirectory: true) }
     static var data: URL { root.appendingPathComponent("Datos", isDirectory: true) }
 
+    /// Donde el núcleo integrado busca las tarjetas de memoria (Datos/Saves/Memory Cards).
+    static var memoryCards: URL {
+        data.appendingPathComponent("Saves", isDirectory: true).appendingPathComponent("Memory Cards", isDirectory: true)
+    }
+
     static func ensure() {
-        for folder in [games, bios, data] {
+        for folder in [games, bios, data, memoryCards] {
             try? FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        }
+        adoptMemoryCards()
+    }
+
+    /// La app ARMSX2 guarda las tarjetas en «memcards»; el núcleo integrado, en Saves/Memory Cards.
+    /// Las que se copien a Datos/memcards, a Datos o a la carpeta ARMSX2 se pasan a su sitio.
+    /// Si ya había una con el mismo nombre (la vacía que crea el núcleo), se guarda como «.bak».
+    private static func adoptMemoryCards() {
+        let manager = FileManager.default
+        let sources: [URL] = [data.appendingPathComponent("memcards", isDirectory: true), data, root]
+        for folder in sources {
+            guard let names = try? manager.contentsOfDirectory(atPath: folder.path) else { continue }
+            for name in names where name.lowercased().hasSuffix(".ps2") && !name.hasPrefix(".") {
+                let source: URL = folder.appendingPathComponent(name)
+                let target: URL = memoryCards.appendingPathComponent(name)
+                guard source.standardizedFileURL != target.standardizedFileURL else { continue }
+                if manager.fileExists(atPath: target.path) {
+                    let backup: URL = memoryCards.appendingPathComponent(name + ".bak")
+                    try? manager.removeItem(at: backup)
+                    try? manager.moveItem(at: target, to: backup)
+                }
+                try? manager.moveItem(at: source, to: target)
+            }
         }
     }
 

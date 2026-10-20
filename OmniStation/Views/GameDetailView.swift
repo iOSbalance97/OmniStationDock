@@ -8,7 +8,7 @@ enum GameDetailFocus: Int {
     case options = 1
     case favorite = 2
     case back = 3
-    /// Botón de la descripción.
+    /// Descripción (debajo de los botones): la abre entera.
     case info = 4
 }
 
@@ -16,7 +16,7 @@ enum GameDetailFocus: Int {
 /// Horizontal: el fondo panorámico del juego a pantalla completa; abajo a la izquierda su logo,
 /// la plataforma y los botones; abajo a la derecha una tarjeta con sus datos (última partida,
 /// tiempo jugado, tamaño, emulador y ajustes). Vertical: lo mismo, apilado.
-/// Arriba: volver (también ○), descripción y favorito.
+/// Arriba: volver (también ○) y favorito. La descripción se abre tocándola.
 struct GameDetailView: View {
     let game: Game
     let cover: UIImage?
@@ -160,15 +160,12 @@ struct GameDetailView: View {
     // MARK: Barra de arriba
 
     private var topBar: some View {
-        let infoSymbol: String = showDescription ? "text.alignleft" : "text.justify.left"
-        let infoColor: Color = showDescription ? Color.cyan : Color.white
         let starSymbol: String = isFavorite ? "star.fill" : "star"
         let starColor: Color = isFavorite ? Color.yellow : Color.white
         let starLabel: String = isFavorite ? tr("Quitar de favoritos") : tr("Añadir a favoritos")
         return HStack(spacing: 12) {
             backButton
             Spacer()
-            circleButton(infoSymbol, color: infoColor, selected: focus == .info, label: tr("Descripción"), action: onToggleDescription)
             circleButton(starSymbol, color: starColor, selected: focus == .favorite, label: starLabel, action: onFavorite)
         }
         .padding(.horizontal, landscape ? 28 : 18)
@@ -248,11 +245,21 @@ struct GameDetailView: View {
                 notes
                 infoCard
                 if let summary {
-                    Text(summary)
-                        .font(AppFont.text(12))
-                        .foregroundStyle(.white.opacity(0.72))
-                        .lineSpacing(3)
-                        .padding(.top, 2)
+                    Button(action: onToggleDescription) {
+                        Text(summary)
+                            .font(AppFont.text(12))
+                            .foregroundStyle(.white.opacity(0.72))
+                            .lineSpacing(3)
+                            .lineLimit(6)
+                            .multilineTextAlignment(.leading)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .padding(8)
+                            .contentShape(Rectangle())
+                            .padRing(gamepadConnected && focus == .info, cornerRadius: 12)
+                    }
+                    .buttonStyle(ControllerFocusableButtonStyle())
+                    .padding(.top, 2)
+                    .accessibilityLabel(tr("Descripción"))
                 }
             }
             .padding(.horizontal, 22)
@@ -301,7 +308,16 @@ struct GameDetailView: View {
     private var notes: some View {
         VStack(alignment: .leading, spacing: 6) {
             if let first = summaryFirstSentence {
-                noteLine("info.circle.fill", first, color: Color.white.opacity(0.75))
+                // Tocarla (o ✕ con ella marcada) abre la descripción entera.
+                Button(action: onToggleDescription) {
+                    noteLine("info.circle.fill", first, color: Color.white.opacity(0.75))
+                        .padding(.vertical, 4)
+                        .padding(.horizontal, 6)
+                        .contentShape(Rectangle())
+                        .padRing(gamepadConnected && focus == .info, cornerRadius: 10)
+                }
+                .buttonStyle(ControllerFocusableButtonStyle())
+                .accessibilityLabel(tr("Descripción"))
             }
             if hasOwnSettings == true {
                 noteLine("slider.horizontal.3", tr("Este juego tiene su propia configuración del emulador."), color: Color.cyan.opacity(0.9))
@@ -474,7 +490,9 @@ struct GameDetailView: View {
             HStack(spacing: 8) {
                 Image(systemName: "slider.horizontal.3")
                 Text(tr("Opciones"))
+                    .lineLimit(1)
             }
+            .fixedSize()
             .font(AppFont.text(dock ? 16 : 14, .semibold))
             .foregroundStyle(.white)
             .padding(.horizontal, dock ? 22 : 18)
@@ -484,6 +502,7 @@ struct GameDetailView: View {
             .padRing(gamepadConnected && focus == .options, cornerRadius: 30)
         }
         .buttonStyle(ControllerFocusableButtonStyle())
+        .fixedSize()
     }
 }
 
@@ -508,6 +527,12 @@ enum GameDescriptions {
 
     private static func cacheURL(_ key: String) -> URL {
         AppFolders.folder("Descriptions").appendingPathComponent(AppFolders.safeName(key) + ".txt")
+    }
+
+    /// ¿Ya hay descripción guardada? (para que el mando pueda bajar hasta ella).
+    static func hasCached(name: String, language: String) -> Bool {
+        let key: String = language + "|" + name
+        return FileManager.default.fileExists(atPath: cacheURL(key).path)
     }
 
     static func text(name: String, platform: String, language: String) async -> String? {

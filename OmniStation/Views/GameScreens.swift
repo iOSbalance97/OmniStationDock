@@ -217,6 +217,8 @@ struct RenameGameSheet: View {
     var placeholder: String = "Nombre del juego"
     /// Para escribir un Bundle ID: teclado en minúsculas, sin mayúscula automática y se puede dejar vacío.
     var bundleMode: Bool = false
+    /// Texto libre (por ejemplo una clave): se guarda tal cual, también vacío.
+    var acceptAnything: Bool = false
     var onSave: (String) -> Void
     @Environment(\.dismiss) private var dismiss
 
@@ -232,6 +234,7 @@ struct RenameGameSheet: View {
     private var saveIndex: Int { keys.count + 1 }
     private var cleanName: String { name.trimmingCharacters(in: .whitespacesAndNewlines) }
     private var canSave: Bool {
+        if acceptAnything { return true }
         if bundleMode { return cleanName.isEmpty || JITLauncher.isValidBundleID(cleanName) }
         return !cleanName.isEmpty
     }
@@ -1197,7 +1200,7 @@ struct ButtonMapSheet: View {
                             }
                         }
                         .id(resetIndex)
-                        Text(tr("El mapa se guarda para este juego. iOS no deja que una app cambie los botones dentro de otra: úsalo como referencia o configúralo igual en el emulador."))
+                        Text(tr("Se aplica al jugar este juego con MeloNX o ARMSX2 integrados (en ARMSX2, L2 y R2 no se pueden mover). En los emuladores aparte, iOS no deja cambiar sus botones: configúralo igual en el emulador."))
                             .font(AppFont.text(11))
                             .foregroundStyle(.white.opacity(0.5))
                     }
@@ -1760,7 +1763,8 @@ struct SoundsSheet: View {
         .onAppear {
             pad.handler = { action in
                 handle(action)
-                return true
+                // ←→ ya suena con el sonido que se ajusta: sin el clic de navegación encima.
+                return action != .left && action != .right
             }
         }
         .onDisappear { pad.handler = nil }

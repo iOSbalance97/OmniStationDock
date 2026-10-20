@@ -208,6 +208,11 @@ final class CoverStore {
     static let shared = CoverStore()
 
     private let cache = NSCache<NSString, UIImage>()
+
+    /// Suelta las imágenes en memoria (se vuelven a leer del disco): antes de una partida.
+    func purgeMemory() {
+        cache.removeAllObjects()
+    }
     private var missing = Set<String>()
 
     private func fileURL(for id: String) -> URL {

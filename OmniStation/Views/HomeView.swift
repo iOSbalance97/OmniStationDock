@@ -18,12 +18,15 @@ private enum DockSection: String, CaseIterable {
     }
 }
 
-private enum HomeSheet: Identifiable {
+/// Ventanas de la pantalla principal. Las que dependen de algo lo llevan dentro (así la ventana
+/// nunca abre con los datos de la vez anterior: SwiftUI puede pintarla antes de ver otro @State).
+private enum HomeSheet: Identifiable, Hashable {
     case controllers, platformOrder, addShortcut
     case renameGame, achievements, buttonMap, retroAccount, libraryList, platformManager, sounds
     case installMethod, pairing, bundleID
-    case jitSetup, installedApps, textEntry, emulatorSetup
-    case emulatorConfig
+    case jitSetup, installedApps, emulatorSetup
+    case textEntry(TextEntryTarget)
+    case emulatorConfig(Emulator, String?)
     var id: Int { hashValue }
 }
 
@@ -57,7 +60,7 @@ private enum AppPickerTarget: Equatable {
 }
 
 /// Qué texto se escribe en la ventana de texto genérica.
-private enum TextEntryTarget: Equatable {
+private enum TextEntryTarget: Hashable {
     case lcFolder(Emulator)
     case bundle(Emulator)
     case steamGridKey
@@ -163,7 +166,6 @@ struct HomeView: View {
     @AppStorage(MeloNXCoreFolders.touchAlwaysKey) private var melonxTouchAlways = false
     /// Firmware de Switch instalado (se lee al abrir sus ajustes).
     @State private var melonxFirmware = ""
-    @AppStorage(JITLauncher.defaultKey) private var jitByDefault = false
     @AppStorage(JITEnabler.storageKey) private var jitEnablerRaw = JITEnabler.builtIn.rawValue
     @AppStorage("emulatorSetupDone") private var emulatorSetupDone = false
     @AppStorage("closeAfterLaunch") private var closeAfterLaunch = true
@@ -207,7 +209,6 @@ struct HomeView: View {
     @State private var editingGameID: String?
     // JIT integrado: para qué se elige una app, qué texto se escribe y avisos al volver a la app.
     @State private var appPickerTarget: AppPickerTarget = .emulator(.armsx2)
-    @State private var textTarget: TextEntryTarget = .lcFolder(.armsx2)
     // Emulador sobre el que actúan los menús de Ajustes y carpeta que se está eligiendo.
     @State private var activeEmulator: Emulator = .armsx2
     @State private var folderPickEmulator: Emulator?
@@ -235,9 +236,6 @@ struct HomeView: View {
     @State private var shortcutMode = 0
     /// Parte de Ajustes que se ve.
     @State private var settingsCategory: SettingsCategory = .general
-    /// Configuración del emulador: de qué emulador y, si es de un juego, cuál.
-    @State private var configEmulator: Emulator = .armsx2
-    @State private var configGameID: String?
 
     init() {
         let library = LibraryStore.load()
@@ -545,11 +543,11 @@ struct HomeView: View {
             }
         case .installedApps:
             installedAppsSheet()
-        case .textEntry:
-            textEntrySheet()
-        case .emulatorConfig:
-            EmulatorConfigSheet(lang: appLanguage, emulator: configEmulator, gameID: configGameID,
-                                gameName: configGameID.flatMap { id in games.first(where: { $0.id == id })?.name },
+        case .textEntry(let target):
+            textEntrySheet(target)
+        case .emulatorConfig(let emulator, let gameID):
+            EmulatorConfigSheet(lang: appLanguage, emulator: emulator, gameID: gameID,
+                                gameName: gameID.flatMap { id in games.first(where: { $0.id == id })?.name },
                                 pad: sheetPad)
                 .onDisappear { emulatorRevision += 1 }
         case .emulatorSetup:
@@ -580,19 +578,21 @@ struct HomeView: View {
         showToast(tr("Bundle ID: %@", app.bundleID))
     }
 
-    private func textEntrySheet() -> some View {
-        if case .emulatorGame(let id) = textTarget {
+    private func textEntrySheet(_ target: TextEntryTarget) -> some View {
+        if case .emulatorGame(let id) = target {
             return AnyView(emulatorGameSheet(id))
         }
-        if textTarget == .steamGridKey {
+        if target == .steamGridKey {
+            // La clave es texto libre (32 letras y números): se acepta tal cual, también vacía.
             return AnyView(RenameGameSheet(lang: appLanguage, pad: sheetPad, initialName: SteamGridDB.apiKey,
-                                           title: "Clave de SteamGridDB", placeholder: "API key", bundleMode: true) { value in
+                                           title: "Clave de SteamGridDB", placeholder: "API key", bundleMode: true,
+                                           acceptAnything: true) { value in
                 SteamGridDB.setAPIKey(value)
                 emulatorRevision += 1
                 showToast(value.isEmpty ? tr("Clave de SteamGridDB quitada") : tr("Clave guardada: los fondos se buscarán en alta calidad"), seconds: 3.5)
             })
         }
-        return AnyView(emulatorTextSheet())
+        return AnyView(emulatorTextSheet(target))
     }
 
     /// Título exacto o Title ID del juego en MeloNX (vacío = automático).
@@ -608,8 +608,7 @@ struct HomeView: View {
         }
     }
 
-    private func emulatorTextSheet() -> some View {
-        let target: TextEntryTarget = textTarget
+    private func emulatorTextSheet(_ target: TextEntryTarget) -> some View {
         let title: String
         let placeholder: String
         let initial: String
@@ -953,6 +952,14 @@ struct HomeView: View {
         controllers.navigationEnabled = true
         sheetPad.gamepadConnected = gamepadConnected
         refreshJITStatus(announce: false)
+        // Instalada con SideStore: las carpetas de los núcleos existen desde el principio, así la
+        // carpeta de OmniStation sale en Archivos → En mi iPhone sin tener que importar nada antes.
+        if !DebugSupport.isInsideLiveContainer {
+            DispatchQueue.global(qos: .utility).async {
+                ARMSX2CoreFolders.ensure()
+                MeloNXCoreFolders.ensure()
+            }
+        }
         controllers.onShoulder = { step in handleShoulder(step) }
         controllers.onTrigger = { step in handleTrigger(step) }
         controllers.onCancel = { handleControllerCancel() }
@@ -1008,6 +1015,11 @@ struct HomeView: View {
     // MARK: - Botones del mando
 
     private func handleShoulder(_ step: Int) {
+        // Ventana con pestañas (ajustes del emulador): L1/R1 cambian de pestaña.
+        if sheet != nil {
+            if sheetPad.sendShoulder(step) { feedback(.navigate) }
+            return
+        }
         // Con una ventana abierta, la interfaz de detrás no se mueve.
         guard !modalActive else { return }
         // En Ajustes los hombros cambian de parte (General, Biblioteca…).
@@ -1056,6 +1068,11 @@ struct HomeView: View {
     }
 
     private func handleOptions() {
+        // Ventana abierta: △ es suyo (en los ajustes del emulador, «Por defecto»).
+        if sheet != nil {
+            if sheetPad.sendTriangle() { feedback() }
+            return
+        }
         // En la pantalla del juego, △ abre sus opciones (como el botón «Opciones»).
         if let game = detailGame, dialog == nil, sheet == nil, !showAbout, !systemPickerOpen {
             openGameOptions(game.id)
@@ -1365,8 +1382,7 @@ struct HomeView: View {
         }
         items.append(PadMenuItem(title: tr("Escribir Bundle ID")) {
             closePadMenu()
-            textTarget = .bundle(emulator)
-            sheet = .textEntry
+            sheet = .textEntry(.bundle(emulator))
         })
         items.append(cancel)
         return (tr("Bundle ID de %@", emulator.name), EmulatorStore.bundleID(emulator), items)
@@ -1543,8 +1559,7 @@ struct HomeView: View {
         if let emulator = emulatorFor(game), emulator == .melonx {
             items.append(PadMenuItem(title: tr("Nombre en %@", emulator.name)) {
                 closePadMenu()
-                textTarget = .emulatorGame(id)
-                sheet = .textEntry
+                sheet = .textEntry(.emulatorGame(id))
             })
         }
         items.append(PadMenuItem(title: tr("Bundle ID para JIT")) {
@@ -1682,18 +1697,19 @@ struct HomeView: View {
     /// ←→ entre «Jugar» y «Opciones»; ↑ a los botones de arriba: volver, descripción (en
     /// horizontal) y favorito.
     private func moveDetailFocus(_ direction: ControllerMonitor.Direction) {
-        let hasInfo: Bool = true
+        // La descripción va debajo de los botones (solo si el juego tiene).
+        let hasInfo: Bool = detailGame.map { GameDescriptions.hasCached(name: $0.name, language: L10n.resolve(appLanguage)) } ?? false
         let next: GameDetailFocus
         switch (detailFocus, direction) {
         case (.play, .right): next = .options
         case (.options, .left): next = .play
         case (.play, .up): next = .back
         case (.options, .up): next = .favorite
-        case (.back, .right): next = hasInfo ? .info : .favorite
-        case (.info, .left): next = .back
-        case (.info, .right): next = .favorite
-        case (.favorite, .left): next = hasInfo ? .info : .back
-        case (.back, .down), (.info, .down): next = .play
+        case (.play, .down), (.options, .down): next = hasInfo ? .info : detailFocus
+        case (.info, .up): next = .play
+        case (.back, .right): next = .favorite
+        case (.favorite, .left): next = .back
+        case (.back, .down): next = .play
         case (.favorite, .down): next = .options
         default: next = detailFocus
         }
@@ -1836,12 +1852,14 @@ struct HomeView: View {
             return
         }
         if sheet != nil {
+            let action: PadAction
             switch direction {
-            case .up: sheetPad.send(.up)
-            case .down: sheetPad.send(.down)
-            case .left: sheetPad.send(.left)
-            case .right: sheetPad.send(.right)
+            case .up: action = .up
+            case .down: action = .down
+            case .left: action = .left
+            case .right: action = .right
             }
+            if sheetPad.send(action) { feedback(.navigate) }
             return
         }
         if detailGame != nil && !systemPickerOpen {
@@ -1858,7 +1876,7 @@ struct HomeView: View {
             return
         }
         if sheet != nil {
-            sheetPad.send(.accept)
+            if sheetPad.send(.accept) { feedback() }
             return
         }
         if detailGame != nil && !systemPickerOpen {
@@ -2298,9 +2316,9 @@ struct HomeView: View {
         launchExternal(url, failure: tr("No se pudo abrir el enlace"))
     }
 
-    /// ¿Este juego se abre con JIT? Su propio ajuste manda; si no tiene, el ajuste general.
+    /// ¿Este juego se abre con JIT? Lo decide su ajuste (Opciones del juego); si no tiene, sin JIT.
     private func wantsJIT(_ game: Game) -> Bool {
-        gameMeta[game.id]?.useJIT ?? jitByDefault
+        gameMeta[game.id]?.useJIT ?? false
     }
 
     private func openWithJIT(_ game: Game) {
@@ -2657,9 +2675,7 @@ struct HomeView: View {
     }
 
     private func openEmulatorConfig(_ emulator: Emulator, gameID: String?) {
-        configEmulator = emulator
-        configGameID = gameID
-        sheet = .emulatorConfig
+        sheet = .emulatorConfig(emulator, gameID)
     }
 
     /// Núcleo integrado con el que se juega este juego (nil si se abre con una app aparte).
@@ -2789,7 +2805,7 @@ struct HomeView: View {
         }
         let language: String = L10n.resolve(appLanguage)
         // Ajustes de emulación (generales y, encima, los del juego) → PCSX2.ini.
-        EmulatorConfig.writeARMSX2(gameID: gameID)
+        EmulatorConfig.writeARMSX2(gameID: gameID, buttonMap: gameID.flatMap { gameMeta[$0]?.buttonMap } ?? [:])
         let hostOptions: [String: String] = EmulatorConfig.armsx2HostOptions(gameID: gameID, touchHaptics: hapticsEnabled)
         // Durante la partida el mando es del juego, no de la interfaz.
         controllers.navigationEnabled = false
@@ -3071,7 +3087,11 @@ struct HomeView: View {
         let language: String = L10n.resolve(appLanguage)
         let path: String = MeloNXCoreFolders.path(for: file)
         // Ajustes de emulación: los generales y, encima, los de este juego.
-        let settings: [String: String] = EmulatorConfig.effective(.melonx, gameID: game.id)
+        var settings: [String: String] = EmulatorConfig.effective(.melonx, gameID: game.id)
+        // Mapa de botones del juego (Opciones → Mapear botones): «map.<físico>» = botón que manda.
+        for (physical, target) in gameMeta[game.id]?.buttonMap ?? [:] where physical != target {
+            settings["map." + physical] = target
+        }
         controllers.navigationEnabled = false
         SoundManager.shared.updateAmbient(volume: 0)
         EmulationActivity.shared.begin(gameID: game.id)
@@ -4358,7 +4378,7 @@ struct HomeView: View {
         items.append(SettingItem(id: "language", title: tr("Idioma"), subtitle: languageLabel, symbol: "globe", tint: SettingTint.sky, control: .symbol("chevron.up.chevron.down"), action: {
             dialog = .language
         }))
-        items.append(toggleSetting("closeAfterLaunch", tr("Cerrar al abrir un juego"), tr("OmniStation no se queda detrás"), "xmark.app.fill", SettingTint.sky, $closeAfterLaunch))
+        items.append(toggleSetting("closeAfterLaunch", tr("Cerrar al abrir un juego"), tr("Solo con juegos de otras apps (enlaces y LiveContainer): OmniStation se cierra detrás"), "xmark.app.fill", SettingTint.sky, $closeAfterLaunch))
         items.append(toggleSetting("haptics", tr("Vibración"), tr("Al tocar y en el mando táctil de ARMSX2"), "iphone.radiowaves.left.and.right", SettingTint.sky, $hapticsEnabled))
         items.append(toggleSetting("sound", tr("Sonido al pulsar"), tr("Sonidos de navegación y selección"), "speaker.wave.2.fill", SettingTint.periwinkle, $clickSound))
         items.append(SettingItem(id: "about", title: tr("Acerca de"), subtitle: tr("Versión %@", appVersion), symbol: "info.circle.fill", tint: Color.cyan, control: .symbol("chevron.right"), action: {
@@ -4423,7 +4443,7 @@ struct HomeView: View {
         items.append(SettingItem(id: "folder", title: tr("Carpeta externa"), subtitle: linked ? folderName : tr("ROMs de todas las plataformas"), symbol: "externaldrive.fill", tint: SettingTint.periwinkle, control: folderControl, action: {
             if folderName.isEmpty { openFolderImporter() } else { dialog = .externalFolder }
         }))
-        items.append(SettingItem(id: "shortcut", title: tr("Acceso directo (URL)"), subtitle: tr("Abre un juego, app o emulador"), symbol: "link.badge.plus", tint: SettingTint.blue, control: .symbol("plus"), action: {
+        items.append(SettingItem(id: "shortcut", title: tr("Acceso directo (URL)"), subtitle: tr("Abre un juego, app o emulador, o añade un acceso a una App de LiveContainer"), symbol: "link.badge.plus", tint: SettingTint.blue, control: .symbol("plus"), action: {
             shortcutMode = 0
             sheet = .addShortcut
         }))
@@ -4456,8 +4476,7 @@ struct HomeView: View {
         }))
         let sgdb: Bool = SteamGridDB.isConfigured
         items.append(SettingItem(id: "steamGridDB", title: tr("Fondos y logos HD"), subtitle: sgdb ? "SteamGridDB" : tr("Pega tu clave gratuita de SteamGridDB"), symbol: "photo.artframe", tint: SettingTint.violet, control: sgdb ? .badge("OK", Color.green) : .symbol("key.fill"), action: {
-            textTarget = .steamGridKey
-            sheet = .textEntry
+            sheet = .textEntry(.steamGridKey)
         }))
         return SettingGroup(id: "artwork", title: tr("Carátulas y fondos"), isSubsection: true, items: items)
     }
@@ -4496,8 +4515,7 @@ struct HomeView: View {
         }))
         if location == .liveContainer {
             items.append(SettingItem(id: key + "LC", title: tr("Carpeta en LiveContainer"), subtitle: EmulatorStore.lcFolder(emulator), symbol: "folder.badge.gearshape", tint: SettingTint.blue, control: .symbol("pencil"), action: {
-                textTarget = .lcFolder(emulator)
-                sheet = .textEntry
+                sheet = .textEntry(.lcFolder(emulator))
             }))
         } else {
             items.append(SettingItem(id: key + "Bundle", title: tr("Bundle ID"), subtitle: EmulatorStore.bundleID(emulator), symbol: "number", tint: SettingTint.blue, control: .symbol("pencil"), action: {
@@ -4564,7 +4582,6 @@ struct HomeView: View {
         items.append(SettingItem(id: "installMethod", title: tr("Método de instalación"), subtitle: installMethodTitle(method), symbol: method?.symbol ?? "questionmark.app.fill", tint: SettingTint.violet, control: .symbol("chevron.right"), action: {
             sheet = .installMethod
         }))
-        items.append(toggleSetting("jitDefault", tr("JIT al abrir juegos"), tr("Para los juegos sin ajuste propio"), "bolt.circle.fill", SettingTint.violet, $jitByDefault))
         if method == .sideStore {
             items.append(jitEnablerSettingItem())
             if usesBuiltInJIT {
@@ -4579,9 +4596,6 @@ struct HomeView: View {
             }))
             items.append(SettingItem(id: "enableJIT", title: tr("Activar JIT"), subtitle: tr("Con StikDebug, en esta app"), symbol: "bolt.fill", tint: SettingTint.violet, control: .symbol("arrow.up.forward"), action: {
                 openExternal(DebugSupport.enableJITURL, failure: stikFailure)
-            }))
-            items.append(SettingItem(id: "openStik", title: tr("Abrir StikDebug"), subtitle: tr("Emparejamiento y scripts JIT"), symbol: "ladybug.fill", tint: SettingTint.violet, control: .symbol("arrow.up.forward"), action: {
-                openExternal(DebugSupport.stikDebugURL, failure: stikFailure)
             }))
         }
         items.append(SettingItem(id: "copyBundle", title: tr("Copiar Bundle ID"), subtitle: DebugSupport.bundleID, symbol: "doc.on.doc.fill", tint: SettingTint.violet, control: .plain, action: {
@@ -4642,10 +4656,6 @@ struct HomeView: View {
         var items: [SettingItem] = []
         items.append(SettingItem(id: "lcStatus", title: tr("Estado"), subtitle: statusText, symbol: "shippingbox.fill", tint: SettingTint.aqua, control: statusControl, action: {
             showToast(statusText)
-        }))
-        items.append(SettingItem(id: "lcGame", title: tr("Juego de LiveContainer"), subtitle: tr("Acceso directo a una app de LiveContainer"), symbol: "plus.app.fill", tint: SettingTint.aqua, control: .symbol("plus"), action: {
-            shortcutMode = 2
-            sheet = .addShortcut
         }))
         return SettingGroup(id: "livecontainer", title: "LiveContainer", isSubsection: true, items: items)
     }

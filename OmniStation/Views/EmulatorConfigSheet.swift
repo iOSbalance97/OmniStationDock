@@ -4,8 +4,8 @@ import SwiftUI
 
 /// Ajustes de emulación de ARMSX2 o MeloNX. Sin `gameID` son los generales (Ajustes); con él,
 /// los de ese juego: cada uno puede usar el general o tener su propio valor.
-/// Con el mando: ↑↓ elige, ←→ cambia el valor (en la fila de pestañas, cambia de pestaña),
-/// ✕ cambia al siguiente valor y ○ cierra.
+/// Con el mando: L1/R1 cambian de pestaña, ↑↓ elige, ←→ o ✕ cambian el valor, △ restablece
+/// («Por defecto», arriba a la izquierda) y □ u ○ cierran («Listo», arriba a la derecha).
 struct EmulatorConfigSheet: View {
     let lang: String
     let emulator: Emulator
@@ -15,7 +15,7 @@ struct EmulatorConfigSheet: View {
     @Environment(\.dismiss) private var dismiss
     @State private var tab: EmuTab = .graphics
     @State private var revision: Int = 0
-    /// 0: pestañas; 1…n: ajustes; luego «Restablecer» y «Listo».
+    /// 0: pestañas; 1…n: ajustes.
     @State private var selected: Int = 1
 
     private func tr(_ key: String, _ args: CVarArg...) -> String {
@@ -29,12 +29,15 @@ struct EmulatorConfigSheet: View {
         EmulatorConfig.options(emulator).filter { $0.tab == tab }
     }
 
-    private var resetRow: Int { options.count + 1 }
-    private var doneRow: Int { options.count + 2 }
+    private var lastRow: Int { options.count }
 
     private var title: String {
         if let gameName { return gameName }
         return tr("Ajustes de %@", emulator.name)
+    }
+
+    private var resetTitle: String {
+        gameID == nil ? tr("Por defecto") : tr("Usar los generales")
     }
 
     var body: some View {
@@ -54,15 +57,17 @@ struct EmulatorConfigSheet: View {
                                 .padding(.horizontal, 4)
                         }
                         ForEach(Array(options.enumerated()), id: \.element.id) { index, option in
+                            if !option.group.isEmpty, index == 0 || options[index - 1].group != option.group {
+                                Text(tr(option.group).uppercased())
+                                    .font(AppFont.text(11, .bold))
+                                    .foregroundStyle(Color.cyan.opacity(0.85))
+                                    .frame(maxWidth: .infinity, alignment: .leading)
+                                    .padding(.horizontal, 6)
+                                    .padding(.top, index == 0 ? 0 : 8)
+                            }
                             optionRow(option, row: index + 1)
                                 .padAnchor(index + 1)
                         }
-                        HStack(spacing: 10) {
-                            actionButton(gameID == nil ? tr("Valores por defecto") : tr("Usar los generales"), row: resetRow) { reset() }
-                            actionButton(tr("Listo"), row: doneRow) { dismiss() }
-                        }
-                        .padAnchor(resetRow)
-                        .padding(.top, 6)
                     }
                     .padding(.horizontal, 16)
                     .padding(.bottom, 18)
@@ -70,6 +75,14 @@ struct EmulatorConfigSheet: View {
             }
             .navigationTitle(title)
             .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .topBarLeading) {
+                    toolbarButton(resetTitle, glyph: "△") { reset() }
+                }
+                ToolbarItem(placement: .topBarTrailing) {
+                    toolbarButton(tr("Listo"), glyph: "□", bold: true) { dismiss() }
+                }
+            }
         }
         .presentationDetents([.large])
         .presentationBackground(.ultraThinMaterial)
@@ -80,8 +93,42 @@ struct EmulatorConfigSheet: View {
                 handle(action)
                 return true
             }
+            pad.shoulderHandler = { step in
+                stepTab(step)
+                return true
+            }
+            pad.triangleHandler = {
+                reset()
+                return true
+            }
+            pad.deleteHandler = {
+                dismiss()
+                return true
+            }
         }
-        .onDisappear { pad.handler = nil }
+        .onDisappear {
+            pad.handler = nil
+            pad.shoulderHandler = nil
+            pad.triangleHandler = nil
+            pad.deleteHandler = nil
+        }
+    }
+
+    private func toolbarButton(_ text: String, glyph: String, bold: Bool = false, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            HStack(spacing: 5) {
+                if pad.gamepadConnected {
+                    Text(glyph)
+                        .font(.system(size: 12, weight: .bold))
+                        .foregroundStyle(.white.opacity(0.6))
+                }
+                Text(text)
+                    .font(AppFont.text(14, bold ? .bold : .semibold))
+                    .foregroundStyle(Color.cyan)
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.7)
+            }
+        }
     }
 
     // MARK: Pestañas
@@ -93,15 +140,20 @@ struct EmulatorConfigSheet: View {
                 Button {
                     switchTab(item)
                 } label: {
-                    Label(tr(item.title), systemImage: item.symbol)
-                        .font(AppFont.text(12, .semibold))
-                        .lineLimit(1)
-                        .minimumScaleFactor(0.75)
+                    // Icono encima del nombre: caben las cinco pestañas de MeloNX en vertical.
+                    VStack(spacing: 3) {
+                        Image(systemName: item.symbol)
+                            .font(.system(size: 13, weight: .semibold))
+                        Text(tr(item.title))
+                            .font(AppFont.text(10, .semibold))
+                            .lineLimit(1)
+                            .minimumScaleFactor(0.6)
+                    }
                         .foregroundStyle(active ? Color.black : Color.white.opacity(0.85))
                         .frame(maxWidth: .infinity)
-                        .padding(.vertical, 9)
-                        .background(active ? Color.cyan : Color.white.opacity(0.08), in: Capsule())
-                        .contentShape(Capsule())
+                        .padding(.vertical, 7)
+                        .background(active ? Color.cyan : Color.white.opacity(0.08), in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+                        .contentShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
                 }
                 .buttonStyle(ControllerFocusableButtonStyle())
             }
@@ -113,8 +165,14 @@ struct EmulatorConfigSheet: View {
     private func switchTab(_ item: EmuTab) {
         guard item != tab else { return }
         tab = item
-        selected = min(selected, doneRow)
         if selected > 0 { selected = 1 }
+    }
+
+    /// L1/R1 (o ←→ en la fila de pestañas): pestaña anterior o siguiente.
+    private func stepTab(_ step: Int) {
+        guard let index = tabs.firstIndex(of: tab), !tabs.isEmpty else { return }
+        let next: Int = (index + step + tabs.count) % tabs.count
+        switchTab(tabs[next])
     }
 
     // MARK: Filas
@@ -199,22 +257,6 @@ struct EmulatorConfigSheet: View {
         }
     }
 
-    private func actionButton(_ text: String, row: Int, action: @escaping () -> Void) -> some View {
-        Button(action: action) {
-            Text(text)
-                .font(AppFont.text(15, .semibold))
-                .foregroundStyle(Color.cyan)
-                .lineLimit(1)
-                .minimumScaleFactor(0.75)
-                .frame(maxWidth: .infinity)
-                .padding(.vertical, 13)
-                .contentShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
-                .liquidGlass(in: RoundedRectangle(cornerRadius: 14, style: .continuous), interactive: true)
-                .padRing(pad.gamepadConnected && selected == row, cornerRadius: 14)
-        }
-        .buttonStyle(ControllerFocusableButtonStyle())
-    }
-
     // MARK: Cambios
 
     private func set(_ option: EmuOption, _ value: String?) {
@@ -252,28 +294,20 @@ struct EmulatorConfigSheet: View {
         case .up:
             selected = max(0, selected - 1)
         case .down:
-            selected = min(doneRow, selected + 1)
+            selected = min(lastRow, selected + 1)
         case .left, .right:
             let step: Int = action == .left ? -1 : 1
             if selected == 0 {
-                guard let index = tabs.firstIndex(of: tab) else { return }
-                let next: Int = (index + step + tabs.count) % tabs.count
-                switchTab(tabs[next])
+                stepTab(step)
                 selected = 0
             } else if selected <= list.count {
                 cycle(list[selected - 1], step: step)
-            } else {
-                selected = action == .left ? resetRow : doneRow
             }
         case .accept:
             if selected == 0 {
-                selected = 1
+                selected = list.isEmpty ? 0 : 1
             } else if selected <= list.count {
                 cycle(list[selected - 1], step: 1)
-            } else if selected == resetRow {
-                reset()
-            } else {
-                dismiss()
             }
         case .cancel:
             dismiss()

@@ -129,6 +129,11 @@ final class GameLogoStore {
     static let shared = GameLogoStore()
 
     private let cache = NSCache<NSString, UIImage>()
+
+    /// Suelta las imágenes en memoria (se vuelven a leer del disco): antes de una partida.
+    func purgeMemory() {
+        cache.removeAllObjects()
+    }
     private var tried = Set<String>()
 
     private func fileURL(for id: String) -> URL {
@@ -219,6 +224,11 @@ final class EmulationActivity: ObservableObject {
 
     func begin(gameID: String?) {
         running = true
+        // Toda la RAM posible para el juego: fuera las imágenes en memoria de la interfaz.
+        CoverStore.shared.purgeMemory()
+        BackdropStore.shared.purgeMemory()
+        GameLogoStore.shared.purgeMemory()
+        URLCache.shared.removeAllCachedResponses()
         self.gameID = gameID
         startedAt = Date()
         if let gameID { PlayStats.markPlayed(gameID) }

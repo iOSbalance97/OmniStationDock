@@ -15,6 +15,20 @@ final class SheetPad: ObservableObject {
     var handler: ((PadAction) -> Bool)?
     /// Botón □ (cuadrado): en las ventanas con teclado borra la última letra.
     var deleteHandler: (() -> Bool)?
+    /// L1/R1 (-1 / +1): en las ventanas con pestañas cambia de pestaña.
+    var shoulderHandler: ((Int) -> Bool)?
+    /// Botón △ (triángulo).
+    var triangleHandler: (() -> Bool)?
+
+    @discardableResult
+    func sendShoulder(_ step: Int) -> Bool {
+        shoulderHandler?(step) ?? false
+    }
+
+    @discardableResult
+    func sendTriangle() -> Bool {
+        triangleHandler?() ?? false
+    }
 
     @discardableResult
     func send(_ action: PadAction) -> Bool {

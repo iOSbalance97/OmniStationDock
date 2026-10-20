@@ -16,25 +16,31 @@ struct EmuChoice: Hashable {
 }
 
 enum EmuTab: String, CaseIterable, Identifiable {
-    case graphics, system, audio, hud
+    case graphics, input, misc, system, audio, hud, advanced
 
     var id: String { rawValue }
 
     var title: String {
         switch self {
         case .graphics: return "Gráficos"
+        case .input: return "Mando"
+        case .misc: return "Varios"
         case .system: return "Sistema"
         case .audio: return "Sonido"
         case .hud: return "HUD"
+        case .advanced: return "Avanzado"
         }
     }
 
     var symbol: String {
         switch self {
         case .graphics: return "sparkles.tv"
+        case .input: return "gamecontroller.fill"
+        case .misc: return "square.grid.2x2.fill"
         case .system: return "cpu"
         case .audio: return "speaker.wave.2.fill"
         case .hud: return "speedometer"
+        case .advanced: return "wrench.and.screwdriver.fill"
         }
     }
 }
@@ -49,6 +55,14 @@ struct EmuOption: Identifiable {
     /// ARMSX2: sección y clave de PCSX2.ini (nil: no va al INI).
     var section: String? = nil
     var key: String? = nil
+    /// Grupo dentro de la pestaña (como las secciones de los ajustes de MeloNX).
+    var group: String = ""
+
+    func grouped(_ name: String) -> EmuOption {
+        var copy: EmuOption = self
+        copy.group = name
+        return copy
+    }
 
     var isToggle: Bool {
         choices.count == 2 && choices[0].value == "true" && choices[1].value == "false"
@@ -148,57 +162,90 @@ enum EmulatorConfig {
         ]
     }()
 
-    /// MeloNX 2.7: los mismos ajustes que su «Per-Game» (sin los de su interfaz).
-    static let melonx: [EmuOption] = [
-        EmulatorConfig.pick("resScale", .graphics, "Resolución interna", "Por encima de 1x se ve mejor y gasta más. Algunos juegos fallan por debajo de 1x.",
-             [("0.5", "0,5x"), ("0.75", "0,75x"), ("1", "1x (nativa)"), ("1.5", "1,5x"), ("2", "2x"), ("3", "3x")], "1"),
-        EmulatorConfig.toggle("docked", .graphics, "Modo dock (TV)", "Más resolución; si no, modo portátil.", false),
-        EmulatorConfig.pick("aspectRatio", .graphics, "Relación de aspecto", "",
-             [("1", "16:9"), ("0", "4:3"), ("2", "16:10"), ("3", "21:9"), ("4", "32:9"), ("5", "Estirar")], "1"),
-        EmulatorConfig.pick("maxAnisotropy", .graphics, "Filtro anisótropo", "Automático deja decidir al juego.",
-             [("-1", "Automático"), ("2", "2x"), ("4", "4x"), ("8", "8x"), ("16", "16x")], "-1"),
-        EmulatorConfig.pick("antiAliasing", .graphics, "Antialiasing", "",
-             [("0", "No"), ("1", "FXAA"), ("2", "SMAA bajo"), ("3", "SMAA medio"), ("4", "SMAA alto")], "0"),
-        EmulatorConfig.pick("scalingFilter", .graphics, "Filtro de escalado", "MetalFX y FSR suben la imagen con más nitidez.",
-             [("0", "Bilineal"), ("1", "Más cercano"), ("2", "FSR"), ("3", "Área"), ("4", "MetalFX")], "0"),
-        EmulatorConfig.pick("scalingFilterLevel", .graphics, "Nitidez de FSR", "Solo con el filtro FSR.",
-             [("40", "40 %"), ("60", "60 %"), ("80", "80 %"), ("100", "100 %")], "60"),
-        EmulatorConfig.pick("metalFxUpscaleFactor", .graphics, "Escala de MetalFX", "Solo con el filtro MetalFX.",
-             [("1.5", "1,5x"), ("2", "2x"), ("3", "3x")], "2"),
-        EmulatorConfig.pick("vsyncMode", .graphics, "Sincronización (VSync)", "Ilimitado quita el límite de 60 FPS (los juegos pueden ir acelerados).",
-             [("0", "Switch (60 FPS)"), ("1", "Ilimitado")], "0"),
-        EmulatorConfig.toggle("shaderCache", .graphics, "Caché de shaders", "Guarda los shaders y los carga al abrir el juego. Si dudas, apagado.", false),
-        EmulatorConfig.toggle("textureRecompression", .graphics, "Recompresión de texturas", "Gasta mucha menos memoria. Si dudas, encendido.", true),
-        EmulatorConfig.toggle("macroHLE", .graphics, "Macro HLE", "Más rápido; algún juego puede verse mal.", true),
-        EmulatorConfig.toggle("asyncShaders", .graphics, "Shaders en segundo plano (experimental)", "Menos tirones; puede romper gráficos o cerrar algún juego.", false),
-        EmulatorConfig.toggle("memoryBudget", .graphics, "Límite de memoria de la GPU", "Apágalo si un juego se ve en blanco o pierde geometría.", true),
+    /// MeloNX 2.7: sus ajustes de emulación con las mismas pestañas y grupos que la app MeloNX
+    /// (Graphics, Input, Misc, System y Advanced), sin los de su interfaz.
+    static let melonx: [EmuOption] = {
+        let resolution = "Resolución"
+        let filtering = "Filtrado"
+        let scaling = "Opciones de escalado"
+        let display = "Pantalla"
+        let overlay = "Indicador de rendimiento"
+        let aspect = "Relación de aspecto"
+        let controller = "Mando"
+        let network = "Red"
+        let interface = "Interfaz"
+        let sound = "Sonido"
+        let language = "Idioma y región"
+        let cpu = "Configuración de la CPU"
+        let logs = "Registros de depuración"
+        let behaviour = "Comportamiento"
+        let memory = "Memoria"
+        return [
+            EmulatorConfig.pick("resScale", .graphics, "Resolución interna", "Por encima de 1x se ve mejor y gasta más. Algunos juegos fallan por debajo de 1x.",
+                 [("0.5", "0,5x"), ("0.75", "0,75x"), ("1", "1x (nativa)"), ("1.5", "1,5x"), ("2", "2x"), ("3", "3x")], "1").grouped(resolution),
+            EmulatorConfig.pick("maxAnisotropy", .graphics, "Filtro anisótropo", "Automático deja decidir al juego.",
+                 [("-1", "Automático"), ("2", "2x"), ("4", "4x"), ("8", "8x"), ("16", "16x")], "-1").grouped(filtering),
+            EmulatorConfig.pick("antiAliasing", .graphics, "Antialiasing", "",
+                 [("0", "No"), ("1", "FXAA"), ("2", "SMAA bajo"), ("3", "SMAA medio"), ("4", "SMAA alto")], "0").grouped(scaling),
+            EmulatorConfig.pick("scalingFilter", .graphics, "Filtro de escalado", "MetalFX y FSR suben la imagen con más nitidez.",
+                 [("0", "Bilineal"), ("1", "Más cercano"), ("2", "FSR"), ("3", "Área"), ("4", "MetalFX")], "0").grouped(scaling),
+            EmulatorConfig.pick("scalingFilterLevel", .graphics, "Nitidez de FSR", "Solo con el filtro FSR.",
+                 [("40", "40 %"), ("60", "60 %"), ("80", "80 %"), ("100", "100 %")], "60").grouped(scaling),
+            EmulatorConfig.pick("metalFxUpscaleFactor", .graphics, "Escala de MetalFX", "Solo con el filtro MetalFX.",
+                 [("1.5", "1,5x"), ("2", "2x"), ("3", "3x")], "2").grouped(scaling),
+            EmulatorConfig.toggle("shaderCache", .graphics, "Caché de shaders", "Guarda los shaders y los carga al abrir el juego. Si dudas, apagado.", false).grouped(display),
+            EmulatorConfig.toggle("textureRecompression", .graphics, "Recompresión de texturas", "Gasta mucha menos memoria. Si dudas, encendido.", true).grouped(display),
+            EmulatorConfig.pick("vsyncMode", .graphics, "Sincronización (VSync)", "Ilimitado quita el límite de 60 FPS (los juegos pueden ir acelerados).",
+                 [("0", "Switch (60 FPS)"), ("1", "Ilimitado")], "0").grouped(display),
+            EmulatorConfig.toggle("docked", .graphics, "Modo dock (TV)", "Más resolución; si no, modo portátil.", false).grouped(display),
+            EmulatorConfig.toggle("macroHLE", .graphics, "Macro HLE", "Más rápido; algún juego puede verse mal.", true).grouped(display),
+            EmulatorConfig.toggle("asyncShaders", .graphics, "Shaders en segundo plano (experimental)", "Menos tirones; puede romper gráficos o cerrar algún juego.", false).grouped(display),
+            EmulatorConfig.toggle("memoryBudget", .graphics, "Límite de memoria de la GPU", "Apágalo si un juego se ve en blanco o pierde geometría.", true).grouped(display),
+            EmulatorConfig.toggle("hud", .graphics, "Indicador de rendimiento", "FPS y el resto encima del juego.", false).grouped(overlay),
+            EmulatorConfig.toggle("hudBattery", .graphics, "Batería", "", false).grouped(overlay),
+            EmulatorConfig.toggle("hudFrameTime", .graphics, "Tiempo de fotograma", "", true).grouped(overlay),
+            EmulatorConfig.toggle("hudMemory", .graphics, "RAM usada y libre", "", true).grouped(overlay),
+            EmulatorConfig.toggle("hudFifo", .graphics, "FIFO", "", false).grouped(overlay),
+            EmulatorConfig.toggle("hudThermal", .graphics, "Temperatura", "Estado térmico de iOS (normal, templado, caliente, crítico).", true).grouped(overlay),
+            EmulatorConfig.pick("hudPosition", .graphics, "Posición", "",
+                 [("topLeft", "Arriba a la izquierda"), ("topCenter", "Arriba en el centro"), ("topRight", "Arriba a la derecha"),
+                  ("bottomLeft", "Abajo a la izquierda"), ("bottomCenter", "Abajo en el centro"), ("bottomRight", "Abajo a la derecha")], "topRight").grouped(overlay),
+            EmulatorConfig.pick("aspectRatio", .graphics, "Relación de aspecto", "",
+                 [("1", "16:9"), ("0", "4:3"), ("2", "16:10"), ("3", "21:9"), ("4", "32:9"), ("5", "Estirar")], "1").grouped(aspect),
 
-        EmulatorConfig.pick("systemLanguage", .system, "Idioma de la consola", "",
-             [("auto", "Según OmniStation"), ("5", "Español"), ("14", "Español (Latinoamérica)"), ("1", "Inglés (EE. UU.)"),
-              ("12", "Inglés (Reino Unido)"), ("2", "Francés"), ("3", "Alemán"), ("4", "Italiano"), ("9", "Portugués"),
-              ("17", "Portugués (Brasil)"), ("0", "Japonés"), ("7", "Coreano"), ("15", "Chino simplificado"),
-              ("16", "Chino tradicional"), ("10", "Ruso"), ("8", "Neerlandés"), ("18", "Polaco")], "auto"),
-        EmulatorConfig.pick("systemRegion", .system, "Región", "",
-             [("auto", "Según OmniStation"), ("2", "Europa"), ("1", "EE. UU."), ("0", "Japón"), ("3", "Australia"),
-              ("5", "Corea"), ("4", "China"), ("6", "Taiwán")], "auto"),
-        EmulatorConfig.pick("memoryManager", .system, "Gestor de memoria", "«Host sin comprobar» es el más rápido.",
-             [("2", "Host sin comprobar"), ("1", "Host"), ("0", "Software (lento)")], "2"),
-        EmulatorConfig.toggle("pptc", .system, "Caché de traducción (PPTC)", "Los juegos cargan mucho antes la segunda vez.", true),
-        EmulatorConfig.toggle("fsIntegrity", .system, "Comprobar los archivos", "Busca archivos dañados al arrancar.", true),
-        EmulatorConfig.toggle("ignoreMissingServices", .system, "Ignorar servicios que faltan", "Puede evitar que se cierren algunos juegos.", false),
-        EmulatorConfig.toggle("expandRAM", .system, "Ampliar la RAM de la consola", "8 GB como una Switch de desarrollo. Solo para packs de texturas HD.", false),
-        EmulatorConfig.toggle("internet", .system, "Internet / LAN", "Deja al juego conectarse (nunca a Nintendo).", false),
+            EmulatorConfig.pick("controllerType", .input, "Tipo de mando", "Cómo ve el juego al jugador 1. Algunos juegos piden Joy-Con o portátil.",
+                 [("pro", "Mando Pro"), ("handheld", "Portátil"), ("joyconPair", "Pareja de Joy-Con")], "pro").grouped(controller),
 
-        EmulatorConfig.pick("audioVolume", .audio, "Volumen", "",
-             [("1", "100 %"), ("0.75", "75 %"), ("0.5", "50 %"), ("0.25", "25 %"), ("0", "Silencio")], "1"),
+            EmulatorConfig.pick("networkInterface", .misc, "Interfaz de red", "La red por la que juega en LAN.",
+                 [("auto", "Automática"), ("en0", "Wi‑Fi (en0)"), ("bridge100", "Compartir internet (bridge100)")], "auto").grouped(network),
+            EmulatorConfig.toggle("internet", .misc, "Internet del juego / modo LAN", "Deja al juego conectarse y jugar en LAN con otros dispositivos de la misma red. Nunca se conecta a Nintendo. Puede cerrar algún juego.", false).grouped(network),
+            EmulatorConfig.toggle("ldnMitm", .misc, "ldn_mitm", "Convierte el modo local inalámbrico en LAN para jugar con otros Ryujinx o consolas con ldn_mitm. Todos con la misma versión del juego.", false).grouped(network),
+            EmulatorConfig.toggle("disableTouch", .misc, "Desactivar la pantalla táctil", "El juego no recibe toques en la pantalla (el mando táctil sigue).", false).grouped(interface),
+            EmulatorConfig.pick("audioVolume", .misc, "Volumen", "",
+                 [("1", "100 %"), ("0.75", "75 %"), ("0.5", "50 %"), ("0.25", "25 %"), ("0", "Silencio")], "1").grouped(sound),
 
-        EmulatorConfig.toggle("hud", .hud, "HUD de rendimiento", "Como el de MeloNX: FPS y el resto, arriba a la izquierda.", false),
-        EmulatorConfig.toggle("hudFrameTime", .hud, "Tiempo de fotograma", "", true),
-        EmulatorConfig.toggle("hudFifo", .hud, "FIFO", "", false),
-        EmulatorConfig.toggle("hudMemory", .hud, "RAM usada y libre", "", true),
-        EmulatorConfig.toggle("hudThermal", .hud, "Temperatura", "Estado térmico de iOS (normal, templado, caliente, crítico).", true),
-        EmulatorConfig.toggle("hudBattery", .hud, "Batería", "", false)
-    ]
+            EmulatorConfig.pick("systemLanguage", .system, "Idioma de la consola", "",
+                 [("auto", "Según OmniStation"), ("5", "Español"), ("14", "Español (Latinoamérica)"), ("1", "Inglés (EE. UU.)"),
+                  ("12", "Inglés (Reino Unido)"), ("2", "Francés"), ("3", "Alemán"), ("4", "Italiano"), ("9", "Portugués"),
+                  ("17", "Portugués (Brasil)"), ("0", "Japonés"), ("7", "Coreano"), ("15", "Chino simplificado"),
+                  ("16", "Chino tradicional"), ("10", "Ruso"), ("8", "Neerlandés"), ("18", "Polaco")], "auto").grouped(language),
+            EmulatorConfig.pick("systemRegion", .system, "Región", "",
+                 [("auto", "Según OmniStation"), ("2", "Europa"), ("1", "EE. UU."), ("0", "Japón"), ("3", "Australia"),
+                  ("5", "Corea"), ("4", "China"), ("6", "Taiwán")], "auto").grouped(language),
+            EmulatorConfig.pick("memoryManager", .system, "Gestor de memoria", "«Host sin comprobar» es el más rápido.",
+                 [("2", "Host sin comprobar"), ("1", "Host"), ("0", "Software (lento)")], "2").grouped(cpu),
+            EmulatorConfig.toggle("pptc", .system, "Caché de traducción (PPTC)", "Los juegos cargan mucho antes la segunda vez.", true).grouped(cpu),
+
+            EmulatorConfig.toggle("debugLogs", .advanced, "Registros de depuración", "Solo si te lo piden para un fallo: gasta rendimiento.", false).grouped(logs),
+            EmulatorConfig.toggle("traceLogs", .advanced, "Registros de traza", "No afecta al rendimiento.", false).grouped(logs),
+            EmulatorConfig.toggle("fsIntegrity", .advanced, "Comprobar los archivos", "Busca archivos dañados al arrancar.", true).grouped(behaviour),
+            EmulatorConfig.toggle("expandRAM", .advanced, "Ampliar la RAM de la consola", "8 GB como una Switch de desarrollo. Solo para packs de texturas HD o mods 4K; no da más rendimiento.", false).grouped(memory),
+            EmulatorConfig.toggle("ignoreMissingServices", .advanced, "Ignorar servicios que faltan", "Puede evitar que se cierren algunos juegos.", false).grouped(memory),
+            EmulatorConfig.toggle("donateGuestMemory", .advanced, "Donar la RAM de la consola", "Guarda la RAM de la Switch en procesos de ayuda, que cuentan aparte del límite de OmniStation. Si iOS los cierra por falta de memoria, se cierra el juego.", true).grouped(memory),
+            EmulatorConfig.toggle("donateGpuBuffers", .advanced, "Donar búferes de la GPU", "Reserva hasta 512 MB en los procesos de ayuda para búferes de la GPU. Experimental.", false).grouped(memory),
+            EmulatorConfig.toggle("killDonorsAfterMapping", .advanced, "Cerrar los ayudantes al mapear", "Cierra los procesos de ayuda en cuanto su memoria está mapeada y sigue con ella. Si dudas, encendido.", true).grouped(memory)
+        ]
+    }()
 
     static func options(_ emulator: Emulator) -> [EmuOption] {
         emulator == .melonx ? melonx : armsx2
@@ -276,7 +323,7 @@ enum EmulatorConfig {
     // MARK: ARMSX2 → PCSX2.ini
 
     /// Escribe en PCSX2.ini los ajustes de la partida (todos, para que no quede nada de otro juego).
-    static func writeARMSX2(gameID: String?) {
+    static func writeARMSX2(gameID: String?, buttonMap: [String: String] = [:]) {
         let values: [String: String] = effective(.armsx2, gameID: gameID)
         var entries: [(section: String, key: String, value: String)] = []
         for option in armsx2 {
@@ -290,8 +337,44 @@ enum EmulatorConfig {
         entries.append(("GameISO", "FastBoot", values["EnableFastBoot"] ?? "true"))
         // HUD propio de ARMSX2 arriba a la derecha (el de OmniStation va a la izquierda).
         entries.append(("EmuCore/GS", "OsdPerformancePos", "3"))
+        // Mapa de botones del juego (lo lee el núcleo al prepararse). Sin mapa: los de siempre.
+        for (index, value) in armsx2GamepadMapping(buttonMap).enumerated() {
+            entries.append(("ARMSX2iOS/GamepadMapping", "Button\(index)", String(value)))
+        }
         let file: URL = ARMSX2CoreFolders.data.appendingPathComponent("inis", isDirectory: true).appendingPathComponent("PCSX2.ini")
         PCSX2Ini.apply(entries, to: file)
+    }
+
+    /// Índice de cada botón de PS2 en el mapa del núcleo (arriba, abajo, izquierda, derecha, ✕, ○,
+    /// □, △, L1, R1, L2, R2, Start, Select, L3, R3) y su botón SDL de serie.
+    private static let armsx2PadIndex: [String: Int] = [
+        "a": 4, "b": 5, "x": 6, "y": 7, "l1": 8, "r1": 9, "l2": 10, "r2": 11,
+        "menu": 12, "options": 13, "l3": 14, "r3": 15
+    ]
+    /// Botones SDL3 (SDL_GamepadButton): sur, este, oeste, norte, back, guide, start, sticks y hombros.
+    private static let sdlButton: [String: Int] = [
+        "a": 0, "b": 1, "x": 2, "y": 3, "options": 4, "menu": 6, "l3": 7, "r3": 8, "l1": 9, "r1": 10
+    ]
+    private static let armsx2DefaultMap: [Int] = [11, 12, 13, 14, 0, 1, 2, 3, 9, 10, -1, -1, 6, 4, 7, 8]
+
+    /// Botón SDL de cada botón de PS2 con el mapa del juego («físico → el que manda»).
+    /// L2 y R2 son gatillos analógicos en ARMSX2: no se pueden mover a otro sitio.
+    static func armsx2GamepadMapping(_ map: [String: String]) -> [Int] {
+        var result: [Int] = armsx2DefaultMap
+        let changes = map.filter { entry in
+            guard entry.key != entry.value, sdlButton[entry.key] != nil, let index = armsx2PadIndex[entry.value] else { return false }
+            return index != 10 && index != 11
+        }
+        guard !changes.isEmpty else { return result }
+        // Los botones de PS2 que recibe un botón movido dejan de venir de su botón de serie.
+        for (physical, _) in changes {
+            if let index = armsx2PadIndex[physical], result[index] == sdlButton[physical] { result[index] = -1 }
+        }
+        for (physical, target) in changes.sorted(by: { $0.key < $1.key }) {
+            guard let index = armsx2PadIndex[target], let sdl = sdlButton[physical] else { continue }
+            result[index] = sdl
+        }
+        return result
     }
 
     /// Opciones de OmniStation para la partida de ARMSX2 (no van al INI).
@@ -300,6 +383,7 @@ enum EmulatorConfig {
         return [
             "hudSystem": values["hudSystem"] ?? "false",
             "hudBattery": values["hudBattery"] ?? "false",
+            "aspectRatio": values["AspectRatio"] ?? "Auto 4:3/3:2",
             "touchHaptics": touchHaptics ? "true" : "false"
         ]
     }

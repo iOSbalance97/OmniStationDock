@@ -25,7 +25,7 @@ enum L10n {
         "Favoritos": "Favorites",
         "Búsqueda": "Search",
         "Ajustes": "Settings",
-        "TU UNIVERSO DE JUEGOS,\nEN UN SOLO LUGAR.": "YOUR GAMING UNIVERSE,\nIN ONE PLACE.",
+        "TU MUNDO, TUS REGLAS.": "YOUR WORLD, YOUR RULES.",
         "OmniStation Dock": "OmniStation Dock",
         "Todos": "All",
         "DESTACADO": "FEATURED",

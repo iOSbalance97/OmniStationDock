@@ -320,6 +320,11 @@ final class BackdropStore {
     static let shared = BackdropStore()
 
     private let cache = NSCache<NSString, UIImage>()
+
+    /// Suelta las imágenes en memoria (se vuelven a leer del disco): antes de una partida.
+    func purgeMemory() {
+        cache.removeAllObjects()
+    }
     private var tried = Set<String>()
     /// De dónde salió cada fondo guardado («hd»: SteamGridDB o banner de la eShop; «snap»: captura).
     private static let qualityKey = "backdropQuality"
