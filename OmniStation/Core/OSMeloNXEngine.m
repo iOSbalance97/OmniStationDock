@@ -13,6 +13,7 @@
 #import "OSMeloNXOptions.h"
 #import "OSExternalDisplay.h"
 #import "OSPerfHUD.h"
+#import "RamDonor/MLXRamDonor.h"
 
 #import <AVFoundation/AVFoundation.h>
 
@@ -30,6 +31,9 @@
 #import <sys/sysctl.h>
 #import <sys/mman.h>
 #import <sys/utsname.h>
+#import <ifaddrs.h>
+#import <netdb.h>
+#import <net/if.h>
 #import <os/proc.h>
 #import <fcntl.h>
 #import <unistd.h>
@@ -480,6 +484,12 @@ typedef struct {
     void (*reportMemoryPressure)(uint8_t critical);
     void (*registerCallback)(const char *name, void (*callback)(void *data, void *userData), void *userData);
     void (*unregisterCallback)(const char *name);
+    uint8_t (*invokeCallback)(const char *name, const void *data, int32_t length);
+    // Donación de RAM de MeloNX 2.7 (opcionales).
+    void (*offerDonatedMemory)(void *base, uint64_t size);
+    void (*withdrawDonatedMemory)(void);
+    uint8_t (*offerDonatedGpuMemory)(void *base, uint64_t size);
+    uint8_t (*withdrawDonatedGpuMemory)(void);
 } OSNXCoreAPI;
 
 // Estadísticas que manda el núcleo («push_statistics»: FPS, ms por fotograma y FIFO).
@@ -502,6 +512,32 @@ static void OSNXStatisticsCallback(void *raw, void *userData) {
     gOSNXFps = fps;
     gOSNXFrameTime = frameTime;
     gOSNXFifo = fifo;
+}
+
+/// Red para el modo LAN, como MeloNX 2.7 (resolveMultiplayerLanInterface): la pedida o, si no
+/// está, la primera con IPv4. Devuelve nombre, dirección y máscara (o nil sin red).
+static NSArray<NSString *> *OSNXLanInterface(NSString *preferred) {
+    struct ifaddrs *list = NULL;
+    if (getifaddrs(&list) != 0 || list == NULL) return nil;
+    NSArray<NSString *> *first = nil;
+    NSArray<NSString *> *chosen = nil;
+    for (struct ifaddrs *item = list; item != NULL; item = item->ifa_next) {
+        if (item->ifa_addr == NULL || item->ifa_netmask == NULL || item->ifa_addr->sa_family != AF_INET) continue;
+        if ((item->ifa_flags & IFF_LOOPBACK) != 0) continue;
+        char address[NI_MAXHOST];
+        char mask[NI_MAXHOST];
+        if (getnameinfo(item->ifa_addr, item->ifa_addr->sa_len, address, sizeof(address), NULL, 0, NI_NUMERICHOST) != 0) continue;
+        if (getnameinfo(item->ifa_netmask, item->ifa_netmask->sa_len, mask, sizeof(mask), NULL, 0, NI_NUMERICHOST) != 0) continue;
+        NSString *name = [NSString stringWithUTF8String:item->ifa_name] ?: @"";
+        NSArray<NSString *> *entry = @[name, [NSString stringWithUTF8String:address] ?: @"", [NSString stringWithUTF8String:mask] ?: @""];
+        if (first == nil) first = entry;
+        if (preferred.length > 0 && [name isEqualToString:preferred]) {
+            chosen = entry;
+            break;
+        }
+    }
+    freeifaddrs(list);
+    return chosen ?: first;
 }
 
 /// Ajuste de la partida (texto de Swift) como número o sí/no.
@@ -535,7 +571,7 @@ typedef NS_ENUM(int32_t, OSNXButton) {
 @property (nonatomic, assign) const OSNXCoreAPI *api;
 @property (nonatomic, copy) NSString *identifier;
 @property (nonatomic, assign) BOOL suspended;
-- (instancetype)initWithAPI:(const OSNXCoreAPI *)api;
+- (instancetype)initWithAPI:(const OSNXCoreAPI *)api settings:(NSDictionary<NSString *, NSString *> *)settings;
 - (void)bindController:(nullable GCController *)controller;
 - (void)send:(OSNXButton)button pressed:(BOOL)pressed;
 - (void)moveStick:(int32_t)stick x:(float)x y:(float)y;
@@ -543,18 +579,53 @@ typedef NS_ENUM(int32_t, OSNXButton) {
 - (void)detach;
 @end
 
+/// Botón de MeloNX de cada id del mapa de botones de OmniStation (Opciones → Mapear botones).
+static int32_t OSNXButtonForMapID(NSString *name) {
+    static NSDictionary<NSString *, NSNumber *> *table;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        table = @{@"a": @(OSNXButtonA), @"b": @(OSNXButtonB), @"x": @(OSNXButtonX), @"y": @(OSNXButtonY),
+                  @"l1": @(OSNXButtonLeftShoulder), @"r1": @(OSNXButtonRightShoulder),
+                  @"l2": @(OSNXButtonLeftTrigger), @"r2": @(OSNXButtonRightTrigger),
+                  @"l3": @(OSNXButtonLeftStick), @"r3": @(OSNXButtonRightStick),
+                  @"menu": @(OSNXButtonStart), @"options": @(OSNXButtonBack)};
+    });
+    NSNumber *value = table[name];
+    return value ? value.intValue : -1;
+}
+
+/// Tipo de mando del jugador 1 (Ajustes → MeloNX → Mando).
+static ControllerType OSNXControllerTypeFromSettings(NSDictionary<NSString *, NSString *> *settings) {
+    NSString *value = settings[@"controllerType"];
+    if ([value isEqualToString:@"handheld"]) return ControllerTypeHandheld;
+    if ([value isEqualToString:@"joyconPair"]) return ControllerTypeJoyconPair;
+    return ControllerTypeProController;
+}
+
 @implementation OSNXPad {
     BOOL _physical[OSNXButtonCount];
+    BOOL _sent[OSNXButtonCount];
+    int32_t _route[OSNXButtonCount];
     float _stick[4];
 }
 
-- (instancetype)initWithAPI:(const OSNXCoreAPI *)api {
+- (instancetype)initWithAPI:(const OSNXCoreAPI *)api settings:(NSDictionary<NSString *, NSString *> *)settings {
     self = [super init];
     if (self) {
         _api = api;
         _identifier = [NSString stringWithFormat:@"%llX", (unsigned long long)(uintptr_t)(__bridge void *)self];
-        // Jugador 1 (índice 0) como mando Pro (ControllerTypeProController).
-        api->attachGamepad("OmniStation Controller", (__bridge void *)self, 0, (int32_t)ControllerTypeProController);
+        // Mapa de botones del juego: «map.<físico>» = botón que manda. Sin mapa, cada uno el suyo.
+        for (int32_t button = 0; button < OSNXButtonCount; button++) _route[button] = button;
+        for (NSString *key in settings) {
+            if (![key hasPrefix:@"map."]) continue;
+            int32_t from = OSNXButtonForMapID([key substringFromIndex:4]);
+            int32_t to = OSNXButtonForMapID(settings[key]);
+            if (from >= 0 && to >= 0) _route[from] = to;
+        }
+        // Jugador 1: como MeloNX, el modo portátil va en el índice 8 y el resto en el 0.
+        ControllerType type = OSNXControllerTypeFromSettings(settings);
+        int32_t index = type == ControllerTypeHandheld ? 8 : 0;
+        api->attachGamepad("OmniStation Controller", (__bridge void *)self, index, (int32_t)type);
     }
     return self;
 }
@@ -591,12 +662,21 @@ typedef NS_ENUM(int32_t, OSNXButton) {
     states[OSNXButtonDPadRight] = pad.dpad.right.isPressed;
     states[OSNXButtonLeftTrigger] = pad.leftTrigger.isPressed;
     states[OSNXButtonRightTrigger] = pad.rightTrigger.isPressed;
+    // Mapa de botones: cada botón físico manda el que tenga asignado.
+    BOOL output[OSNXButtonCount];
+    memset(output, 0, sizeof(output));
     for (int32_t button = 0; button < OSNXButtonCount; button++) {
+        _physical[button] = states[button];
         // Home abre el menú de OmniStation: no va al juego.
+        if (button == OSNXButtonGuide || !states[button]) continue;
+        int32_t target = _route[button];
+        if (target >= 0 && target < OSNXButtonCount && target != OSNXButtonGuide) output[target] = YES;
+    }
+    for (int32_t button = 0; button < OSNXButtonCount; button++) {
         if (button == OSNXButtonGuide) continue;
-        if (states[button] != _physical[button]) {
-            _physical[button] = states[button];
-            [self send:(OSNXButton)button pressed:states[button]];
+        if (output[button] != _sent[button]) {
+            _sent[button] = output[button];
+            [self send:(OSNXButton)button pressed:output[button]];
         }
     }
     float lx = pad.leftThumbstick.xAxis.value, ly = pad.leftThumbstick.yAxis.value;
@@ -616,6 +696,7 @@ typedef NS_ENUM(int32_t, OSNXButton) {
 - (void)wire:(GCExtendedGamepad *)pad enabled:(BOOL)enabled {
     if (pad == nil) return;
     memset(_physical, 0, sizeof(_physical));
+    memset(_sent, 0, sizeof(_sent));
     memset(_stick, 0, sizeof(_stick));
     if (!enabled) {
         pad.valueChangedHandler = nil;
@@ -641,6 +722,7 @@ typedef NS_ENUM(int32_t, OSNXButton) {
 }
 
 - (void)releaseAll {
+    memset(_sent, 0, sizeof(_sent));
     for (int32_t button = 0; button < OSNXButtonCount; button++) {
         self.api->setButtonState((__bridge void *)self, button, 0);
     }
@@ -813,6 +895,12 @@ static void OSNXSetTouchVisible(UIViewController *controller, BOOL visible) {
 /// Mando táctil (si va en la app) y si se enseña siempre o solo sin mando físico.
 @property (nonatomic, strong, nullable) UIViewController *touchController;
 @property (nonatomic, assign) BOOL touchAlways;
+/// «Desactivar la pantalla táctil» de MeloNX: el juego no recibe toques (el mando táctil sigue).
+@property (nonatomic, assign) BOOL touchScreenDisabled;
+/// Esquina del indicador de rendimiento (topLeft, topCenter, topRight, bottomLeft…).
+@property (nonatomic, copy) NSString *hudPosition;
+/// Teclado del juego abierto: el mando no abre el menú de OmniStation.
+@property (nonatomic, assign) BOOL textInputOpen;
 /// HUD de rendimiento (nil si está apagado).
 @property (nonatomic, strong, nullable) OSPerfHUD *hud;
 - (void)updateTouchVisibility;
@@ -871,7 +959,7 @@ static void OSNXSetTouchVisible(UIViewController *controller, BOOL visible) {
     root.backgroundColor = UIColor.blackColor;
     self.view = root;
     self.metalView.api = self.api;
-    self.metalView.touchEnabled = YES;
+    self.metalView.touchEnabled = !self.touchScreenDisabled;
     UIViewController *touch = self.touchController;
     if (touch != nil) {
         // El contenedor del juego ya va dentro de la vista SwiftUI del mando táctil.
@@ -953,7 +1041,12 @@ static void OSNXSetTouchVisible(UIViewController *controller, BOOL visible) {
     _menuButton.frame = CGRectMake(safe.left + 10, safe.top + 8, 36, 36);
     if (self.hud) {
         CGSize hudSize = [self.hud fittingSize];
-        self.hud.frame = CGRectMake(safe.left + 54, safe.top + 8, hudSize.width, hudSize.height);
+        NSString *position = self.hudPosition ?: @"topRight";
+        CGFloat x = w - safe.right - 10 - hudSize.width;
+        if ([position hasSuffix:@"Left"]) x = safe.left + 54;
+        if ([position hasSuffix:@"Center"]) x = floor((w - hudSize.width) * 0.5);
+        CGFloat y = [position hasPrefix:@"bottom"] ? h - safe.bottom - 8 - hudSize.height : safe.top + 8;
+        self.hud.frame = CGRectMake(x, y, hudSize.width, hudSize.height);
     }
     _tvLabel.frame = CGRectMake(0, h * 0.30, w, 24);
     CGFloat labelWidth = MIN(w * 0.7, 440);
@@ -1115,6 +1208,7 @@ static void OSNXSetTouchVisible(UIViewController *controller, BOOL visible) {
 
 /// Mando: Home o SELECT+START abren el menú; dentro del menú, cruceta, ✕ y ○.
 - (void)pollController {
+    if (self.textInputOpen) return;
     GCController *controller = GCController.current ?: GCController.controllers.firstObject;
     GCExtendedGamepad *pad = controller.extendedGamepad;
     if (pad == nil) return;
@@ -1154,7 +1248,117 @@ static void OSNXSetTouchVisible(UIViewController *controller, BOOL visible) {
 @property (nonatomic, strong) NSMutableArray<OSNXPad *> *pads;
 @property (nonatomic, copy, nullable) void (^endedHandler)(void);
 @property (nonatomic, copy, nullable) NSString *helperError;
+- (void)presentTextInput:(NSDictionary *)request;
+- (void)presentAlert:(NSDictionary *)request;
+- (void)finishTextInput:(NSString *)name text:(nullable NSString *)text;
+- (void)answerTextInput:(NSString *)name text:(nullable NSString *)text;
 @end
+
+// MARK: - Teclado y avisos de los juegos («show_text_input» y «show_alert» de MeloNX 2.7)
+//
+// El applet de teclado del núcleo espera la respuesta en «show_text_input_result_<CallbackId>»:
+// si nadie la manda (o nadie escucha «show_text_input»), el juego se queda colgado.
+
+static NSDictionary *OSNXCallbackJSON(void *raw) {
+    const OSNXCallbackData *data = (const OSNXCallbackData *)raw;
+    if (data == NULL || data->ptr == NULL || data->len <= 0) return nil;
+    NSData *bytes = [NSData dataWithBytes:data->ptr length:(NSUInteger)data->len];
+    id json = [NSJSONSerialization JSONObjectWithData:bytes options:0 error:nil];
+    return [json isKindOfClass:NSDictionary.class] ? json : nil;
+}
+
+/// Texto de una clave del JSON («Title» o «title»; números como texto).
+static NSString *OSNXJSONText(NSDictionary *json, NSString *key) {
+    id value = json[key];
+    if (value == nil && key.length > 0) {
+        NSString *lower = [[key substringToIndex:1].lowercaseString stringByAppendingString:[key substringFromIndex:1]];
+        value = json[lower];
+    }
+    if (value == nil || value == NSNull.null) return @"";
+    return [value isKindOfClass:NSString.class] ? value : [value description];
+}
+
+static void OSNXTextInputCallback(void *raw, void *userData) {
+    NSDictionary *request = OSNXCallbackJSON(raw);
+    if (request == nil) return;
+    dispatch_async(dispatch_get_main_queue(), ^{
+        [[OSMeloNXEngine shared] presentTextInput:request];
+    });
+}
+
+static void OSNXAlertCallback(void *raw, void *userData) {
+    NSDictionary *request = OSNXCallbackJSON(raw);
+    if (request == nil) return;
+    dispatch_async(dispatch_get_main_queue(), ^{
+        [[OSMeloNXEngine shared] presentAlert:request];
+    });
+}
+
+/// Teclado de OmniStation para el mando (OSNXTextInputFactory, en Swift).
+static UIViewController *OSNXMakeTextInput(NSString *title, NSString *message, NSString *placeholder, BOOL english,
+                                           void (^completion)(NSString *_Nullable)) {
+    Class factory = NSClassFromString(@"OSNXTextInputFactory");
+    SEL selector = NSSelectorFromString(@"makeWithTitle:message:placeholder:english:completion:");
+    if (factory == Nil || ![factory respondsToSelector:selector]) return nil;
+    UIViewController *(*make)(id, SEL, NSString *, NSString *, NSString *, BOOL, id) =
+        (UIViewController *(*)(id, SEL, NSString *, NSString *, NSString *, BOOL, id))objc_msgSend;
+    return make(factory, selector, title, message, placeholder, english, completion);
+}
+
+// MARK: - Donación de RAM (como RamDonor.swift de MeloNX 2.7)
+
+static void *gOSNXDonorRegion = NULL;
+
+/// Pide la RAM de la consola a los procesos de ayuda (extensión OmniStationRamDonor) y se la
+/// ofrece al núcleo antes de arrancar. Si no hay ayudantes, el juego usa la memoria normal.
+static void OSNXPrepareDonor(const OSNXCoreAPI *api, NSDictionary<NSString *, NSString *> *settings) {
+    BOOL guest = OSNXFlag(settings, @"donateGuestMemory", YES);
+    BOOL gpu = OSNXFlag(settings, @"donateGpuBuffers", NO) && api->offerDonatedGpuMemory != NULL;
+    if (api->offerDonatedMemory == NULL) {
+        printf("[OmniStation] Donación de RAM: el núcleo no la tiene\n");
+        return;
+    }
+    if (!guest && !gpu) return;
+    if (!mlx_ram_donor_is_available()) {
+        printf("[OmniStation] Donación de RAM: falta la extensión de memoria\n");
+        return;
+    }
+    if (gOSNXDonorRegion != NULL) return;
+    const uint64_t mib = 1024ull * 1024ull;
+    const uint64_t guestRAM = (OSNXFlag(settings, @"expandRAM", NO) ? 6ull : 4ull) * 1024ull * mib;
+    const uint64_t requestedGuest = guest ? guestRAM : 0;
+    const uint64_t requestedGpu = gpu ? 512ull * mib : 0;
+    const uint64_t requested = requestedGuest + requestedGpu;
+    mlx_ram_donor_set_kill_after_mapping(OSNXFlag(settings, @"killDonorsAfterMapping", YES));
+    uint64_t granted = 0;
+    void *mapped = mlx_ram_donor_acquire_up_to(requested, MIN(requested, 256ull * mib), &granted);
+    if (mapped == NULL || granted == 0) {
+        const char *reason = mlx_ram_donor_last_error();
+        printf("[OmniStation] Donación de RAM: sin memoria de los ayudantes (%s)\n", reason ? reason : "?");
+        mlx_ram_donor_shutdown();
+        return;
+    }
+    const uint64_t guestBytes = MIN(granted, requestedGuest);
+    const uint64_t gpuBytes = granted - guestBytes;
+    gOSNXDonorRegion = mapped;
+    if (guestBytes > 0) api->offerDonatedMemory(mapped, guestBytes);
+    if (gpuBytes > 0) api->offerDonatedGpuMemory((uint8_t *)mapped + guestBytes, gpuBytes);
+    printf("[OmniStation] Donación de RAM: %llu MB de la consola, %llu MB para la GPU\n",
+           (unsigned long long)(guestBytes / mib), (unsigned long long)(gpuBytes / mib));
+    fflush(stdout);
+}
+
+static void OSNXTeardownDonor(const OSNXCoreAPI *api) {
+    if (gOSNXDonorRegion == NULL) return;
+    if (api->withdrawDonatedGpuMemory != NULL && api->withdrawDonatedGpuMemory() == 0) {
+        printf("[OmniStation] Donación de RAM: la GPU aún usa la memoria, se mantiene\n");
+        return;
+    }
+    if (api->withdrawDonatedMemory != NULL) api->withdrawDonatedMemory();
+    mlx_ram_donor_release(gOSNXDonorRegion);
+    mlx_ram_donor_shutdown();
+    gOSNXDonorRegion = NULL;
+}
 
 @implementation OSMeloNXEngine {
     OSNXCoreAPI _api;
@@ -1163,6 +1367,10 @@ static void OSNXSetTouchVisible(UIViewController *controller, BOOL visible) {
     dispatch_queue_t _queue;
     NSMutableArray<id> *_observers;
     BOOL _menuOpen;
+    /// Ajustes de la partida en marcha (los de Ajustes → MeloNX y los del juego).
+    NSDictionary<NSString *, NSString *> *_settings;
+    /// Teclado del juego abierto: id con el que hay que contestar al núcleo.
+    NSString *_pendingTextInput;
 }
 
 + (OSMeloNXEngine *)shared {
@@ -1347,6 +1555,11 @@ static void OSNXSetTouchVisible(UIViewController *controller, BOOL visible) {
     api.reportMemoryPressure = (void (*)(uint8_t))dlsym(core, "report_memory_pressure");
     api.registerCallback = (void (*)(const char *, void (*)(void *, void *), void *))dlsym(core, "RegisterCallback");
     api.unregisterCallback = (void (*)(const char *))dlsym(core, "UnregisterCallback");
+    api.invokeCallback = (uint8_t (*)(const char *, const void *, int32_t))dlsym(core, "InvokeCallback");
+    api.offerDonatedMemory = (void (*)(void *, uint64_t))dlsym(core, "offer_donated_memory");
+    api.withdrawDonatedMemory = (void (*)(void))dlsym(core, "withdraw_donated_memory");
+    api.offerDonatedGpuMemory = (uint8_t (*)(void *, uint64_t))dlsym(core, "offer_donated_gpu_memory");
+    api.withdrawDonatedGpuMemory = (uint8_t (*)(void))dlsym(core, "withdraw_donated_gpu_memory");
     void (*sdlSetMainReady)(void) = (void (*)(void))[self symbol:sdl name:"SDL_SetMainReady" missing:missing];
     void (*sdlSetEventPump)(bool) = (void (*)(bool))[self symbol:sdl name:"SDL_SetiOSEventPump" missing:missing];
     bool (*sdlInit)(uint32_t) = (bool (*)(uint32_t))[self symbol:sdl name:"SDL_Init" missing:missing];
@@ -1537,7 +1750,7 @@ static BOOL OSNXNeedsExtendedVirtualAddressing(void) {
     options->DeviceModel = OSNXCopy([OSMeloNXEngine machineName]);
     options->MemoryEnt = [OSMeloNXEngine hasIncreasedMemoryLimit];
     options->DisplayName = OSNXCopy(UIDevice.currentDevice.model);
-    options->ControllerType1 = ControllerTypeProController;
+    options->ControllerType1 = OSNXControllerTypeFromSettings(settings);
     options->ControllerType2 = ControllerTypeProController;
     options->ControllerType3 = ControllerTypeProController;
     options->ControllerType4 = ControllerTypeProController;
@@ -1570,7 +1783,20 @@ static BOOL OSNXNeedsExtendedVirtualAddressing(void) {
     if (memoryMode < 0 || memoryMode > 2) memoryMode = MemoryManagerMode_HostMappedUnsafe;
     options->MemoryManagerMode = (MemoryManagerMode)memoryMode;
     options->AudioVolume = (float)OSNXNumber(settings, @"audioVolume", 1.0);
-    options->MultiplayerLanInterfaceId = OSNXCopy(@"0");
+    // Red (Ajustes → MeloNX → Varios): interfaz para el modo LAN y ldn_mitm.
+    options->LdnMitm = OSNXFlag(settings, @"ldnMitm", NO);
+    NSString *wanted = settings[@"networkInterface"];
+    NSArray<NSString *> *lan = OSNXLanInterface([wanted isEqualToString:@"auto"] ? nil : wanted);
+    if (lan.count == 3) {
+        options->MultiplayerLanInterfaceId = OSNXCopy(lan[0]);
+        options->MultiplayerLanInterfaceAddress = OSNXCopy(lan[1]);
+        options->MultiplayerLanInterfaceSubnetMask = OSNXCopy(lan[2]);
+    } else {
+        options->MultiplayerLanInterfaceId = OSNXCopy(@"0");
+    }
+    // Registros (Ajustes → MeloNX → Avanzado), como los valores por defecto de MeloNX.
+    options->LoggingEnableDebug = OSNXFlag(settings, @"debugLogs", NO);
+    options->LoggingEnableTrace = OSNXFlag(settings, @"traceLogs", NO);
     options->LoggingGraphicsDebugLevel = GraphicsDebugLevel_None;
     options->ResScale = (float)OSNXNumber(settings, @"resScale", 1.0);
     if (options->ResScale <= 0) options->ResScale = 1.0f;
@@ -1618,7 +1844,7 @@ static BOOL OSNXNeedsExtendedVirtualAddressing(void) {
 
 /// Crea el jugador 1 (una vez por partida) y le engancha el mando conectado.
 - (void)preparePlayerPad {
-    if (self.pads.count == 0) [self.pads addObject:[[OSNXPad alloc] initWithAPI:&_api]];
+    if (self.pads.count == 0) [self.pads addObject:[[OSNXPad alloc] initWithAPI:&_api settings:_settings ?: @{}]];
     [self.pads.firstObject bindController:[self preferredController]];
 }
 
@@ -1691,6 +1917,100 @@ static BOOL OSNXNeedsExtendedVirtualAddressing(void) {
     return [kept componentsJoinedByString:@"\n"];
 }
 
+// MARK: Teclado del juego
+
+- (void)presentTextInput:(NSDictionary *)request {
+    NSString *callbackId = OSNXJSONText(request, @"CallbackId");
+    if (callbackId.length == 0) return;
+    NSString *name = [@"show_text_input_result_" stringByAppendingString:callbackId];
+    OSNXGameViewController *game = self.gameController;
+    if (!self.busy || game == nil || _pendingTextInput != nil) {
+        // Sin pantalla (o con otro teclado abierto): se cancela para que el juego siga.
+        [self answerTextInput:name text:nil];
+        return;
+    }
+    _pendingTextInput = name;
+    for (OSNXPad *pad in self.pads) {
+        pad.suspended = YES;
+        [pad releaseAll];
+    }
+    game.textInputOpen = YES;
+    NSString *title = OSNXJSONText(request, @"Title");
+    NSString *message = OSNXJSONText(request, @"Message");
+    NSString *placeholder = OSNXJSONText(request, @"Placeholder");
+    BOOL english = [game.language isEqualToString:@"en"];
+    __weak OSMeloNXEngine *weakSelf = self;
+    void (^finish)(NSString *_Nullable) = ^(NSString *_Nullable text) {
+        [weakSelf finishTextInput:name text:text];
+    };
+    UIViewController *top = [self topViewController];
+    // Con mando: el teclado de OmniStation (como el de Búsqueda). Sin mando: el de iOS.
+    UIViewController *keyboard = self.pads.firstObject.controller != nil
+        ? OSNXMakeTextInput(title, message, placeholder.length ? placeholder : (english ? @"Text" : @"Texto"), english, finish)
+        : nil;
+    if (keyboard != nil && top != nil) {
+        [top presentViewController:keyboard animated:YES completion:nil];
+        return;
+    }
+    UIAlertController *alert = [UIAlertController alertControllerWithTitle:title.length ? title : nil
+                                                                   message:message.length ? message : nil
+                                                            preferredStyle:UIAlertControllerStyleAlert];
+    [alert addTextFieldWithConfigurationHandler:^(UITextField *field) {
+        field.placeholder = placeholder;
+        field.autocorrectionType = UITextAutocorrectionTypeNo;
+    }];
+    __weak UIAlertController *weakAlert = alert;
+    [alert addAction:[UIAlertAction actionWithTitle:OSNXText(game.language, @"Cancelar", @"Cancel") style:UIAlertActionStyleCancel handler:^(UIAlertAction *action) {
+        finish(nil);
+    }]];
+    [alert addAction:[UIAlertAction actionWithTitle:@"OK" style:UIAlertActionStyleDefault handler:^(UIAlertAction *action) {
+        finish(weakAlert.textFields.firstObject.text ?: @"");
+    }]];
+    if (top == nil) {
+        finish(nil);
+        return;
+    }
+    [top presentViewController:alert animated:YES completion:nil];
+}
+
+- (void)finishTextInput:(NSString *)name text:(nullable NSString *)text {
+    if (![_pendingTextInput isEqualToString:name]) return;
+    _pendingTextInput = nil;
+    [self answerTextInput:name text:text];
+    for (OSNXPad *pad in self.pads) pad.suspended = _menuOpen;
+    self.gameController.textInputOpen = NO;
+}
+
+/// Contesta al núcleo: el texto en UTF-8, o nada si se canceló (como MeloNX).
+- (void)answerTextInput:(NSString *)name text:(nullable NSString *)text {
+    if (_api.invokeCallback == NULL) return;
+    NSData *bytes = [text dataUsingEncoding:NSUTF8StringEncoding];
+    if (bytes.length > 0) {
+        _api.invokeCallback(name.UTF8String, bytes.bytes, (int32_t)bytes.length);
+    } else {
+        _api.invokeCallback(name.UTF8String, NULL, 0);
+    }
+}
+
+- (void)presentAlert:(NSDictionary *)request {
+    OSNXGameViewController *game = self.gameController;
+    if (!self.busy || game == nil) return;
+    NSString *title = OSNXJSONText(request, @"Title");
+    NSString *message = OSNXJSONText(request, @"Message");
+    NSString *text = title.length && message.length ? [NSString stringWithFormat:@"%@\n%@", title, message] : (title.length ? title : message);
+    if (text.length == 0) return;
+    // Con mando no se puede pulsar «OK» en una alerta de iOS: se enseña como aviso.
+    if (self.pads.firstObject.controller != nil || _pendingTextInput != nil) {
+        [game showStatus:text sticky:NO];
+        return;
+    }
+    UIAlertController *alert = [UIAlertController alertControllerWithTitle:title.length ? title : nil
+                                                                   message:message.length ? message : nil
+                                                            preferredStyle:UIAlertControllerStyleAlert];
+    [alert addAction:[UIAlertAction actionWithTitle:@"OK" style:UIAlertActionStyleDefault handler:nil]];
+    [[self topViewController] presentViewController:alert animated:YES completion:nil];
+}
+
 /// Cierra la pantalla y deja todo listo para otra partida.
 - (void)finishSessionWithMessage:(nullable NSString *)message
                       completion:(nullable void (^)(BOOL, NSString *))completion {
@@ -1699,7 +2019,13 @@ static BOOL OSNXNeedsExtendedVirtualAddressing(void) {
         [self.pads removeAllObjects];
         [self stopWatching];
         [self closeSession];
-        if (self->_api.unregisterCallback) self->_api.unregisterCallback("push_statistics");
+        if (self->_api.unregisterCallback) {
+            self->_api.unregisterCallback("push_statistics");
+            self->_api.unregisterCallback("show_text_input");
+            self->_api.unregisterCallback("show_alert");
+        }
+        self->_pendingTextInput = nil;
+        self->_settings = nil;
         OSNXGameViewController *controller = self.gameController;
         self.gameController = nil;
         controller.closing = YES;
@@ -1763,6 +2089,8 @@ static BOOL OSNXNeedsExtendedVirtualAddressing(void) {
     self.busy = YES;
     self.endedHandler = ended;
     _menuOpen = NO;
+    _settings = [settings copy] ?: @{};
+    _pendingTextInput = nil;
     void (^report)(NSString *) = ^(NSString *message) {
         dispatch_async(dispatch_get_main_queue(), ^{ progress(message); });
     };
@@ -1805,6 +2133,13 @@ static BOOL OSNXNeedsExtendedVirtualAddressing(void) {
             controller.language = language;
             controller.title = title;
             controller.touchAlways = [NSUserDefaults.standardUserDefaults boolForKey:@"melonxCoreTouchAlways"];
+            controller.touchScreenDisabled = OSNXFlag(settings, @"disableTouch", NO);
+            controller.hudPosition = settings[@"hudPosition"] ?: @"topRight";
+            // Teclado de los juegos (nombres, búsquedas…) y sus avisos.
+            if (self->_api.registerCallback) {
+                self->_api.registerCallback("show_text_input", OSNXTextInputCallback, NULL);
+                self->_api.registerCallback("show_alert", OSNXAlertCallback, NULL);
+            }
             // HUD de rendimiento (como el «Performance Overlay» de MeloNX).
             gOSNXFps = -1;
             gOSNXFrameTime = 0;
@@ -1846,7 +2181,11 @@ static BOOL OSNXNeedsExtendedVirtualAddressing(void) {
             };
             controller.quitRequested = ^{
                 OSMeloNXEngine *strongSelf = weakSelf;
-                if (strongSelf) strongSelf->_api.stopEmulation();
+                if (!strongSelf) return;
+                // Un teclado sin contestar deja al núcleo esperando: se cancela antes de salir.
+                NSString *pending = strongSelf->_pendingTextInput;
+                if (pending) [strongSelf finishTextInput:pending text:nil];
+                strongSelf->_api.stopEmulation();
             };
             [self preparePlayerPad];
             [controller loadViewIfNeeded];
@@ -1892,9 +2231,13 @@ static BOOL OSNXNeedsExtendedVirtualAddressing(void) {
         printf("[OmniStation] Juego: %s · %dx%d · dock %d · memoria ampliada %d\n", gamePath.UTF8String,
                (int)size.width, (int)size.height, OSNXFlag(settings, @"docked", NO), [OSMeloNXEngine hasIncreasedMemoryLimit]);
         const OSNXCoreAPI *api = &self->_api;
+        NSDictionary<NSString *, NSString *> *gameSettings = [settings copy] ?: @{};
         NSThread *thread = [[NSThread alloc] initWithBlock:^{
+            // Como MeloNX 2.7: la RAM de la consola se pide a los ayudantes antes de arrancar.
+            OSNXPrepareDonor(api, gameSettings);
             // main_ryujinx_sdl libera las opciones (y sus textos) por su cuenta.
             int32_t result = api->mainRyujinx(options);
+            OSNXTeardownDonor(api);
             printf("[OmniStation] main_ryujinx_sdl terminó con %d\n", result);
             fflush(stdout);
             if (result != 0) {

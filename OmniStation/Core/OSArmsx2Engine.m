@@ -526,6 +526,8 @@ static NSString *OSString(const char *text, NSString *fallback) {
 @property (nonatomic, strong, nullable) OSPerfHUD *hud;
 /// Vibración al tocar los botones del mando táctil.
 @property (nonatomic, assign) BOOL touchHaptics;
+/// Alto/ancho de la imagen del juego (3/4 en 4:3) para centrarla en vertical.
+@property (nonatomic, assign) CGFloat imageRatio;
 - (void)updateExternalDisplay;
 - (void)releaseExternalDisplay;
 - (void)showStatus:(NSString *)message;
@@ -805,6 +807,7 @@ static NSString *OSString(const char *text, NSString *fallback) {
     coreView.frame = self.view.bounds;
     coreView.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
     [self.view insertSubview:coreView atIndex:0];
+    [self.view setNeedsLayout];
 }
 
 - (void)releaseExternalDisplay {
@@ -818,12 +821,27 @@ static NSString *OSString(const char *text, NSString *fallback) {
 - (void)viewDidLayoutSubviews {
     [super viewDidLayoutSubviews];
     UIView *root = self.view;
-    if (!_onTV) self.coreView.frame = root.bounds;
     _controlsView.frame = root.bounds;
     UIEdgeInsets safe = root.safeAreaInsets;
     CGFloat w = root.bounds.size.width;
     CGFloat h = root.bounds.size.height;
     BOOL portrait = h > w;
+    CGFloat bottomInset = safe.bottom + 14;
+    if (!_onTV) {
+        if (portrait) {
+            // En vertical el núcleo pinta la imagen arriba del todo: la vista se ajusta a la imagen
+            // y se coloca hacia el centro de la pantalla, sin pisar los controles táctiles.
+            CGFloat ratio = self.imageRatio > 0 ? self.imageRatio : 0.75;
+            CGFloat imageHeight = floor(w * ratio);
+            CGFloat controlsTop = h - bottomInset - 276;
+            CGFloat top = floor(h * 0.42 - imageHeight * 0.5);
+            top = MIN(top, controlsTop - imageHeight - 8);
+            top = MAX(top, safe.top);
+            self.coreView.frame = CGRectMake(0, top, w, imageHeight);
+        } else {
+            self.coreView.frame = root.bounds;
+        }
+    }
     UIView *dpad = [_controlsView viewWithTag:1001];
     UIView *face = [_controlsView viewWithTag:1002];
     UIView *leftStick = [_controlsView viewWithTag:1003];
@@ -1539,6 +1557,8 @@ static NSString *gLoadedFlavor = nil;
             controller.language = language;
             controller.touchAlways = touchControlsAlways;
             controller.touchHaptics = [hostOptions[@"touchHaptics"] boolValue];
+            NSString *aspect = hostOptions[@"aspectRatio"];
+            controller.imageRatio = [aspect isEqualToString:@"16:9"] ? 9.0 / 16.0 : ([aspect isEqualToString:@"10:7"] ? 0.7 : 0.75);
             if ([hostOptions[@"hudSystem"] boolValue]) {
                 OSPerfHUD *hud = [[OSPerfHUD alloc] initWithFrame:CGRectZero];
                 hud.showMemory = YES;
