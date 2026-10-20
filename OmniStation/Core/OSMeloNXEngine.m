@@ -1075,6 +1075,8 @@ static void OSNXSetTouchVisible(UIViewController *controller, BOOL visible) {
         _hudTimer = [NSTimer scheduledTimerWithTimeInterval:0.5 repeats:YES block:^(NSTimer *timer) {
             OSNXGameViewController *strongSelf = weakSelf;
             if (!strongSelf || !strongSelf.hud) return;
+            // RAM que guardan los procesos de ayuda (como el indicador de MeloNX 2.7).
+            strongSelf.hud.donatedBytes = MLXRamDonor.sharedIfExists ? [MLXRamDonor.sharedIfExists donatedBytes] : 0;
             [strongSelf.hud refreshWithFPS:gOSNXFps frameTime:gOSNXFrameTime fifo:gOSNXFifo];
             [strongSelf.view setNeedsLayout];
         }];

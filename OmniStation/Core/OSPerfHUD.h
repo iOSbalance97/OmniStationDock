@@ -11,6 +11,8 @@ NS_ASSUME_NONNULL_BEGIN
 @property (nonatomic, assign) BOOL showMemory;
 @property (nonatomic, assign) BOOL showThermal;
 @property (nonatomic, assign) BOOL showBattery;
+/// RAM donada a los procesos de ayuda (MeloNX). 0: no sale.
+@property (nonatomic, assign) uint64_t donatedBytes;
 
 /// Repinta el texto. `fps` < 0: el núcleo no da FPS (entonces no sale esa línea).
 - (void)refreshWithFPS:(double)fps frameTime:(double)frameTime fifo:(double)fifo;

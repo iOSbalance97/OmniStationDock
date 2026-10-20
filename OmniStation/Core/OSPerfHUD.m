@@ -70,6 +70,9 @@ static BOOL OSHUDEnglish(void) {
         uint64_t available = (uint64_t)os_proc_available_memory();
         [system addObject:[NSString stringWithFormat:english ? @"RAM %@ GB · free %@ GB" : @"RAM %@ GB · libre %@ GB",
                            OSHUDGigabytes(used), OSHUDGigabytes(available)]];
+        if (self.donatedBytes > 0) {
+            [system addObject:[NSString stringWithFormat:english ? @"Donated %@ GB" : @"Donada %@ GB", OSHUDGigabytes(self.donatedBytes)]];
+        }
     }
     if (self.showThermal) {
         [system addObject:[NSString stringWithFormat:english ? @"Temp. %@" : @"Temp. %@", [self thermalText]]];
