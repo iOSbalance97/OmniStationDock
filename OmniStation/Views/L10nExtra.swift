@@ -270,6 +270,16 @@ extension L10n {
         "Abre un juego, app o emulador, o añade un acceso a una App de LiveContainer": "Opens a game, app or emulator, or adds a shortcut to a LiveContainer app",
         "Solo con juegos de otras apps (enlaces y LiveContainer): OmniStation se cierra detrás": "Only for games in other apps (links and LiveContainer): OmniStation closes behind them",
         "Switch (60 FPS)": "Switch (60 FPS)",
-        "Se aplica al jugar este juego con MeloNX o ARMSX2 integrados (en ARMSX2, L2 y R2 no se pueden mover). En los emuladores aparte, iOS no deja cambiar sus botones: configúralo igual en el emulador.": "Applied when this game runs on built-in MeloNX or ARMSX2 (in ARMSX2, L2 and R2 can't be moved). For separate emulator apps iOS can't change their buttons: set it up the same way in the emulator."
+        "Se aplica al jugar este juego con MeloNX o ARMSX2 integrados (en ARMSX2, L2 y R2 no se pueden mover). En los emuladores aparte, iOS no deja cambiar sus botones: configúralo igual en el emulador.": "Applied when this game runs on built-in MeloNX or ARMSX2 (in ARMSX2, L2 and R2 can't be moved). For separate emulator apps iOS can't change their buttons: set it up the same way in the emulator.",
+        "Escanear su carpeta de LiveContainer": "Scan its LiveContainer folder",
+        "Núcleos integrados": "Built-in cores",
+        "%@ integrado: sus juegos van en Archivos → OmniStation Dock → %@ → Juegos.": "Built-in %@: its games go in Files → OmniStation Dock → %@ → Juegos.",
+        "Para usar su app aparte, cambia el modo en Ajustes → Emuladores.": "To use its separate app, change the mode in Settings → Emulators.",
+        "DENTRO": "INSIDE",
+        "FUERA": "OUTSIDE",
+        "No se encontró ningún archivo .keys entre los elegidos": "No .keys file among the chosen files",
+        "Guardado. Falta prod.keys (title.keys es opcional)": "Saved. prod.keys is still missing (title.keys is optional)",
+        "prod.keys · title.keys opcional": "prod.keys · title.keys optional",
+        "Importa prod.keys (y title.keys si un juego lo pide)": "Import prod.keys (and title.keys if a game asks for it)"
     ]
 }

@@ -10,13 +10,15 @@ enum GameDetailFocus: Int {
     case back = 3
     /// Descripción (debajo de los botones): la abre entera.
     case info = 4
+    /// Logros (arriba, junto a favorito).
+    case achievements = 5
 }
 
 /// Pantalla de presentación de cada juego, con «Jugar» y «Opciones».
 /// Horizontal: el fondo panorámico del juego a pantalla completa; abajo a la izquierda su logo,
 /// la plataforma y los botones; abajo a la derecha una tarjeta con sus datos (última partida,
 /// tiempo jugado, tamaño, emulador y ajustes). Vertical: lo mismo, apilado.
-/// Arriba: volver (también ○) y favorito. La descripción se abre tocándola.
+/// Arriba: volver (también ○), logros y favorito. La descripción se abre tocándola.
 struct GameDetailView: View {
     let game: Game
     let cover: UIImage?
@@ -43,6 +45,7 @@ struct GameDetailView: View {
     var onFavorite: () -> Void
     var onBack: () -> Void
     var onToggleDescription: () -> Void
+    var onAchievements: () -> Void = {}
 
     @State private var summary: String?
     @State private var loading = true
@@ -166,6 +169,7 @@ struct GameDetailView: View {
         return HStack(spacing: 12) {
             backButton
             Spacer()
+            circleButton("trophy.fill", color: Color.yellow, selected: focus == .achievements, label: tr("Logros"), action: onAchievements)
             circleButton(starSymbol, color: starColor, selected: focus == .favorite, label: starLabel, action: onFavorite)
         }
         .padding(.horizontal, landscape ? 28 : 18)

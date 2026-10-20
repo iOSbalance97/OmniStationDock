@@ -456,3 +456,67 @@ enum ARMSX2Library {
         return games.first { $0.fileName.caseInsensitiveCompare(fileName) == .orderedSame }
     }
 }
+
+// MARK: - Carpetas de los emuladores dentro de LiveContainer
+
+/// Con OmniStation dentro de LiveContainer, cada app tiene su carpeta de datos en
+/// LiveContainer/Data/Application/<carpeta>, todas en el mismo almacenamiento. Así los juegos de
+/// un emulador se leen directamente por su ruta: sin el selector de carpetas (que en LiveContainer
+/// copia lo elegido a la carpeta Inbox de OmniStation) y sin archivos de relleno.
+enum LiveContainerStorage {
+    /// Carpeta Documents de LiveContainer (la que tiene Applications y Data).
+    static var root: URL? {
+        guard DebugSupport.isInsideLiveContainer else { return nil }
+        var candidates: [URL] = []
+        // Nuestra casa es LiveContainer/Documents/Data/Application/<carpeta de OmniStation>.
+        let home = URL(fileURLWithPath: NSHomeDirectory(), isDirectory: true).standardizedFileURL
+        candidates.append(home.deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent())
+        if let raw = getenv("LC_HOME_PATH") {
+            let lcHome = URL(fileURLWithPath: String(cString: raw), isDirectory: true)
+            candidates.append(lcHome.appendingPathComponent("Documents", isDirectory: true))
+            candidates.append(lcHome)
+        }
+        let manager = FileManager.default
+        return candidates.first { url in
+            manager.fileExists(atPath: url.appendingPathComponent("Data/Application", isDirectory: true).path)
+        }
+    }
+
+    /// Carpeta de datos de la app de LiveContainer `appFolder` («<Bundle ID>.app»).
+    static func dataContainer(appFolder: String, bundleID: String) -> URL? {
+        guard let root else { return nil }
+        let manager = FileManager.default
+        let data: URL = root.appendingPathComponent("Data/Application", isDirectory: true)
+        // 1) LCAppInfo.plist de la app dice cuál es su carpeta de datos.
+        for apps in ["Applications", "Data/Applications"] {
+            let info: URL = root.appendingPathComponent(apps, isDirectory: true)
+                .appendingPathComponent(appFolder, isDirectory: true)
+                .appendingPathComponent("LCAppInfo.plist")
+            guard let plist = NSDictionary(contentsOf: info) as? [String: Any] else { continue }
+            var names: [String] = []
+            if let uuid = plist["LCDataUUID"] as? String { names.append(uuid) }
+            if let containers = plist["LCContainers"] as? [[String: Any]] {
+                names += containers.compactMap { $0["folderName"] as? String }
+            }
+            for name in names {
+                let folder: URL = data.appendingPathComponent(name, isDirectory: true)
+                if manager.fileExists(atPath: folder.path) { return folder }
+            }
+        }
+        // 2) Si no, la carpeta que se llame como la app o su Bundle ID.
+        let wanted: Set<String> = [appFolder.lowercased(), bundleID.lowercased(),
+                                   (appFolder as NSString).deletingPathExtension.lowercased()]
+        let names: [String] = (try? manager.contentsOfDirectory(atPath: data.path)) ?? []
+        if let name = names.first(where: { wanted.contains($0.lowercased()) }) {
+            return data.appendingPathComponent(name, isDirectory: true)
+        }
+        return nil
+    }
+
+    /// Carpeta donde buscar los juegos del emulador: su Documents.
+    static func gamesFolder(_ emulator: Emulator) -> URL? {
+        guard let container = dataContainer(appFolder: EmulatorStore.lcFolder(emulator), bundleID: EmulatorStore.bundleID(emulator)) else { return nil }
+        let documents: URL = container.appendingPathComponent("Documents", isDirectory: true)
+        return FileManager.default.fileExists(atPath: documents.path) ? documents : nil
+    }
+}

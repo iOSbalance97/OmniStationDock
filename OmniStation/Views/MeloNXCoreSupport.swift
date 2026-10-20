@@ -96,11 +96,17 @@ enum MeloNXCoreFolders {
         return copied
     }
 
-    /// Copia las claves (.keys) a Documentos/system. Devuelve si ya hay prod.keys.
-    static func importKeys(_ urls: [URL]) -> Bool {
+    /// Copia las claves (.keys: prod.keys obligatorio, title.keys opcional) a Documentos/system.
+    /// Devuelve cuántas claves se copiaron.
+    @discardableResult
+    static func importKeys(_ urls: [URL]) -> Int {
         let keyFiles: [URL] = urls.filter { $0.pathExtension.lowercased() == "keys" }
-        _ = copy(keyFiles, into: keys)
-        return OSMeloNXEngine.keysInstalled
+        return copy(keyFiles, into: keys)
+    }
+
+    /// ¿Está title.keys? (solo lo piden algunos juegos).
+    static var titleKeysInstalled: Bool {
+        FileManager.default.fileExists(atPath: keys.appendingPathComponent("title.keys").path)
     }
 
     /// Copia el firmware elegido a un sitio temporal propio (el núcleo lo lee desde ahí).

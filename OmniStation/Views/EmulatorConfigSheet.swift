@@ -5,7 +5,8 @@ import SwiftUI
 /// Ajustes de emulación de ARMSX2 o MeloNX. Sin `gameID` son los generales (Ajustes); con él,
 /// los de ese juego: cada uno puede usar el general o tener su propio valor.
 /// Con el mando: L1/R1 cambian de pestaña, ↑↓ elige, ←→ o ✕ cambian el valor, △ restablece
-/// («Por defecto», arriba a la izquierda) y □ u ○ cierran («Listo», arriba a la derecha).
+/// («Por defecto», arriba a la izquierda), □ guarda y cierra («Listo», arriba a la derecha) y
+/// ○ sale sin guardar (deja los ajustes como estaban al abrir).
 struct EmulatorConfigSheet: View {
     let lang: String
     let emulator: Emulator
@@ -17,6 +18,8 @@ struct EmulatorConfigSheet: View {
     @State private var revision: Int = 0
     /// 0: pestañas; 1…n: ajustes.
     @State private var selected: Int = 1
+    /// Ajustes al abrir la ventana (○ los deja así).
+    @State private var snapshot: [String: String]? = nil
 
     private func tr(_ key: String, _ args: CVarArg...) -> String {
         let base = L10n.tr(key, lang)
@@ -89,6 +92,9 @@ struct EmulatorConfigSheet: View {
         .preferredColorScheme(.dark)
         .onAppear {
             if !tabs.contains(tab), let first = tabs.first { tab = first }
+            if snapshot == nil {
+                snapshot = gameID.map { EmulatorConfig.game(emulator, $0) } ?? EmulatorConfig.global(emulator)
+            }
             pad.handler = { action in
                 handle(action)
                 return true
@@ -310,6 +316,8 @@ struct EmulatorConfigSheet: View {
                 cycle(list[selected - 1], step: 1)
             }
         case .cancel:
+            // ○: salir sin guardar.
+            if let snapshot { EmulatorConfig.restore(emulator, gameID: gameID, values: snapshot) }
             dismiss()
         }
     }

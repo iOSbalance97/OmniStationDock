@@ -3,27 +3,35 @@ import SwiftUI
 /// Bienvenida: fondo animado (Resources/Background/WelcomeBackground.mp4), el planeta cae desde
 /// arriba y rebota dos veces, «OMNISTATION» aparece de izquierda a derecha como grabado con un
 /// láser y «DOCK» sale de un destello. Después, el lema y la barra de carga.
+///
+/// Toda la animación sale del tiempo transcurrido (TimelineView a la frecuencia de la pantalla):
+/// cada fotograma se calcula con curvas continuas, así no hay saltos entre fases.
 struct WelcomeView: View {
     @AppStorage("appLanguage") private var appLanguage = "system"
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var showHome = false
-
-    // Animación
-    @State private var started = false
-    /// Desplazamiento vertical del planeta en múltiplos de la altura de la pantalla (−1: fuera, arriba).
-    @State private var planetDrop: CGFloat = -1
-    @State private var planetBounce: CGFloat = 0
-    @State private var squash = false
-    @State private var laser: CGFloat = 0
-    @State private var laserVisible = false
-    @State private var dockShown = false
-    @State private var flash: Double = 0
-    @State private var sloganShown = false
-    @State private var progress: CGFloat = 0
+    @State private var start: Date?
 
     private static let welcomeVideo: URL? = BundleFiles.find(["welcomebackground"], extensions: ["mp4", "mov", "m4v"])
     private static let blue = Color(red: 0.08, green: 0.42, blue: 1)
     private static let cyan = Color(red: 0.0, green: 0.88, blue: 1)
+
+    // MARK: Guion (segundos)
+
+    private enum Script {
+        static let fallStart: Double = 0.25
+        static let fallEnd: Double = 1.0
+        static let bounce1: Double = 0.44     // duración del primer rebote
+        static let bounce2: Double = 0.26     // y del segundo
+        static var landed: Double { fallEnd + bounce1 + bounce2 }
+        static var laserStart: Double { landed + 0.2 }
+        static let laserDuration: Double = 1.0
+        static var flashStart: Double { laserStart + laserDuration + 0.1 }
+        static var sloganStart: Double { flashStart + 0.7 }
+        static var progressEnd: Double { sloganStart + 1.1 }
+        /// Al terminar todo, un segundo más antes de entrar.
+        static var finish: Double { progressEnd + 1.0 }
+    }
 
     init() {
         // Si el ajuste «Bienvenida animada» está desactivado, se entra directo a la pantalla principal.
@@ -41,68 +49,97 @@ struct WelcomeView: View {
         }
         .preferredColorScheme(.dark)
         .task {
-            guard !showHome, !started else { return }
-            started = true
-            await play()
+            guard !showHome, start == nil else { return }
+            start = Date()
+            let total: Double = reduceMotion ? 2.2 : Script.finish
+            try? await Task.sleep(nanoseconds: UInt64(total * 1_000_000_000))
             guard !Task.isCancelled else { return }
-            withAnimation(.easeInOut(duration: 0.45)) { showHome = true }
+            withAnimation(.easeInOut(duration: 0.5)) { showHome = true }
         }
     }
 
-    // MARK: Secuencia
+    // MARK: Curvas
 
-    private func wait(_ seconds: Double) async {
-        try? await Task.sleep(nanoseconds: UInt64(seconds * 1_000_000_000))
+    private static func clamp(_ value: Double) -> Double { min(1, max(0, value)) }
+
+    private static func progress(_ t: Double, from: Double, duration: Double) -> Double {
+        clamp((t - from) / duration)
     }
 
-    private func impact() async {
-        withAnimation(.easeOut(duration: 0.07)) { squash = true }
-        await wait(0.07)
-        withAnimation(.spring(response: 0.22, dampingFraction: 0.5)) { squash = false }
+    /// Suave al empezar y al acabar.
+    private static func smooth(_ x: Double) -> Double { x * x * (3 - 2 * x) }
+
+    private static func easeOutCubic(_ x: Double) -> Double { 1 - pow(1 - x, 3) }
+
+    /// Altura del planeta (en alturas de pantalla, negativa hacia arriba) como una pelota:
+    /// caída con gravedad, dos rebotes parabólicos cada vez más bajos y reposo.
+    private static func planetOffset(_ t: Double) -> Double {
+        if t < Script.fallStart { return -1.15 }
+        if t < Script.fallEnd {
+            let p: Double = (t - Script.fallStart) / (Script.fallEnd - Script.fallStart)
+            return -1.15 * (1 - p * p)
+        }
+        let b1: Double = t - Script.fallEnd
+        if b1 < Script.bounce1 {
+            let s: Double = b1 / Script.bounce1
+            return -0.07 * 4 * s * (1 - s)
+        }
+        let b2: Double = b1 - Script.bounce1
+        if b2 < Script.bounce2 {
+            let s: Double = b2 / Script.bounce2
+            return -0.022 * 4 * s * (1 - s)
+        }
+        return 0
     }
 
-    private func play() async {
+    /// Aplastamiento al tocar el suelo (se recupera con un pequeño muelle).
+    private static func squash(_ t: Double) -> Double {
+        let impacts: [(Double, Double)] = [(Script.fallEnd, 0.085),
+                                           (Script.fallEnd + Script.bounce1, 0.04),
+                                           (Script.landed, 0.016)]
+        var total: Double = 0
+        for (time, amount) in impacts where t >= time {
+            let dt: Double = t - time
+            total += amount * exp(-dt / 0.07) * cos(dt * 34)
+        }
+        return total
+    }
+
+    private struct Frame {
+        var planetY: Double
+        var squash: Double
+        var laser: Double
+        var beam: Double
+        var dock: Double
+        var flash: Double
+        var slogan: Double
+        var bar: Double
+    }
+
+    private func animationFrame(at t: Double) -> Frame {
         if reduceMotion {
-            planetDrop = 0
-            withAnimation(.easeOut(duration: 0.5)) {
-                laser = 1
-                dockShown = true
-                sloganShown = true
-            }
-            withAnimation(.easeInOut(duration: 1.2)) { progress = 1 }
-            await wait(1.6)
-            return
+            let p: Double = Self.smooth(Self.progress(t, from: 0, duration: 0.6))
+            return Frame(planetY: 0, squash: 0, laser: p, beam: 0, dock: p, flash: 0, slogan: p,
+                         bar: Self.smooth(Self.progress(t, from: 0.3, duration: 1.2)))
         }
-        await wait(0.25)
-        // 1) Cae desde arriba…
-        withAnimation(.easeIn(duration: 0.62)) { planetDrop = 0 }
-        await wait(0.62)
-        await impact()
-        // …rebota dos veces (cada vez menos) y se para.
-        withAnimation(.easeOut(duration: 0.24)) { planetBounce = -0.075 }
-        await wait(0.24)
-        withAnimation(.easeIn(duration: 0.24)) { planetBounce = 0 }
-        await wait(0.24)
-        await impact()
-        withAnimation(.easeOut(duration: 0.14)) { planetBounce = -0.025 }
-        await wait(0.14)
-        withAnimation(.easeIn(duration: 0.14)) { planetBounce = 0 }
-        await wait(0.2)
-        // 2) El nombre, de izquierda a derecha, como si lo grabase un láser.
-        laserVisible = true
-        withAnimation(.linear(duration: 0.85)) { laser = 1 }
-        await wait(0.85)
-        withAnimation(.easeOut(duration: 0.2)) { laserVisible = false }
-        // 3) «DOCK» aparece de un destello.
-        withAnimation(.easeIn(duration: 0.06)) { flash = 1 }
-        withAnimation(.spring(response: 0.32, dampingFraction: 0.62)) { dockShown = true }
-        await wait(0.08)
-        withAnimation(.easeOut(duration: 0.7)) { flash = 0 }
-        await wait(0.4)
-        // 4) Lema y barra de carga.
-        withAnimation(.easeOut(duration: 0.5)) { sloganShown = true }
-        withAnimation(.easeInOut(duration: 1.0)) { progress = 1 }
-        await wait(1.2)
+        let laser: Double = Self.smooth(Self.progress(t, from: Script.laserStart, duration: Script.laserDuration))
+        let beamIn: Double = Self.progress(t, from: Script.laserStart - 0.1, duration: 0.1)
+        let beamOut: Double = 1 - Self.progress(t, from: Script.laserStart + Script.laserDuration, duration: 0.25)
+        // Destello: sube en 0,25 s y se apaga despacio (algo más de un segundo).
+        let rise: Double = Self.smooth(Self.progress(t, from: Script.flashStart, duration: 0.25))
+        let decay: Double = t > Script.flashStart + 0.25 ? exp(-(t - Script.flashStart - 0.25) / 0.45) : 1
+        let flash: Double = t < Script.flashStart ? 0 : rise * decay
+        let dock: Double = Self.easeOutCubic(Self.progress(t, from: Script.flashStart + 0.08, duration: 0.7))
+        return Frame(
+            planetY: Self.planetOffset(t),
+            squash: Self.squash(t),
+            laser: laser,
+            beam: min(beamIn, beamOut),
+            dock: dock,
+            flash: flash,
+            slogan: Self.smooth(Self.progress(t, from: Script.sloganStart, duration: 0.6)),
+            bar: Self.smooth(Self.progress(t, from: Script.sloganStart, duration: Script.progressEnd - Script.sloganStart))
+        )
     }
 
     // MARK: Pantalla
@@ -113,56 +150,70 @@ struct WelcomeView: View {
             let height: CGFloat = geometry.size.height
             ZStack {
                 welcomeBackground(geometry.size)
-
-                VStack(spacing: 0) {
-                    Spacer(minLength: 24)
-
-                    // Un poco más grande que el de antes (0,80 del ancho y 380 como mucho).
-                    let planetSize: CGFloat = min(min(width * 0.92, height * 0.46), 440)
-                    Image("WelcomePlanet")
-                        .resizable()
-                        .interpolation(.high)
-                        .scaledToFit()
-                        .frame(width: planetSize, height: planetSize)
-                        .scaleEffect(x: squash ? 1.07 : 1, y: squash ? 0.9 : 1, anchor: .bottom)
-                        .shadow(color: Color.cyan.opacity(0.34), radius: 22)
-                        .shadow(color: Color.blue.opacity(0.26), radius: 38)
-                        .offset(y: (planetDrop + planetBounce) * height)
-                        .accessibilityLabel("Planeta de OmniStation Dock")
-
-                    title(width: width)
-                        .padding(.top, 18)
-
-                    Spacer()
-
-                    Text(L10n.tr("TU MUNDO, TUS REGLAS.", appLanguage))
-                        .font(AppFont.text(13, .medium))
-                        .tracking(3)
-                        .multilineTextAlignment(.center)
-                        .foregroundStyle(.white.opacity(0.82))
-                        .opacity(sloganShown ? 1 : 0)
-                        .offset(y: sloganShown ? 0 : 8)
-
-                    Capsule()
-                        .fill(.white.opacity(0.15))
-                        .frame(width: min(width * 0.52, 210), height: 3)
-                        .overlay(alignment: .leading) {
-                            Capsule()
-                                .fill(LinearGradient(colors: [Self.blue, Self.cyan], startPoint: .leading, endPoint: .trailing))
-                                .frame(width: max(8, min(width * 0.52, 210) * progress), height: 3)
-                                .shadow(color: .cyan, radius: 8)
-                        }
-                        .opacity(sloganShown ? 1 : 0)
-                        .padding(.top, 26)
-
-                    Spacer(minLength: 44)
+                TimelineView(.animation) { context in
+                    let t: Double = start.map { context.date.timeIntervalSince($0) } ?? 0
+                    let f: Frame = animationFrame(at: t)
+                    welcomeContent(f, width: width, height: height)
                 }
-                .padding(.horizontal, 28)
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
             }
             .background(Color.black)
         }
         .ignoresSafeArea()
+    }
+
+    private func welcomeContent(_ f: Frame, width: CGFloat, height: CGFloat) -> some View {
+        // Un poco más grande que el de antes; el PNG va recortado al planeta y su anillo.
+        let planetWidth: CGFloat = min(width * 0.92, height * 0.62, 460)
+        return ZStack {
+            // Planeta y nombre, juntos y centrados en la pantalla.
+            VStack(spacing: 4) {
+                Image("WelcomePlanet")
+                    .resizable()
+                    .interpolation(.high)
+                    .scaledToFit()
+                    .frame(width: planetWidth)
+                    .scaleEffect(x: 1 + f.squash, y: 1 - f.squash, anchor: .bottom)
+                    .shadow(color: Color.cyan.opacity(0.34), radius: 22)
+                    .shadow(color: Color.blue.opacity(0.26), radius: 38)
+                    .offset(y: f.planetY * height)
+                    .accessibilityLabel("Planeta de OmniStation Dock")
+                title(f, width: width)
+            }
+            .padding(.horizontal, 24)
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .offset(y: -height * 0.03)
+
+            // Destello de «DOCK»: un poco de luz en toda la pantalla.
+            Color.white
+                .opacity(0.10 * f.flash)
+                .allowsHitTesting(false)
+
+            // Lema y barra, abajo.
+            VStack(spacing: 0) {
+                Spacer()
+                Text(L10n.tr("TU MUNDO, TUS REGLAS.", appLanguage))
+                    .font(AppFont.text(13, .medium))
+                    .tracking(3)
+                    .multilineTextAlignment(.center)
+                    .foregroundStyle(.white.opacity(0.82))
+                    .opacity(f.slogan)
+                    .offset(y: (1 - f.slogan) * 8)
+                Capsule()
+                    .fill(.white.opacity(0.15))
+                    .frame(width: min(width * 0.52, 210), height: 3)
+                    .overlay(alignment: .leading) {
+                        Capsule()
+                            .fill(LinearGradient(colors: [Self.blue, Self.cyan], startPoint: .leading, endPoint: .trailing))
+                            .frame(width: max(8, min(width * 0.52, 210) * f.bar), height: 3)
+                            .shadow(color: .cyan, radius: 8)
+                    }
+                    .opacity(f.slogan)
+                    .padding(.top, 24)
+                Spacer().frame(height: max(56, height * 0.09))
+            }
+            .padding(.horizontal, 24)
+            .frame(maxWidth: .infinity)
+        }
     }
 
     @ViewBuilder
@@ -189,10 +240,12 @@ struct WelcomeView: View {
 
     // MARK: Nombre
 
-    private func title(width: CGFloat) -> some View {
-        VStack(spacing: 3) {
+    private func title(_ f: Frame, width: CGFloat) -> some View {
+        let brandSize: CGFloat = min(width * 0.075, 31)
+        let dockSize: CGFloat = min(width * 0.09, 38)
+        return VStack(spacing: 3) {
             Text("OMNISTATION")
-                .font(AppFont.brand(min(width * 0.075, 31), .semibold))
+                .font(AppFont.brand(brandSize, .semibold))
                 .tracking(width < 400 ? 3.5 : 5.5)
                 .foregroundStyle(.white)
                 .minimumScaleFactor(0.65)
@@ -201,47 +254,66 @@ struct WelcomeView: View {
                 .mask(alignment: .leading) {
                     GeometryReader { proxy in
                         Rectangle()
-                            .frame(width: proxy.size.width * laser)
+                            .frame(width: proxy.size.width * f.laser)
                     }
                 }
-                // …con el haz del láser en el borde.
+                // …con el haz del láser y su chispa en el borde.
                 .overlay(alignment: .leading) {
                     GeometryReader { proxy in
-                        Capsule()
-                            .fill(Color.white)
-                            .frame(width: 2.5, height: proxy.size.height * 1.5)
-                            .shadow(color: Self.cyan, radius: 6)
-                            .shadow(color: Self.cyan, radius: 14)
-                            .offset(x: proxy.size.width * laser - 1.25, y: -proxy.size.height * 0.25)
-                            .opacity(laserVisible ? 1 : 0)
+                        ZStack {
+                            Capsule()
+                                .fill(Color.white)
+                                .frame(width: 2.5, height: proxy.size.height * 1.6)
+                            Circle()
+                                .fill(RadialGradient(colors: [Color.white, Self.cyan.opacity(0.6), Color.clear],
+                                                     center: .center, startRadius: 0, endRadius: 14))
+                                .frame(width: 28, height: 28)
+                        }
+                        .shadow(color: Self.cyan, radius: 6)
+                        .shadow(color: Self.cyan, radius: 14)
+                        .position(x: proxy.size.width * f.laser, y: proxy.size.height * 0.5)
+                        .opacity(f.beam)
                     }
                     .allowsHitTesting(false)
                 }
 
             ZStack {
-                // Destello detrás de «DOCK».
+                // Luz del destello: halo grande, núcleo blanco y una raya horizontal como de lente.
                 Ellipse()
-                    .fill(RadialGradient(colors: [Color.white, Self.cyan.opacity(0.7), Color.clear],
-                                         center: .center, startRadius: 2, endRadius: 120))
-                    .frame(width: 240, height: 90)
-                    .scaleEffect(0.6 + flash * 0.8)
-                    .opacity(flash)
+                    .fill(RadialGradient(colors: [Self.cyan.opacity(0.55), Self.blue.opacity(0.25), Color.clear],
+                                         center: .center, startRadius: 4, endRadius: 190))
+                    .frame(width: 380, height: 170)
+                    .scaleEffect(0.7 + f.flash * 0.6)
+                    .opacity(f.flash)
+                    .blendMode(.screen)
+                Ellipse()
+                    .fill(RadialGradient(colors: [Color.white, Color.white.opacity(0.5), Color.clear],
+                                         center: .center, startRadius: 1, endRadius: 70))
+                    .frame(width: 190, height: 70)
+                    .opacity(f.flash)
+                    .blendMode(.screen)
+                Capsule()
+                    .fill(LinearGradient(colors: [Color.clear, Self.cyan.opacity(0.8), Color.white, Self.cyan.opacity(0.8), Color.clear],
+                                         startPoint: .leading, endPoint: .trailing))
+                    .frame(width: width * (0.5 + 0.5 * f.flash), height: 2.5)
+                    .blur(radius: 0.6)
+                    .opacity(f.flash)
                     .blendMode(.screen)
                 Text("DOCK")
-                    .font(AppFont.brand(min(width * 0.09, 38), .heavy))
+                    .font(AppFont.brand(dockSize, .heavy))
                     .tracking(width < 400 ? 7 : 10)
                     .foregroundStyle(LinearGradient(colors: [Self.blue, Self.cyan], startPoint: .leading, endPoint: .trailing))
                     .overlay {
-                        // Al salir, «DOCK» brilla en blanco y se apaga hasta su color.
+                        // Sale blanco por la luz y se templa hasta su color.
                         Text("DOCK")
-                            .font(AppFont.brand(min(width * 0.09, 38), .heavy))
+                            .font(AppFont.brand(dockSize, .heavy))
                             .tracking(width < 400 ? 7 : 10)
                             .foregroundStyle(Color.white)
-                            .opacity(flash)
+                            .opacity(min(1, f.flash * 1.2))
                     }
-                    .shadow(color: Self.cyan.opacity(0.6 * flash + 0.25), radius: 12)
-                    .scaleEffect(dockShown ? 1 : 1.35)
-                    .opacity(dockShown ? 1 : 0)
+                    .shadow(color: Self.cyan.opacity(0.25 + 0.7 * f.flash), radius: 6 + 14 * f.flash)
+                    .scaleEffect(1.25 - 0.25 * f.dock)
+                    .opacity(f.dock)
             }
         }
     }

@@ -551,7 +551,7 @@ struct HomeView: View {
                                 pad: sheetPad)
                 .onDisappear { emulatorRevision += 1 }
         case .emulatorSetup:
-            EmulatorSetupSheet(lang: appLanguage, pad: sheetPad, installMethod: installMethodRaw, onFolder: { emulator, url in
+            EmulatorSetupSheet(lang: appLanguage, pad: sheetPad, installMethod: installMethodRaw, integrated: integratedEmulators, onFolder: { emulator, url in
                 linkEmulatorFolder(emulator, url: url)
             }, onFinish: {
                 emulatorSetupDone = true
@@ -987,7 +987,7 @@ struct HomeView: View {
             // Con el núcleo integrado, la app aparte no se toca.
             if emulator == .armsx2 && armsx2Integrated { continue }
             if emulator == .melonx && melonxIntegrated { continue }
-            if EmulatorStore.folderBookmark(emulator) != nil { scanEmulator(emulator, silent: true) }
+            if EmulatorStore.folderBookmark(emulator) != nil || directLCFolder(emulator) != nil { scanEmulator(emulator, silent: true) }
             if EmulatorStore.autoCheck(emulator) && EmulatorStore.shouldCheck(emulator) {
                 checkEmulatorUpdate(emulator, manual: false)
             }
@@ -1392,6 +1392,13 @@ struct HomeView: View {
         let emulator: Emulator = activeEmulator
         let name: String = EmulatorStore.folderName(emulator)
         var items: [PadMenuItem] = []
+        if directLCFolder(emulator) != nil {
+            // Dentro de LiveContainer no hace falta elegir carpeta: se lee la del emulador.
+            items.append(PadMenuItem(title: tr("Escanear su carpeta de LiveContainer")) {
+                closePadMenu()
+                scanEmulator(emulator, silent: false)
+            })
+        }
         items.append(PadMenuItem(title: name.isEmpty ? tr("Elegir carpeta") : tr("Cambiar carpeta")) {
             closePadMenu()
             folderPickEmulator = emulator
@@ -1667,7 +1674,8 @@ struct HomeView: View {
                 onOptions: { openGameOptions(game.id) },
                 onFavorite: { toggleFavorite(game.id) },
                 onBack: { closeDetail() },
-                onToggleDescription: { toggleDetailDescription() }
+                onToggleDescription: { toggleDetailDescription() },
+                onAchievements: { openDetailAchievements(game.id) }
             )
             .transition(.opacity)
             .zIndex(5)
@@ -1704,11 +1712,14 @@ struct HomeView: View {
         case (.play, .right): next = .options
         case (.options, .left): next = .play
         case (.play, .up): next = .back
-        case (.options, .up): next = .favorite
+        case (.options, .up): next = .achievements
         case (.play, .down), (.options, .down): next = hasInfo ? .info : detailFocus
         case (.info, .up): next = .play
-        case (.back, .right): next = .favorite
-        case (.favorite, .left): next = .back
+        case (.back, .right): next = .achievements
+        case (.achievements, .left): next = .back
+        case (.achievements, .right): next = .favorite
+        case (.favorite, .left): next = .achievements
+        case (.achievements, .down): next = .options
         case (.back, .down): next = .play
         case (.favorite, .down): next = .options
         default: next = detailFocus
@@ -1726,7 +1737,15 @@ struct HomeView: View {
         case .favorite: toggleFavorite(game.id)
         case .back: closeDetail()
         case .info: toggleDetailDescription()
+        case .achievements: openDetailAchievements(game.id)
         }
+    }
+
+    /// Botón de logros de la pantalla del juego (RetroAchievements).
+    private func openDetailAchievements(_ id: String) {
+        editingGameID = id
+        feedback()
+        sheet = .achievements
     }
 
     @ViewBuilder
@@ -2606,6 +2625,14 @@ struct HomeView: View {
     // MARK: - ARMSX2 integrado (núcleo dentro de OmniStation)
 
     /// ¿Se juega a PS2 con el núcleo integrado? (Nunca dentro de LiveContainer.)
+    /// Emuladores que van con su núcleo integrado (sin app aparte).
+    private var integratedEmulators: [Emulator] {
+        var list: [Emulator] = []
+        if armsx2Integrated { list.append(.armsx2) }
+        if melonxIntegrated { list.append(.melonx) }
+        return list
+    }
+
     private var armsx2Integrated: Bool {
         ARMSX2Mode.effective(armsx2ModeRaw) == .integrated
     }
@@ -2912,7 +2939,7 @@ struct HomeView: View {
             dialog = .melonxCoreGames
         }))
         let keys: Bool = OSMeloNXEngine.keysInstalled
-        items.append(SettingItem(id: "melonxCoreKeys", title: tr("Claves"), subtitle: keys ? "prod.keys" : tr("Importa prod.keys (y title.keys)"), symbol: "key.fill", tint: SettingTint.blue, control: keys ? .badge("OK", Color.green) : .badge(tr("FALTA"), Color.orange), action: {
+        items.append(SettingItem(id: "melonxCoreKeys", title: tr("Claves"), subtitle: keys ? (MeloNXCoreFolders.titleKeysInstalled ? "prod.keys · title.keys" : tr("prod.keys · title.keys opcional")) : tr("Importa prod.keys (y title.keys si un juego lo pide)"), symbol: "key.fill", tint: SettingTint.blue, control: keys ? .badge("OK", Color.green) : .badge(tr("FALTA"), Color.orange), action: {
             openCoreImporter(.melonxKeys)
         }))
         // La versión se lee al cargar MeloNX (al importar claves, instalar firmware o jugar).
@@ -3012,13 +3039,21 @@ struct HomeView: View {
     private func importMeloNXKeys(_ result: Result<[URL], Error>) {
         guard case .success(let urls) = result, !urls.isEmpty else { return }
         Task {
-            let ok: Bool = await Task.detached(priority: .userInitiated) { () -> Bool in
+            let copied: Int = await Task.detached(priority: .userInitiated) { () -> Int in
                 MeloNXCoreFolders.importKeys(urls)
             }.value
+            let ok: Bool = OSMeloNXEngine.keysInstalled
             // Si MeloNX ya está cargado, que vuelva a leer las claves nuevas.
-            if ok { OSMeloNXEngine.shared.reloadKeys() }
+            if ok && copied > 0 { OSMeloNXEngine.shared.reloadKeys() }
             emulatorRevision += 1
-            showToast(ok ? tr("Claves importadas") : tr("No se encontró prod.keys entre los archivos elegidos"), seconds: 3.5)
+            if copied == 0 {
+                showToast(tr("No se encontró ningún archivo .keys entre los elegidos"), seconds: 3.5)
+            } else if ok {
+                showToast(tr("Claves importadas"), seconds: 3)
+            } else {
+                // Solo title.keys: se guarda, pero sigue haciendo falta prod.keys.
+                showToast(tr("Guardado. Falta prod.keys (title.keys es opcional)"), seconds: 3.5)
+            }
             if ok { refreshMeloNXFirmware() }
         }
     }
@@ -3314,14 +3349,25 @@ struct HomeView: View {
         setLibrary(libraryGames.filter { $0.source != "emu:" + emulator.rawValue })
     }
 
+    /// Dentro de LiveContainer, carpeta de datos del emulador leída por su ruta (sin copias en Inbox).
+    private func directLCFolder(_ emulator: Emulator) -> URL? {
+        guard DebugSupport.isInsideLiveContainer,
+              EmulatorStore.location(emulator, installMethod: installMethodRaw) == .liveContainer else { return nil }
+        return LiveContainerStorage.gamesFolder(emulator)
+    }
+
     private func scanEmulator(_ emulator: Emulator, silent: Bool) {
-        guard let bookmark = EmulatorStore.folderBookmark(emulator), let url = LibraryFolder.resolve(bookmark) else {
+        // Dentro de LiveContainer se lee la carpeta del emulador directamente; si no se encuentra,
+        // la carpeta vinculada (con el selector, que LiveContainer copia a Inbox).
+        let direct: URL? = directLCFolder(emulator)
+        let picked: URL? = EmulatorStore.folderBookmark(emulator).flatMap { LibraryFolder.resolve($0) }
+        guard let url = direct ?? picked else {
             if !silent { showToast(tr("Primero vincula una carpeta de juegos")) }
             return
         }
         Task {
             let found: [LibraryGame] = await Task.detached(priority: .utility) { () -> [LibraryGame] in
-                let accessing = url.startAccessingSecurityScopedResource()
+                let accessing = direct == nil && url.startAccessingSecurityScopedResource()
                 defer { if accessing { url.stopAccessingSecurityScopedResource() } }
                 return LibraryScanner.scan(folder: url, emulator: emulator)
             }.value
@@ -4448,7 +4494,9 @@ struct HomeView: View {
             sheet = .addShortcut
         }))
         let emulatorCount: Int = Emulator.allCases.filter { EmulatorStore.isEnabled($0) }.count
-        items.append(SettingItem(id: "emulators", title: tr("Emuladores"), subtitle: tr("Qué tienes instalado y sus carpetas"), symbol: "cpu.fill", tint: SettingTint.blue, control: .badge("\(emulatorCount)", Color.cyan), action: {
+        let integratedNames: [String] = integratedEmulators.map { tr("%@ integrado", $0.name) }
+        let emulatorsSubtitle: String = integratedNames.isEmpty ? tr("Qué tienes instalado y sus carpetas") : integratedNames.joined(separator: " · ")
+        items.append(SettingItem(id: "emulators", title: tr("Emuladores"), subtitle: emulatorsSubtitle, symbol: "cpu.fill", tint: SettingTint.blue, control: .badge("\(emulatorCount)", Color.cyan), action: {
             sheet = .emulatorSetup
         }))
         items.append(SettingItem(id: "achievements", title: tr("Logros"), subtitle: raSubtitle, symbol: "trophy.fill", tint: Color.yellow, control: raControl, action: {
@@ -4652,7 +4700,7 @@ struct HomeView: View {
     private var liveContainerSettings: SettingGroup {
         let inside: Bool = DebugSupport.isInsideLiveContainer
         let statusText: String = inside ? tr("Dentro de LiveContainer") : tr("Fuera de LiveContainer")
-        let statusControl: SettingControl = inside ? .badge(tr("SÍ"), Color.green) : .badge(tr("NO"), Color.gray)
+        let statusControl: SettingControl = inside ? .badge(tr("DENTRO"), Color.green) : .badge(tr("FUERA"), Color.gray)
         var items: [SettingItem] = []
         items.append(SettingItem(id: "lcStatus", title: tr("Estado"), subtitle: statusText, symbol: "shippingbox.fill", tint: SettingTint.aqua, control: statusControl, action: {
             showToast(statusText)

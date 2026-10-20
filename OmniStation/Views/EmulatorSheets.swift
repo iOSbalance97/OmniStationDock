@@ -9,6 +9,8 @@ struct EmulatorSetupSheet: View {
     let lang: String
     @ObservedObject var pad: SheetPad
     let installMethod: String
+    /// Emuladores que se usan con su núcleo integrado: no hace falta su app ni su carpeta.
+    var integrated: [Emulator] = []
     var onFolder: (Emulator, URL) -> Void
     var onFinish: () -> Void
     @Environment(\.dismiss) private var dismiss
@@ -25,13 +27,17 @@ struct EmulatorSetupSheet: View {
         return args.isEmpty ? base : String(format: base, arguments: args)
     }
 
-    private var emulators: [Emulator] { Emulator.allCases }
+    private var emulators: [Emulator] { Emulator.allCases.filter { !integrated.contains($0) } }
     private var doneIndex: Int { emulators.count * 2 }
 
     var body: some View {
         NavigationStack {
             PadScrollView(selection: selected, anchor: selected / 2) {
                 VStack(spacing: 14) {
+                    if !integrated.isEmpty {
+                        integratedNotice
+                    }
+                    if !emulators.isEmpty {
                     Text(tr("¿Qué emuladores tienes instalados?"))
                         .font(AppFont.text(16, .bold))
                         .multilineTextAlignment(.center)
@@ -42,6 +48,7 @@ struct EmulatorSetupSheet: View {
                     ForEach(emulators.indices, id: \.self) { index in
                         emulatorCard(emulators[index], index: index)
                             .padAnchor(index)
+                    }
                     }
                     SheetActionButton(title: tr("Listo"), selected: pad.gamepadConnected && selected == doneIndex) {
                         finish()
@@ -65,6 +72,27 @@ struct EmulatorSetupSheet: View {
             }
         }
         .onDisappear { pad.handler = nil }
+    }
+
+    /// Núcleos integrados en uso: van dentro de OmniStation, con sus propias carpetas.
+    private var integratedNotice: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Label(tr("Núcleos integrados"), systemImage: "cpu.fill")
+                .font(AppFont.text(15, .bold))
+                .foregroundStyle(Color.cyan)
+            ForEach(integrated, id: \.self) { emulator in
+                Text(tr("%@ integrado: sus juegos van en Archivos → OmniStation Dock → %@ → Juegos.", emulator.name, emulator.name))
+                    .font(AppFont.text(12))
+                    .foregroundStyle(.white.opacity(0.75))
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            Text(tr("Para usar su app aparte, cambia el modo en Ajustes → Emuladores."))
+                .font(AppFont.text(11))
+                .foregroundStyle(.white.opacity(0.5))
+        }
+        .padding(14)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .glassCard()
     }
 
     private func reload() {

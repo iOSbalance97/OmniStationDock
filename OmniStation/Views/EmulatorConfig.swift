@@ -292,6 +292,16 @@ enum EmulatorConfig {
         }
     }
 
+    /// Deja los ajustes generales (o los de un juego) tal como estaban (○: salir sin guardar).
+    static func restore(_ emulator: Emulator, gameID: String?, values: [String: String]) {
+        let key: String = gameID.map { gameKey(emulator, $0) } ?? globalKey(emulator)
+        if values.isEmpty {
+            UserDefaults.standard.removeObject(forKey: key)
+        } else {
+            UserDefaults.standard.set(values, forKey: key)
+        }
+    }
+
     static func resetGlobal(_ emulator: Emulator) {
         UserDefaults.standard.removeObject(forKey: globalKey(emulator))
     }
