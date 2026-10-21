@@ -14,11 +14,15 @@ import sys
 import zipfile
 
 # Fase 1: NES, SNES, Game Boy, GBA y NDS (imagen por CPU).
-# Fase 2: PS1, N64, PSP y Dreamcast (imagen por GPU con OpenGL ES; JIT si OmniStation lo tiene).
+# Fase 2: PS1, N64, PSP y Dreamcast (imagen por GPU con OpenGL ES; JIT si OmniStation lo tiene),
+# 3DS (Azahar) y GameCube/Wii (Dolphin), con Vulkan por MoltenVK.
 WANTED = [
     'nestopia', 'snes9x', 'gambatte', 'mgba', 'gpsp', 'vbam', 'melondsds', 'desmume',
     'pcsx.rearmed', 'mednafen.psx.hw', 'mupen64plus.next', 'ppsspp', 'flycast', 'flycast-jitless',
+    'azahar', 'dolphin',
 ]
+# Lo que no es un núcleo pero necesitan (MoltenVK: Vulkan sobre Metal, Apache-2.0).
+EXTRAS = ['MoltenVK.framework']
 MACHO_MAGICS = {b'\xcf\xfa\xed\xfe', b'\xca\xfe\xba\xbe', b'\xbe\xba\xfe\xca'}
 
 
@@ -146,6 +150,14 @@ def main() -> int:
                         pending += rpath_dependencies(extra)
                 else:
                     warn(f'{core} necesita {dependency} y no está en la IPA')
+        frameworks = next((name[:name.index('/Frameworks/') + len('/Frameworks/')]
+                           for name in names if name.startswith('Payload/') and '/Frameworks/' in name), None)
+        for extra in EXTRAS:
+            if frameworks and not (output / extra).exists():
+                if extract_item(archive, names, frameworks, extra, output):
+                    print(f'  + {extra}', flush=True)
+                else:
+                    warn(f'La IPA no trae {extra}')
     if not found:
         warn('No se sacó ningún núcleo de ManicEMU.')
         shutil.rmtree(output, ignore_errors=True)
