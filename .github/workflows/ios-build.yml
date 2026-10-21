@@ -12,7 +12,6 @@ jobs:
     env:
       # Versiones fijas de lo que se descarga. Al cambiarlas se invalida su caché y se vuelve a bajar.
       STIKJIT_COMMIT: 32287268fa5824f9edce4cb359f5833ce0cf7b00
-      NEOSTATION_TAG: "0.0.8"
       MANIC_TAG: v2.0.1
       XCODEGEN_VERSION: "2.42.0"
       VULKAN_HEADERS_TAG: v1.3.296
@@ -82,46 +81,8 @@ jobs:
           shasum -a 256 -c SHA256SUMS
           rm SHA256SUMS
 
-      - name: Cache ARMSX2 core (NeoStation)
-        uses: actions/cache@v4
-        with:
-          path: Vendor/ARMSX2Core.framework
-          key: neostation-armsx2core-${{ env.NEOSTATION_TAG }}-a091badf
-
-      # Núcleo de ARMSX2 integrado: ARMSX2Core.framework (ARMSX2 iOS 2.6, interfaz C v6) sacado de la
-      # IPA pública de NeoStation iOS 0.0.8. Si ya está en la caché, solo se comprueba su huella.
-      - name: Fetch ARMSX2 core (NeoStation iOS 0.0.8)
-        env:
-          NEOSTATION_IPA_URL: https://github.com/TarbleFR/neostation-ios/releases/download/0.0.8/NeoStation-0.0.8.ipa
-          NEOSTATION_IPA_SHA256: 2e9f1868e6dc98d3724740727286639909851cc9d2215380f68e7340ed39825c
-          ARMSX2CORE_BINARY_SHA256: a091badfb59302db8083bbd724a7265871b650b04b7f27f22595447aadb75819
-          ARMSX2CORE_FILES_SHA256: 4857aef56625e06600db3d48a11143eb1747122847f268cff79536168382b95d
-        run: |
-          set -euo pipefail
-          if [ ! -f Vendor/ARMSX2Core.framework/ARMSX2Core ]; then
-            IPA="$RUNNER_TEMP/NeoStation-0.0.8.ipa"
-            curl -fsSL --retry 3 -o "$IPA" "$NEOSTATION_IPA_URL"
-            echo "$NEOSTATION_IPA_SHA256  $IPA" | shasum -a 256 -c -
-            rm -rf "$RUNNER_TEMP/neostation"
-            mkdir -p "$RUNNER_TEMP/neostation"
-            unzip -q "$IPA" 'Payload/NeoStation.app/Frameworks/ARMSX2Core.framework/*' -d "$RUNNER_TEMP/neostation"
-            rm -f "$IPA"
-            rm -rf Vendor/ARMSX2Core.framework
-            mkdir -p Vendor
-            cp -R "$RUNNER_TEMP/neostation/Payload/NeoStation.app/Frameworks/ARMSX2Core.framework" Vendor/
-          fi
-          cd Vendor/ARMSX2Core.framework
-          echo "$ARMSX2CORE_BINARY_SHA256  ARMSX2Core" | shasum -a 256 -c -
-          FILES_SHA256=$(find . -type f | LC_ALL=C sort | while IFS= read -r f; do shasum -a 256 "$f"; done | shasum -a 256 | cut -d' ' -f1)
-          if [ "$FILES_SHA256" != "$ARMSX2CORE_FILES_SHA256" ]; then
-            echo "::error::Los archivos de ARMSX2Core.framework no coinciden ($FILES_SHA256)"
-            exit 1
-          fi
-          nm -gU ARMSX2Core | grep ' _NeoARMSX2_GetAPI$' >/dev/null
-          echo "ARMSX2Core.framework listo: $(find . -type f | wc -l | tr -d ' ') archivos"
-
-      # Núcleo de ARMSX2 compilado por OmniStation (workflow «Build ARMSX2 core»). Opcional: si aún
-      # no se ha publicado la release «armsx2-core», la app solo lleva el de NeoStation.
+      # Núcleo de ARMSX2 (el único): el compilado por OmniStation (workflow «Build ARMSX2 core»). Si
+      # aún no se ha publicado la release «armsx2-core», la app va sin ARMSX2 integrado.
       - name: Fetch ARMSX2 core (OmniStation build, optional)
         env:
           GH_TOKEN: ${{ github.token }}
@@ -130,7 +91,7 @@ jobs:
           rm -rf Vendor/ARMSX2CoreOmni.framework Vendor/ARMSX2CoreOmni.json "$RUNNER_TEMP/omnicore"
           mkdir -p "$RUNNER_TEMP/omnicore" Vendor
           if ! gh release download armsx2-core --repo "$GITHUB_REPOSITORY" --pattern ARMSX2Core-OmniStation.zip --pattern identity.json --dir "$RUNNER_TEMP/omnicore" 2>/dev/null; then
-            echo "::notice::Aún no hay núcleo de ARMSX2 propio (release armsx2-core). Solo va el de NeoStation."
+            echo "::warning::No hay núcleo de ARMSX2 (release armsx2-core): la app va sin ARMSX2 integrado."
             exit 0
           fi
           ditto -x -k "$RUNNER_TEMP/omnicore/ARMSX2Core-OmniStation.zip" "$RUNNER_TEMP/omnicore/x"
@@ -329,15 +290,12 @@ jobs:
           test -d "$APP_PATH"
           mkdir -p Payload
           cp -R "$APP_PATH" Payload/
-          # El núcleo va en Frameworks/ (OSArmsx2Engine lo busca ahí y lo carga con dlopen).
-          # Se copia sin enlazar: SideStore/AltStore lo firman junto con la app.
+          # Los núcleos van en Frameworks/ (OmniStation los busca ahí y los carga con dlopen).
+          # Se copian sin enlazar: SideStore/AltStore los firman junto con la app.
           mkdir -p Payload/OmniStationDock.app/Frameworks
-          cp -R Vendor/ARMSX2Core.framework Payload/OmniStationDock.app/Frameworks/
-          test -f Payload/OmniStationDock.app/Frameworks/ARMSX2Core.framework/ARMSX2Core
-          test -f Payload/OmniStationDock.app/Frameworks/ARMSX2Core.framework/Info.plist
           test -d Payload/OmniStationDock.app/PlugIns/OmniStationJITHelper.appex
           test -d Payload/OmniStationDock.app/PlugIns/OmniStationRamDonor.appex || echo "::warning::Falta la extensión de memoria (OmniStationRamDonor)."
-          # Núcleo de ARMSX2 propio (si se descargó).
+          # Núcleo de ARMSX2 (el de OmniStation, si se descargó).
           if [ -d Vendor/ARMSX2CoreOmni.framework ]; then
             cp -R Vendor/ARMSX2CoreOmni.framework Payload/OmniStationDock.app/Frameworks/ARMSX2CoreOmni.framework
             cp Vendor/ARMSX2CoreOmni.json Payload/OmniStationDock.app/ARMSX2CoreOmni.json
