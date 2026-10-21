@@ -394,6 +394,10 @@ extension L10n {
         "Escribir el nombre": "Type the name",
         "Elige la app de %@ entre las de LiveContainer.": "Choose the %@ app among LiveContainer's apps.",
         "Elige la carpeta .app de %@ en Archivos → LiveContainer → Applications, o escribe su nombre.": "Choose the %@ .app folder in Files → LiveContainer → Applications, or type its name.",
-        "JIT permanente listo": "permanent JIT ready"
+        "JIT permanente listo": "permanent JIT ready",
+        "JIT permanente: se prepara al abrir un juego de Dolphin (OmniStation) con JIT": "permanent JIT: prepared when a Dolphin (OmniStation) game is opened with JIT",
+        "JIT permanente: falta el depurador al prepararlo": "permanent JIT: no debugger when preparing it",
+        "JIT permanente: el depurador no contestó (revisa el script en StikDebug)": "permanent JIT: the debugger did not answer (check the script in StikDebug)",
+        "JIT permanente: falló (%@)": "permanent JIT: failed (%@)"
     ]
 }
