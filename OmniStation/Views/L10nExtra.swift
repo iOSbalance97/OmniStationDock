@@ -388,6 +388,11 @@ extension L10n {
         "falta la extensión de JIT": "the JIT extension is missing",
         "la VPN no responde": "the VPN is not responding",
         "falta el archivo de emparejamiento": "the pairing file is missing",
-        "Preparando el JIT con StikDebug. Si no vuelve solo, vuelve a OmniStation.": "Preparing JIT with StikDebug. If it doesn't come back on its own, return to OmniStation."
+        "Preparando el JIT con StikDebug. Si no vuelve solo, vuelve a OmniStation.": "Preparing JIT with StikDebug. If it doesn't come back on its own, return to OmniStation.",
+        "Carpeta en LiveContainer: %@": "LiveContainer folder: %@",
+        "Elegir en Archivos (LiveContainer → Applications)": "Choose in Files (LiveContainer → Applications)",
+        "Escribir el nombre": "Type the name",
+        "Elige la app de %@ entre las de LiveContainer.": "Choose the %@ app among LiveContainer's apps.",
+        "Elige la carpeta .app de %@ en Archivos → LiveContainer → Applications, o escribe su nombre.": "Choose the %@ .app folder in Files → LiveContainer → Applications, or type its name."
     ]
 }

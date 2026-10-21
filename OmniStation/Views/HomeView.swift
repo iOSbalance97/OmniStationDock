@@ -81,6 +81,8 @@ private enum ImporterPurpose: Equatable {
     case melonxKeys
     case melonxFirmware
     case melonxGames
+    /// Carpeta (.app) de un emulador dentro de LiveContainer: solo se apunta su nombre.
+    case lcAppFolder(Emulator)
 }
 
 /// Para qué se abre el selector de fotos.
@@ -98,6 +100,7 @@ private enum SettingsDialog {
     case armsx2Mode, armsx2CoreGames, armsx2CoreHelp, armsx2CoreFlavor
     case melonxMode, melonxCoreGames, melonxCoreHelp, memoryHelp
     case retroSystem
+    case lcFolderPick
 }
 
 private struct Toast: Identifiable {
@@ -137,7 +140,7 @@ struct HomeView: View {
     @AppStorage("compactGrid") private var compactGrid = false
     @AppStorage("showWelcome") private var showWelcome = true
     @AppStorage("hapticsEnabled") private var hapticsEnabled = true
-    @AppStorage("clickSound") private var clickSound = false
+    @AppStorage("clickSound") private var clickSound = true
     @AppStorage("keepLandscape") private var keepLandscape = false
     @AppStorage("hdmiAutoLandscape") private var hdmiAutoLandscape = false
     @AppStorage("appLanguage") private var appLanguage = "system"
@@ -1388,6 +1391,8 @@ struct HomeView: View {
             return emulatorUpdateMenu(cancel)
         case .emulatorFolder:
             return emulatorFolderMenu(cancel)
+        case .lcFolderPick:
+            return lcFolderPickMenu(cancel)
         case .emulatorHelp:
             return (tr("Juegos de MeloNX"), tr("OmniStation abre cada juego en MeloNX por su Title ID, y lo lee solo del archivo (el ticket de los .nsp o el [0100…] del nombre).\nSi un juego no abre: en sus Opciones (△) → «Nombre en MeloNX», escribe el título exacto que sale en MeloNX.\nLas actualizaciones y DLC no salen como juegos: están en Opciones → «Actualizaciones y DLC» de cada juego, y se activan en la app MeloNX."), [
                 PadMenuItem(title: tr("Entendido"), kind: .cancel) { closePadMenu() }
@@ -1469,6 +1474,38 @@ struct HomeView: View {
         })
         items.append(cancel)
         return (tr("Bundle ID de %@", emulator.name), EmulatorStore.bundleID(emulator), items)
+    }
+
+    /// Carpeta del emulador en LiveContainer: de la lista de apps de LiveContainer (dentro de él),
+    /// eligiéndola en Archivos (fuera) o escribiendo su nombre.
+    private func lcFolderPickMenu(_ cancel: PadMenuItem) -> PadMenuContent {
+        let emulator: Emulator = activeEmulator
+        let current: String = EmulatorStore.lcFolder(emulator)
+        var items: [PadMenuItem] = []
+        for app in LiveContainerStorage.installedApps() {
+            items.append(PadMenuItem(title: checked(app.name + " · " + app.folder, app.folder == current)) {
+                EmulatorStore.setLCFolder(app.folder, emulator)
+                emulatorRevision += 1
+                closePadMenu()
+                if directLCFolder(emulator) != nil { scanEmulator(emulator, silent: true) }
+            })
+        }
+        if !DebugSupport.isInsideLiveContainer {
+            // Fuera de LiveContainer, Archivos da la carpeta tal cual (sin copiarla).
+            items.append(PadMenuItem(title: tr("Elegir en Archivos (LiveContainer → Applications)")) {
+                closePadMenu()
+                openCoreImporter(.lcAppFolder(emulator))
+            })
+        }
+        items.append(PadMenuItem(title: tr("Escribir el nombre")) {
+            closePadMenu()
+            sheet = .textEntry(.lcFolder(emulator))
+        })
+        items.append(cancel)
+        let message: String = DebugSupport.isInsideLiveContainer
+            ? tr("Elige la app de %@ entre las de LiveContainer.", emulator.name)
+            : tr("Elige la carpeta .app de %@ en Archivos → LiveContainer → Applications, o escribe su nombre.", emulator.name)
+        return (tr("Carpeta en LiveContainer"), message, items)
     }
 
     private func emulatorFolderMenu(_ cancel: PadMenuItem) -> PadMenuContent {
@@ -2986,31 +3023,39 @@ struct HomeView: View {
         EmulationActivity.shared.begin(gameID: gameID)
         // ARMSX2 engancha y suelta su propio depurador: el de los núcleos libretro ya no vale.
         RetroJIT.fresh = false
-        showToast(tr("Activando el JIT…"), seconds: 60)
-        OSArmsx2Engine.shared.launchGame(
-            atPath: gamePath,
-            title: title,
-            dataDirectory: ARMSX2CoreFolders.data.path,
-            biosDirectory: ARMSX2CoreFolders.bios.path,
-            pairingData: pairing,
-            language: language,
-            touchControlsAlways: armsx2TouchAlways,
-            hostOptions: hostOptions,
-            progress: { message in
-                showToast(message, seconds: 60)
-            },
-            completion: { success, message in
-                if success {
-                    toast = nil
-                } else {
+        // Como con los otros núcleos: pantalla del rayo mientras se engancha el JIT, y se espera a que
+        // acabe el sonido del botón (con el depurador enganchándose, la app se para un instante y
+        // lo que estuviera sonando se oiría entrecortado).
+        SoundManager.shared.silenceForGame()
+        showJITTransition(title, detail: tr("Activando el JIT…"))
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.45) {
+            OSArmsx2Engine.shared.launchGame(
+                atPath: gamePath,
+                title: title,
+                dataDirectory: ARMSX2CoreFolders.data.path,
+                biosDirectory: ARMSX2CoreFolders.bios.path,
+                pairingData: pairing,
+                language: language,
+                touchControlsAlways: armsx2TouchAlways,
+                hostOptions: hostOptions,
+                progress: { message in
+                    jitTransitionDetail = message
+                },
+                completion: { success, message in
+                    if success {
+                        toast = nil
+                        hideJITTransition()
+                    } else {
+                        hideJITTransition(after: 0)
+                        endIntegratedSession()
+                        showToast(message.isEmpty ? tr("No se pudo arrancar el juego.") : message, seconds: 7)
+                    }
+                },
+                ended: {
                     endIntegratedSession()
-                    showToast(message.isEmpty ? tr("No se pudo arrancar el juego.") : message, seconds: 7)
                 }
-            },
-            ended: {
-                endIntegratedSession()
-            }
-        )
+            )
+        }
     }
 
     /// Al cerrar la partida, la interfaz vuelve a responder al mando.
@@ -3085,7 +3130,7 @@ struct HomeView: View {
         if wantsJIT && (!OSLibretroEngine.jitActive || staleJIT) && canAskSelfJIT, let pairing = PairingFile.data() {
             // Al engancharse el depurador la app se para un instante: la música se quita antes y se
             // espera a que acabe el sonido del botón, para que no se oiga entrecortado.
-            SoundManager.shared.updateAmbient(volume: 0)
+            SoundManager.shared.silenceForGame()
             showJITTransition(game.name, detail: tr("Activando el JIT…"))
             var wait: Double = 0.4
             if staleJIT {
@@ -3171,8 +3216,8 @@ struct HomeView: View {
         RetroFolders.ensure(system)
         RetroFolders.prepareSystemFiles(system)
         let options = RetroConfig.launchOptions(system, core: core, gameID: game.id, jit: jit)
-        // Esta partida estrena el depurador (prepara con él su memoria de JIT).
-        if jit && core.jit { RetroJIT.fresh = false }
+        // Una partida de estos núcleos no estropea el depurador: si sigue enganchado al salir
+        // (el de NDS no lo suelta), vale para la siguiente. Solo ARMSX2 y MeloNX lo dejan inservible.
         var host: [String: String] = options.host
         host["touchHaptics"] = hapticsEnabled ? "true" : "false"
         host["touchAlways"] = retroTouchAlways ? "true" : "false"
@@ -3208,6 +3253,7 @@ struct HomeView: View {
                 }
             },
             ended: {
+                RetroConfig.recordMemoryPeak(system, megabytes: OSLibretroEngine.shared.lastSessionPeakMB)
                 endIntegratedSession()
                 releaseRetroJIT()
             }
@@ -3280,8 +3326,11 @@ struct HomeView: View {
         let systems: [RetroSystem] = retroSystems
         guard !systems.isEmpty else { return nil }
         var items: [SettingItem] = []
+        // Juegos de cada carpeta contados de una vez (antes se recorría la biblioteca por sistema).
+        var counts: [String: Int] = [:]
+        for game in libraryGames { counts[game.source, default: 0] += 1 }
         for system in systems {
-            let count: Int = libraryGames.filter { $0.source == system.source }.count
+            let count: Int = counts[system.source] ?? 0
             let core: String = RetroConfig.core(for: system, gameID: nil)?.name ?? ""
             items.append(SettingItem(id: "retro." + system.rawValue, title: system.title, subtitle: tr("%@ · %@/Juegos", core, system.folderName), symbol: "gamecontroller.fill", tint: SettingTint.aqua, control: .badge("\(count)", count > 0 ? Color.green : Color.gray), action: {
                 activeRetroSystem = system
@@ -4011,6 +4060,7 @@ struct HomeView: View {
         case .cover: return [.image]
         case .coreBIOS, .coreGames, .melonxKeys, .melonxGames: return [.data]
         case .melonxFirmware: return [.zip, .data, .folder]
+        case .lcAppFolder: return [.folder]
         }
     }
 
@@ -4049,6 +4099,15 @@ struct HomeView: View {
             return
         case .melonxGames:
             importMeloNXGames(result)
+            return
+        case .lcAppFolder(let emulator):
+            // Solo hace falta el nombre de la carpeta (p. ej. «MeloNX.app»): no se copia nada.
+            if case .success(let urls) = result, let url = urls.first {
+                let name: String = url.lastPathComponent
+                EmulatorStore.setLCFolder(name, emulator)
+                emulatorRevision += 1
+                showToast(tr("Carpeta en LiveContainer: %@", name), seconds: 3)
+            }
             return
         case .folder:
             break
@@ -5052,8 +5111,9 @@ struct HomeView: View {
             dialog = .emulatorLocation
         }))
         if location == .liveContainer {
-            items.append(SettingItem(id: key + "LC", title: tr("Carpeta en LiveContainer"), subtitle: EmulatorStore.lcFolder(emulator), symbol: "folder.badge.gearshape", tint: SettingTint.blue, control: .symbol("pencil"), action: {
-                sheet = .textEntry(.lcFolder(emulator))
+            items.append(SettingItem(id: key + "LC", title: tr("Carpeta en LiveContainer"), subtitle: EmulatorStore.lcFolder(emulator), symbol: "folder.badge.gearshape", tint: SettingTint.blue, control: .symbol("chevron.right"), action: {
+                activeEmulator = emulator
+                dialog = .lcFolderPick
             }))
         } else {
             items.append(SettingItem(id: key + "Bundle", title: tr("Bundle ID"), subtitle: EmulatorStore.bundleID(emulator), symbol: "number", tint: SettingTint.blue, control: .symbol("pencil"), action: {

@@ -148,10 +148,15 @@ enum RetroSystem: String, CaseIterable, Identifiable {
         }
     }
 
-    /// Núcleos que trae esta compilación.
+    /// Núcleos que trae esta compilación (se mira una vez: los archivos de la app no cambian).
     var availableCores: [RetroCore] {
-        cores.filter { OSLibretroEngine.coreAvailable($0.framework) }
+        if let known = RetroSystem.availableCache[self] { return known }
+        let found: [RetroCore] = cores.filter { OSLibretroEngine.coreAvailable($0.framework) }
+        RetroSystem.availableCache[self] = found
+        return found
     }
+
+    private static var availableCache: [RetroSystem: [RetroCore]] = [:]
 
     var isAvailable: Bool { !availableCores.isEmpty }
 
@@ -342,7 +347,10 @@ enum RetroConfig {
     static func core(for system: RetroSystem, gameID: String?) -> RetroCore? {
         let available: [RetroCore] = system.availableCores
         guard !available.isEmpty else { return nil }
-        let chosen: String = EmulatorConfig.effective(.retro(system), gameID: gameID)["core"] ?? ""
+        // Solo la opción «core» (sin montar todas las opciones de todos los núcleos: iba lento).
+        let target: EmuConfigTarget = .retro(system)
+        let own: String? = gameID.flatMap { EmulatorConfig.game(target, $0)["core"] }
+        let chosen: String = own ?? EmulatorConfig.global(target)["core"] ?? ""
         return available.first { $0.id == chosen } ?? available[0]
     }
 
@@ -357,20 +365,36 @@ enum RetroConfig {
     /// app. Los núcleos se quedan cargados y algunos (GameCube/Wii, 3DS) no devuelven toda la
     /// memoria al salir: después de varios juegos puede no quedar bastante.
     static func memoryNeededMB(_ system: RetroSystem) -> Int {
+        let estimate: Int
         switch system {
-        case .gc, .wii: return 1600
-        case .n3ds: return 1400
-        case .psp, .dc: return 700
-        case .n64: return 500
-        case .ps1, .nds: return 400
-        default: return 200
+        case .gc, .wii: estimate = 1600
+        case .n3ds: estimate = 1400
+        case .psp, .dc: estimate = 700
+        case .n64: estimate = 500
+        case .ps1, .nds: estimate = 400
+        default: estimate = 200
+        }
+        // Con lo que gastó de verdad en este iPhone (lo más alto visto), más un margen.
+        let seen: Int = UserDefaults.standard.integer(forKey: "retroPeakMB." + system.rawValue)
+        guard seen > 0 else { return estimate }
+        return max(Int(Double(seen) * 1.15) + 150, estimate / 2)
+    }
+
+    /// Apunta cuánta memoria llegó a gastar una partida del sistema (se guarda la más alta).
+    static func recordMemoryPeak(_ system: RetroSystem, megabytes: Int) {
+        guard megabytes > 0 else { return }
+        let key: String = "retroPeakMB." + system.rawValue
+        if megabytes > UserDefaults.standard.integer(forKey: key) {
+            UserDefaults.standard.set(megabytes, forKey: key)
         }
     }
 
     /// ¿Quiere este juego usar el JIT? (Ajuste «Usar JIT»; por defecto sí.)
     static func wantsJIT(_ system: RetroSystem, gameID: String?) -> Bool {
         guard system.usesJIT else { return false }
-        return EmulatorConfig.effective(.retro(system), gameID: gameID)["jit"] != "false"
+        let target: EmuConfigTarget = .retro(system)
+        let own: String? = gameID.flatMap { EmulatorConfig.game(target, $0)["jit"] }
+        return (own ?? EmulatorConfig.global(target)["jit"]) != "false"
     }
 
     /// Opciones del núcleo («opt.<clave>» → clave) y de OmniStation para la partida.
@@ -463,9 +487,9 @@ enum RetroConfig {
 /// al salir del juego.
 enum RetroJIT {
     static var holding: Bool = false
-    /// El depurador enganchado ahora está sin estrenar: se enganchó para un núcleo libretro (o con
-    /// él se abrió la app) y ninguna partida lo ha usado aún. Los núcleos preparan su memoria de JIT
-    /// al empezar cada partida y necesitan un depurador que la atienda; si ya lo usó otra partida
-    /// (u otro emulador: ARMSX2, MeloNX), se suelta y se vuelve a enganchar antes de jugar.
+    /// El depurador enganchado ahora sirve para los núcleos libretro: se enganchó para ellos (o con
+    /// él se abrió la app). Los núcleos preparan su memoria de JIT al empezar cada partida y
+    /// necesitan un depurador que la atienda; si lo usó ARMSX2 o MeloNX (con su propio guion), se
+    /// suelta y se vuelve a enganchar antes de jugar.
     static var fresh: Bool = true
 }

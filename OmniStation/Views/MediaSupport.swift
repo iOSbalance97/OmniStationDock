@@ -304,42 +304,9 @@ final class SoundManager {
             AudioServicesPlaySystemSound(kind == .navigate ? 1105 : 1104)
             return
         }
-        // En LiveContainer el motor de efectos no llega a sonar (la música, con AVAudioPlayer, sí):
-        // ahí los efectos van con varios AVAudioPlayer ya preparados.
-        if DebugSupport.isInsideLiveContainer {
-            playWithPlayers(kind, url: url, volume: Float(volume))
-            return
-        }
         effects.play(kind, url: url, volume: Float(volume)) { [weak self] name in
             DispatchQueue.main.async { self?.unreadable[kind] = name }
         }
-    }
-
-    /// Voces de cada efecto con AVAudioPlayer (se turnan para no cortarse entre sí).
-    private var effectPlayers: [SoundKind: [AVAudioPlayer]] = [:]
-    private var effectPlayerIndex: [SoundKind: Int] = [:]
-
-    private func playWithPlayers(_ kind: SoundKind, url: URL, volume: Float) {
-        var pool: [AVAudioPlayer] = effectPlayers[kind] ?? []
-        if pool.isEmpty || pool.first?.url != url {
-            pool = (0..<3).compactMap { _ in
-                guard let player = try? AVAudioPlayer(contentsOf: url) else { return nil }
-                player.prepareToPlay()
-                return player
-            }
-            effectPlayers[kind] = pool
-        }
-        guard !pool.isEmpty else {
-            unreadable[kind] = url.lastPathComponent
-            AudioServicesPlaySystemSound(kind == .navigate ? 1105 : 1104)
-            return
-        }
-        let index: Int = (effectPlayerIndex[kind] ?? 0) % pool.count
-        effectPlayerIndex[kind] = index + 1
-        let player: AVAudioPlayer = pool[index]
-        player.volume = volume
-        player.currentTime = 0
-        player.play()
     }
 
     private let effects = SoundEffects()
@@ -356,8 +323,14 @@ final class SoundManager {
 
     private func forgetEffect(_ kind: SoundKind) {
         effectURLs[kind] = nil
-        effectPlayers[kind] = nil
         effects.invalidate(kind)
+    }
+
+    /// Antes de un juego: se para la música y el motor de los efectos, para que no queden sonando
+    /// (ni a medias) mientras el núcleo arranca su propio sonido o se engancha el depurador.
+    func silenceForGame() {
+        players[.ambient]?.stop()
+        effects.stopEngine()
     }
 
     /// Música de ambiente en bucle: con volumen 0 (o sin archivo) se para.
@@ -423,6 +396,14 @@ private final class SoundEffects {
     func invalidate(_ kind: SoundKind) {
         queue.async {
             self.drop(kind)
+        }
+    }
+
+    /// Para el motor (vuelve a arrancar solo con el siguiente efecto).
+    func stopEngine() {
+        queue.async {
+            for pool in self.voices.values { for node in pool { node.stop() } }
+            if self.engine.isRunning { self.engine.stop() }
         }
     }
 

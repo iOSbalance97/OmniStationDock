@@ -528,6 +528,26 @@ enum LiveContainerStorage {
         return nil
     }
 
+    /// Apps instaladas en LiveContainer (carpeta .app y su nombre), para elegir la de un emulador.
+    /// Solo dentro de LiveContainer (desde fuera no se puede leer su carpeta).
+    static func installedApps() -> [(folder: String, name: String)] {
+        guard let root = Self.root else { return [] }
+        let manager = FileManager.default
+        var result: [(folder: String, name: String)] = []
+        var seen: Set<String> = []
+        for apps in ["Applications", "Data/Applications"] {
+            let folder: URL = root.appendingPathComponent(apps, isDirectory: true)
+            let names: [String] = (try? manager.contentsOfDirectory(atPath: folder.path)) ?? []
+            for name in names.sorted() where name.hasSuffix(".app") && !seen.contains(name) {
+                seen.insert(name)
+                let info = NSDictionary(contentsOf: folder.appendingPathComponent(name).appendingPathComponent("Info.plist")) as? [String: Any]
+                let shown: String = (info?["CFBundleDisplayName"] as? String) ?? (info?["CFBundleName"] as? String) ?? (name as NSString).deletingPathExtension
+                result.append((folder: name, name: shown))
+            }
+        }
+        return result
+    }
+
     /// Carpeta donde buscar los juegos del emulador: su Documents.
     static func gamesFolder(_ emulator: Emulator) -> URL? {
         guard let container = dataContainer(appFolder: EmulatorStore.lcFolder(emulator), bundleID: EmulatorStore.bundleID(emulator)) else { return nil }
