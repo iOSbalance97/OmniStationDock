@@ -325,29 +325,12 @@ enum RetroConfig {
                          [("nearest", "Nítida (píxeles)"), ("linear", "Suave")], system.cores.contains(where: { $0.gpu }) ? "linear" : "nearest").grouped("Pantalla"))
         list.append(pick("aspect", .graphics, "Proporción", "",
                          [("core", "La del juego"), ("stretch", "Estirar a la pantalla")], "core").grouped("Pantalla"))
-        switch system {
-        case .gb:
-            list.append(pick("opt.gambatte_gb_colorization", .graphics, "Colores (Game Boy)", "Solo con Gambatte, en juegos de Game Boy clásica.",
-                             [("auto", "Automático"), ("GBC", "Paleta de Game Boy Color"), ("SGB", "Paleta de Super Game Boy"),
-                              ("internal", "Paleta interna"), ("disabled", "Verde original")], "auto").grouped("Pantalla"))
-        case .nds:
-            list.append(pick("touchPointer", .system, "Pantalla táctil", "Tocar la pantalla de abajo del juego hace de lápiz.",
+        if system == .nds || system == .n3ds {
+            list.append(pick("touchPointer", .input, "Pantalla táctil", "Tocar la pantalla de abajo del juego hace de lápiz.",
                              yesNo, "true").grouped("Controles"))
-        case .ps1:
-            list.append(pick("opt.beetle_psx_hw_internal_resolution", .graphics, "Resolución (Beetle PSX HW)", "Más resolución se ve mejor y gasta más.",
-                             [("1x(native)", "Original"), ("2x", "×2"), ("4x", "×4"), ("8x", "×8")], "2x").grouped("Resolución"))
-        case .n64:
-            list.append(pick("opt.mupen64plus-EnableNativeResFactor", .graphics, "Resolución", "Veces la resolución original de la N64.",
-                             [("0", "Original"), ("2", "×2"), ("3", "×3"), ("4", "×4")], "2").grouped("Resolución"))
-        case .psp:
-            list.append(pick("opt.ppsspp_internal_resolution", .graphics, "Resolución", "Más resolución se ve mejor y gasta más.",
-                             [("480x272", "Original (480×272)"), ("960x544", "×2"), ("1440x816", "×3"), ("1920x1088", "×4")], "960x544").grouped("Resolución"))
-        case .dc:
-            list.append(pick("opt.reicast_internal_resolution", .graphics, "Resolución", "Más resolución se ve mejor y gasta más.",
-                             [("640x480", "Original (640×480)"), ("1280x960", "×2"), ("1920x1440", "×3")], "1280x960").grouped("Resolución"))
-        default:
-            break
         }
+        // Las de cada núcleo (las que él declara): las importantes en su pestaña y el resto en Avanzado.
+        list += RetroCoreOptions.cachedOptions(system)
         list.append(pick("hud", .hud, "Indicador de rendimiento", "FPS, temperatura y RAM arriba a la derecha.", yesNo, "false"))
         list.append(pick("hudThermal", .hud, "Temperatura", "", yesNo, "true"))
         list.append(pick("hudMemory", .hud, "RAM usada y libre", "", yesNo, "true"))
@@ -379,6 +362,8 @@ enum RetroConfig {
     /// Opciones del núcleo («opt.<clave>» → clave) y de OmniStation para la partida.
     /// `jit`: si la partida va a tener JIT de verdad (y el juego lo quiere).
     static func launchOptions(_ system: RetroSystem, core: RetroCore, gameID: String?, jit: Bool) -> (core: [String: String], host: [String: String]) {
+        // Que estén las opciones del núcleo que va a jugar (si no, se perderían los cambios).
+        RetroCoreOptions.prepare(core)
         let wants: Bool = wantsJIT(system, gameID: gameID)
         let values: [String: String] = EmulatorConfig.effective(.retro(system), gameID: gameID)
         var coreOptions: [String: String] = [:]

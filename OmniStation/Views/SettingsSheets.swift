@@ -783,3 +783,66 @@ struct AddShortcutSheet: View {
         dismiss()
     }
 }
+
+// MARK: - Estilo de ajustes como en iOS
+
+/// Bloque como los de Ajustes de iOS: un título pequeño encima, las filas juntas en un recuadro
+/// redondeado con separadores finos, y una nota debajo si hace falta.
+struct IOSSection<Content: View>: View {
+    let header: String
+    let footer: String
+    let content: Content
+
+    init(header: String = "", footer: String = "", @ViewBuilder content: () -> Content) {
+        self.header = header
+        self.footer = footer
+        self.content = content()
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            if !header.isEmpty {
+                Text(header.uppercased())
+                    .font(.system(size: 12, weight: .regular))
+                    .foregroundStyle(.white.opacity(0.5))
+                    .padding(.horizontal, 16)
+            }
+            VStack(spacing: 0) {
+                content
+            }
+            .background(Color.white.opacity(0.075), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+            .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+            if !footer.isEmpty {
+                Text(footer)
+                    .font(.system(size: 12))
+                    .foregroundStyle(.white.opacity(0.45))
+                    .fixedSize(horizontal: false, vertical: true)
+                    .padding(.horizontal, 16)
+            }
+        }
+    }
+}
+
+/// Separador fino entre filas (empieza donde empieza el texto, como en iOS).
+struct IOSRowDivider: View {
+    var inset: CGFloat = 16
+
+    var body: some View {
+        Rectangle()
+            .fill(Color.white.opacity(0.12))
+            .frame(height: 0.5)
+            .padding(.leading, inset)
+    }
+}
+
+extension View {
+    /// Fila marcada con el mando: se ilumina el fondo de la fila (como la selección de iOS).
+    func iosRowHighlight(_ active: Bool) -> some View {
+        background(active ? Color.cyan.opacity(0.22) : Color.clear)
+            .overlay(alignment: .leading) {
+                if active {
+                    Rectangle().fill(Color.cyan).frame(width: 3)
+                }
+            }
+    }
+}

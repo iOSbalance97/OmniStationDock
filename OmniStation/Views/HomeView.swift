@@ -476,7 +476,7 @@ struct HomeView: View {
     /// Con la rueda de opciones abierta, tocar en cualquier otro sitio la cierra.
     @ViewBuilder
     private func optionsDismissLayer(_ dock: Bool) -> some View {
-        if dock && optionsExpanded {
+        if dock && optionsExpanded && padMenu == nil {
             Color.black.opacity(0.001)
                 .ignoresSafeArea()
                 .onTapGesture { collapseOptions() }
@@ -485,7 +485,8 @@ struct HomeView: View {
 
     @ViewBuilder
     private func dockBottomOverlay(_ dock: Bool) -> some View {
-        if dock && detailGame == nil {
+        // Con una ventana abierta (opciones del juego…), la barra del Dock no se pone encima.
+        if dock && detailGame == nil && padMenu == nil {
             dockBottomBar
         }
     }
@@ -791,7 +792,11 @@ struct HomeView: View {
     private func refreshJITStatus(announce: Bool) {
         jitEnabled = DebugSupport.isJITEnabled
         if announce {
-            showToast(jitEnabled ? tr("JIT activo en esta app") : tr("JIT no activo en esta app"))
+            if jitEnabled && !OSLibretroEngine.jitActive {
+                showToast(tr("Se activó el JIT, pero el depurador ya no está enganchado y en iOS 26 hace falta. Pulsa «Activar JIT» para volver a engancharlo sin reiniciar."), seconds: 6)
+            } else {
+                showToast(jitEnabled ? tr("JIT activo en esta app") : tr("JIT no activo en esta app"))
+            }
         }
     }
 
@@ -1689,6 +1694,12 @@ struct HomeView: View {
     private func openGameOptions(_ id: String) {
         editingGameID = id
         feedback()
+        // Modo Dock: la rueda de opciones se cierra para que la ventana quede encima y con el mando.
+        if optionsExpanded || controllerSelectedArea == "dockOptions" {
+            optionsExpanded = false
+            controllerSelectedArea = "games"
+        }
+        menuIndex = 0
         dialog = .gameOptions
     }
 
@@ -1804,47 +1815,51 @@ struct HomeView: View {
     private var padMenuOverlay: some View {
         if let menu = padMenu {
             ZStack {
-                Color.black.opacity(0.55)
+                Color.black.opacity(0.5)
                     .ignoresSafeArea()
                     .onTapGesture { closePadMenu() }
-                VStack(spacing: 14) {
-                    Text(menu.title)
-                        .font(AppFont.text(17, .bold))
-                        .foregroundStyle(.white)
-                        .multilineTextAlignment(.center)
-                    if let message = menu.message {
-                        Text(message)
-                            .font(AppFont.text(12))
-                            .foregroundStyle(.white.opacity(0.6))
+                // Como las hojas de opciones de iOS: título y nota arriba, las opciones juntas en un
+                // recuadro con separadores finos y «Cancelar» aparte.
+                VStack(spacing: 10) {
+                    VStack(spacing: 4) {
+                        Text(menu.title)
+                            .font(.system(size: 15, weight: .semibold))
+                            .foregroundStyle(.white.opacity(0.9))
                             .multilineTextAlignment(.center)
+                        if let message = menu.message {
+                            Text(message)
+                                .font(.system(size: 13))
+                                .foregroundStyle(.white.opacity(0.55))
+                                .multilineTextAlignment(.center)
+                                .fixedSize(horizontal: false, vertical: true)
+                        }
                     }
+                    .padding(.horizontal, 14)
+                    .padding(.top, 4)
                     padMenuList(menu.items)
                 }
-                .padding(18)
-                .frame(maxWidth: padMenuColumns > 1 ? 660 : 340)
-                .glassCard(cornerRadius: 26)
+                .padding(14)
+                .frame(maxWidth: isLandscapeNow ? 460 : 360)
+                .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 22, style: .continuous))
+                .overlay(RoundedRectangle(cornerRadius: 22, style: .continuous).strokeBorder(Color.white.opacity(0.1), lineWidth: 0.5))
                 .padding(24)
             }
             .transition(.opacity)
         }
     }
 
-    /// En horizontal, los menús con varias opciones se ven en cuadrícula (3 por fila).
-    private var padMenuColumns: Int {
-        guard isLandscapeNow, let menu = padMenu, menu.items.count > 3 else { return 1 }
-        return 3
-    }
+    /// Las opciones van siempre en lista (con el mando: ↑↓).
+    private var padMenuColumns: Int { 1 }
 
     @ViewBuilder
     private func padMenuList(_ items: [PadMenuItem]) -> some View {
-        if padMenuColumns > 1 {
-            padMenuGrid(items)
-        } else if items.count > 7 {
+        let limit: Int = isLandscapeNow ? 4 : 8
+        if items.count > limit {
             ScrollViewReader { proxy in
                 ScrollView(showsIndicators: false) {
                     padMenuButtons(items)
                 }
-                .frame(height: 360)
+                .frame(height: isLandscapeNow ? 200 : 400)
                 .onChange(of: menuIndex) { _, value in
                     withAnimation(.easeInOut(duration: 0.2)) { proxy.scrollTo(value, anchor: .center) }
                 }
@@ -1854,59 +1869,55 @@ struct HomeView: View {
         }
     }
 
-    private func padMenuGrid(_ items: [PadMenuItem]) -> some View {
-        let columns: [GridItem] = Array(repeating: GridItem(.flexible(), spacing: 10), count: 3)
-        let rows: Int = (items.count + 2) / 3
-        return ScrollViewReader { proxy in
-            ScrollView(showsIndicators: false) {
-                LazyVGrid(columns: columns, spacing: 10) {
-                    ForEach(items.indices, id: \.self) { index in
-                        padMenuButton(items[index], selected: index == menuIndex, tile: true)
-                            .id(index)
-                    }
-                }
-                .padding(2)
-            }
-            .frame(height: rows > 3 ? 236 : CGFloat(rows) * 72 + 4)
-            .onChange(of: menuIndex) { _, value in
-                withAnimation(.easeInOut(duration: 0.2)) { proxy.scrollTo(value, anchor: .center) }
+    /// Bloques seguidos: las opciones normales juntas y cada «Cancelar» en el suyo.
+    private func padMenuBlocks(_ items: [PadMenuItem]) -> [[Int]] {
+        var blocks: [[Int]] = []
+        for index in items.indices {
+            let cancel: Bool = items[index].kind == .cancel
+            if !cancel, let last = blocks.last, let first = last.first, items[first].kind != .cancel {
+                blocks[blocks.count - 1].append(index)
+            } else {
+                blocks.append([index])
             }
         }
+        return blocks
     }
 
     private func padMenuButtons(_ items: [PadMenuItem]) -> some View {
         VStack(spacing: 8) {
-            ForEach(items.indices, id: \.self) { index in
-                padMenuButton(items[index], selected: index == menuIndex)
-                    .id(index)
+            ForEach(Array(padMenuBlocks(items).enumerated()), id: \.offset) { _, block in
+                VStack(spacing: 0) {
+                    ForEach(Array(block.enumerated()), id: \.offset) { position, index in
+                        if position > 0 { IOSRowDivider(inset: 0) }
+                        padMenuButton(items[index], selected: index == menuIndex)
+                            .id(index)
+                    }
+                }
+                .background(Color.white.opacity(0.08), in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+                .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
             }
         }
     }
 
     private func padMenuButton(_ item: PadMenuItem, selected rawSelected: Bool, tile: Bool = false) -> some View {
         let selected: Bool = rawSelected && gamepadConnected
-        let color: Color = item.kind == .destructive ? Color.red : (item.kind == .cancel ? Color.white.opacity(0.8) : Color.cyan)
+        let cancel: Bool = item.kind == .cancel
+        let color: Color = item.kind == .destructive ? Color(red: 1.0, green: 0.42, blue: 0.4) : (cancel ? Color.cyan : Color.white)
         return Button {
             item.action()
         } label: {
             Text(item.title)
-                .font(AppFont.text(tile ? 13 : 15, .semibold))
+                .font(.system(size: 17, weight: cancel ? .semibold : .regular))
                 .foregroundStyle(color)
                 .multilineTextAlignment(.center)
                 .lineLimit(2)
                 .minimumScaleFactor(0.75)
-                .frame(maxWidth: .infinity, minHeight: tile ? 38 : nil)
-                .padding(.horizontal, tile ? 8 : 0)
-                .padding(.vertical, 13)
-                .contentShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
-                .liquidGlass(
-                    in: RoundedRectangle(cornerRadius: 14, style: .continuous),
-                    tint: selected ? Color.cyan : nil,
-                    interactive: true
-                )
-                .padRing(selected, cornerRadius: 14)
+                .frame(maxWidth: .infinity, minHeight: 50)
+                .padding(.horizontal, 12)
+                .contentShape(Rectangle())
+                .iosRowHighlight(selected)
         }
-        .buttonStyle(ControllerFocusableButtonStyle())
+        .buttonStyle(.plain)
     }
 
     private func routeModalDirection(_ direction: ControllerMonitor.Direction) {
@@ -2991,18 +3002,39 @@ struct HomeView: View {
         // (instalada con SideStore). En LiveContainer vale el JIT con el que se abrió OmniStation.
         let wantsJIT: Bool = chosen.jit && RetroConfig.wantsJIT(system, gameID: game.id)
         if wantsJIT && !OSLibretroEngine.jitActive && canAskSelfJIT, let pairing = PairingFile.data() {
-            // Al engancharse el depurador la app se para un instante: la música se quita antes
-            // para que no se oiga entrecortada.
+            // Al engancharse el depurador la app se para un instante: la música se quita antes y se
+            // espera a que acabe el sonido del botón, para que no se oiga entrecortado.
             SoundManager.shared.updateAmbient(volume: 0)
             showToast(tr("Activando el JIT…"), seconds: 60)
-            OSMeloNXEngine.shared.prepareSharedJIT(withPairing: pairing) { success, message in
-                if success {
-                    RetroJIT.holding = true
-                    showToast(tr("JIT activo"), seconds: 2)
-                } else {
-                    showToast(tr("Sin JIT (%@). El juego va en modo intérprete.", message), seconds: 5)
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) {
+                OSMeloNXEngine.shared.prepareSharedJIT(withPairing: pairing) { success, message in
+                    if success {
+                        RetroJIT.holding = true
+                        showToast(tr("JIT activo"), seconds: 2)
+                    } else {
+                        showToast(tr("Sin JIT (%@). El juego va en modo intérprete.", message), seconds: 5)
+                    }
+                    startRetro(game, item: item, system: system)
                 }
-                startRetro(game, item: item, system: system)
+            }
+            return
+        }
+        // LiveContainer: los núcleos sueltan el depurador al preparar su memoria de JIT, así que en
+        // cada juego hay que volver a engancharlo. StikDebug lo hace sobre la app abierta (sin
+        // reiniciarla) y se vuelve aquí; si no vuelve con JIT, el juego arranca sin él.
+        if wantsJIT && !OSLibretroEngine.jitActive && DebugSupport.isInsideLiveContainer && DebugSupport.isJITEnabled,
+           let url = DebugSupport.enableJITURL {
+            SoundManager.shared.updateAmbient(volume: 0)
+            showToast(tr("Reactivando el JIT con StikDebug… Vuelve aquí cuando termine."), seconds: 8)
+            UIApplication.shared.open(url) { opened in
+                guard opened else {
+                    showToast(tr("No se pudo abrir StikDebug: el juego va sin JIT."), seconds: 4)
+                    startRetro(game, item: item, system: system)
+                    return
+                }
+                waitForSelfJIT(deadline: Date().addingTimeInterval(90), activeSince: nil) {
+                    startRetro(game, item: item, system: system)
+                }
             }
             return
         }
@@ -3077,6 +3109,25 @@ struct HomeView: View {
             showToast(tr("MeloNX: importa tus claves (prod.keys) para que OmniStation reconozca y abra sus juegos solo."), seconds: 7, actionTitle: tr("Importar"), action: {
                 openCoreImporter(.melonxKeys)
             })
+        }
+    }
+
+    /// Espera a volver de StikDebug con el JIT activo (como mucho unos segundos después de volver).
+    private func waitForSelfJIT(deadline: Date, activeSince: Date?, then: @escaping () -> Void) {
+        let active: Bool = UIApplication.shared.applicationState == .active
+        if active && OSLibretroEngine.jitActive {
+            showToast(tr("JIT activo"), seconds: 2)
+            then()
+            return
+        }
+        let since: Date? = active ? (activeSince ?? Date()) : nil
+        if Date() > deadline || (since.map { Date().timeIntervalSince($0) > 4 } ?? false) {
+            showToast(tr("No llegó el JIT: el juego va en modo intérprete."), seconds: 4)
+            then()
+            return
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) {
+            waitForSelfJIT(deadline: deadline, activeSince: since, then: then)
         }
     }
 
@@ -4933,7 +4984,10 @@ struct HomeView: View {
 
     private var debugSettings: SettingGroup {
         let method: InstallMethod? = InstallMethod(rawValue: installMethodRaw)
-        let jitControl: SettingControl = jitEnabled ? .badge("ON", Color.green) : .badge("OFF", Color.gray)
+        // En iOS 26 el JIT solo vale mientras el depurador sigue enganchado: el estado dice la verdad.
+        let jitUsable: Bool = jitEnabled && OSLibretroEngine.jitActive
+        let jitControl: SettingControl = jitUsable ? .badge("ON", Color.green) : (jitEnabled ? .badge(tr("SUELTO"), Color.orange) : .badge("OFF", Color.gray))
+        let jitSubtitle: String = jitUsable ? tr("Activo en esta app") : (jitEnabled ? tr("Se activó, pero el depurador ya no está enganchado") : tr("No activo en esta app"))
         let stikFailure: String = tr("No se pudo abrir StikDebug. ¿Está instalado?")
         var items: [SettingItem] = []
         items.append(SettingItem(id: "installMethod", title: tr("Método de instalación"), subtitle: installMethodTitle(method), symbol: method?.symbol ?? "questionmark.app.fill", tint: SettingTint.violet, control: .symbol("chevron.right"), action: {
@@ -4948,10 +5002,10 @@ struct HomeView: View {
         }
         // El JIT de la propia OmniStation solo hace falta con StikDebug; el integrado da JIT a los juegos.
         if !usesBuiltInJIT {
-            items.append(SettingItem(id: "jitStatus", title: tr("Estado JIT"), subtitle: jitEnabled ? tr("Activo en esta app") : tr("No activo en esta app"), symbol: "cpu", tint: SettingTint.violet, control: jitControl, action: {
+            items.append(SettingItem(id: "jitStatus", title: tr("Estado JIT"), subtitle: jitSubtitle, symbol: "cpu", tint: SettingTint.violet, control: jitControl, action: {
                 refreshJITStatus(announce: true)
             }))
-            items.append(SettingItem(id: "enableJIT", title: tr("Activar JIT"), subtitle: tr("Con StikDebug, en esta app"), symbol: "bolt.fill", tint: SettingTint.violet, control: .symbol("arrow.up.forward"), action: {
+            items.append(SettingItem(id: "enableJIT", title: tr("Activar JIT"), subtitle: tr("Con StikDebug, sin reiniciar la app"), symbol: "bolt.fill", tint: SettingTint.violet, control: .symbol("arrow.up.forward"), action: {
                 openExternal(DebugSupport.enableJITURL, failure: stikFailure)
             }))
         }

@@ -1,3 +1,4 @@
+import MachO
 import SwiftUI
 import UIKit
 import GameController
@@ -973,14 +974,22 @@ enum DebugSupport {
         Bundle.main.bundleIdentifier ?? "com.omnistation.dock"
     }
 
-    /// Pide a StikDebug que active JIT en esta app ya abierta (por su número de proceso).
-    /// StikDebug: JIT para esta app (su guía pide siempre el Bundle ID y el PID).
+    /// La app que de verdad está instalada: dentro de LiveContainer, LiveContainer (OmniStation va
+    /// dentro de su proceso); si no, OmniStation.
+    static var hostBundleID: String {
+        guard isInsideLiveContainer, let name = _dyld_get_image_name(0) else { return bundleID }
+        let executable = URL(fileURLWithPath: String(cString: name))
+        return Bundle(url: executable.deletingLastPathComponent())?.bundleIdentifier ?? bundleID
+    }
+
+    /// Pide a StikDebug que active JIT en esta app ya abierta (por su número de proceso), sin
+    /// reiniciarla. StikDebug: JIT para esta app (su guía pide siempre el Bundle ID y el PID).
     static var enableJITURL: URL? {
         var components = URLComponents()
         components.scheme = "stikdebug"
         components.host = "enable-jit"
         components.queryItems = [
-            URLQueryItem(name: "bundle-id", value: bundleID),
+            URLQueryItem(name: "bundle-id", value: hostBundleID),
             URLQueryItem(name: "pid", value: String(getpid()))
         ]
         return components.url

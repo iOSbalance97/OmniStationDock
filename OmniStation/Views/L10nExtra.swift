@@ -355,6 +355,24 @@ extension L10n {
         "Importa prod.keys para que los juegos se reconozcan solos": "Import prod.keys so games are recognised automatically",
         "MeloNX: importa tus claves (prod.keys) para que OmniStation reconozca y abra sus juegos solo.": "MeloNX: import your keys (prod.keys) so OmniStation recognises and opens its games by itself.",
         "Importar": "Import",
-        "Los juegos tienen que estar descifrados (.3ds, .cci, .cxi o .3dsx).": "Games must be decrypted (.3ds, .cci, .cxi or .3dsx)."
+        "Los juegos tienen que estar descifrados (.3ds, .cci, .cxi o .3dsx).": "Games must be decrypted (.3ds, .cci, .cxi or .3dsx).",
+        "Reactivando el JIT con StikDebug… Vuelve aquí cuando termine.": "Re-enabling JIT with StikDebug… Come back here when it's done.",
+        "No se pudo abrir StikDebug: el juego va sin JIT.": "Couldn't open StikDebug: the game runs without JIT.",
+        "No llegó el JIT: el juego va en modo intérprete.": "JIT didn't arrive: the game runs in interpreter mode.",
+        "SUELTO": "DETACHED",
+        "Se activó, pero el depurador ya no está enganchado": "Enabled, but the debugger is no longer attached",
+        "Con StikDebug, sin reiniciar la app": "With StikDebug, without restarting the app",
+        "Se activó el JIT, pero el depurador ya no está enganchado y en iOS 26 hace falta. Pulsa «Activar JIT» para volver a engancharlo sin reiniciar.": "JIT was enabled, but the debugger is no longer attached and iOS 26 needs it. Tap “Enable JIT” to attach it again without restarting.",
+        "Las opciones de este núcleo salen aquí en cuanto se puedan leer.": "This core's options show up here as soon as they can be read.",
+        "Calidad": "Quality",
+        "Renderizado": "Rendering",
+        "Correcciones de hardware": "Hardware fixes",
+        "Rendimiento": "Performance",
+        "Speedhacks": "Speedhacks",
+        "Arranque": "Boot",
+        "Compatibilidad": "Compatibility",
+        "Parches y trucos": "Patches & cheats",
+        "Indicador de ARMSX2": "ARMSX2 overlay",
+        "Indicador de OmniStation": "OmniStation overlay"
     ]
 }

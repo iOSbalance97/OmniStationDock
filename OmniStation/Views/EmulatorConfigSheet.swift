@@ -26,10 +26,53 @@ struct EmulatorConfigSheet: View {
         return args.isEmpty ? base : String(format: base, arguments: args)
     }
 
-    private var tabs: [EmuTab] { EmulatorConfig.tabs(emulator) }
+    /// Núcleos libretro: el núcleo elegido (en el juego o en general); sus opciones son las que salen.
+    private var activeCore: String? {
+        _ = revision
+        guard case .retro(let system) = emulator else { return nil }
+        return RetroConfig.core(for: system, gameID: gameID)?.id
+    }
 
+    private var isRetro: Bool {
+        if case .retro = emulator { return true }
+        return false
+    }
+
+    private var visibleOptions: [EmuOption] {
+        let core: String? = activeCore
+        return EmulatorConfig.options(emulator).filter { $0.onlyCore == nil || $0.onlyCore == core }
+    }
+
+    private var tabs: [EmuTab] {
+        let used: Set<EmuTab> = Set(visibleOptions.map(\.tab))
+        return EmuTab.allCases.filter { used.contains($0) }
+    }
+
+    /// Las de la pestaña, juntas por grupo (en el orden en que sale cada grupo).
     private var options: [EmuOption] {
-        EmulatorConfig.options(emulator).filter { $0.tab == tab }
+        let list: [EmuOption] = visibleOptions.filter { $0.tab == tab }
+        var order: [String: Int] = [:]
+        for option in list where order[option.group] == nil { order[option.group] = order.count }
+        let sorted = list.enumerated().sorted { first, second in
+            let a: Int = order[first.element.group] ?? 0
+            let b: Int = order[second.element.group] ?? 0
+            return a != b ? a < b : first.offset < second.offset
+        }
+        return sorted.map { $0.element }
+    }
+
+    /// Las opciones de la pestaña por grupos (en su orden), con el número de fila de cada una.
+    private var sections: [(title: String, rows: [(option: EmuOption, row: Int)])] {
+        var result: [(title: String, rows: [(option: EmuOption, row: Int)])] = []
+        for (index, option) in options.enumerated() {
+            let item: (option: EmuOption, row: Int) = (option: option, row: index + 1)
+            if let last = result.last, last.title == option.group {
+                result[result.count - 1].rows.append(item)
+            } else {
+                result.append((title: option.group, rows: [item]))
+            }
+        }
+        return result
     }
 
     private var lastRow: Int { options.count }
@@ -51,29 +94,32 @@ struct EmulatorConfigSheet: View {
                     .padding(.top, 8)
                     .padding(.bottom, 10)
                 PadScrollView(selection: selected) {
-                    VStack(spacing: 10) {
+                    VStack(alignment: .leading, spacing: 22) {
                         if gameID != nil {
                             Text(tr("Lo que no cambies aquí usa los ajustes generales de %@ (Ajustes).", emulator.name))
-                                .font(AppFont.text(12))
+                                .font(.system(size: 13))
                                 .foregroundStyle(.white.opacity(0.55))
-                                .frame(maxWidth: .infinity, alignment: .leading)
-                                .padding(.horizontal, 4)
+                                .padding(.horizontal, 16)
                         }
-                        ForEach(Array(options.enumerated()), id: \.element.id) { index, option in
-                            if !option.group.isEmpty, index == 0 || options[index - 1].group != option.group {
-                                Text(tr(option.group).uppercased())
-                                    .font(AppFont.text(11, .bold))
-                                    .foregroundStyle(Color.cyan.opacity(0.85))
-                                    .frame(maxWidth: .infinity, alignment: .leading)
-                                    .padding(.horizontal, 6)
-                                    .padding(.top, index == 0 ? 0 : 8)
+                        ForEach(Array(sections.enumerated()), id: \.offset) { _, section in
+                            IOSSection(header: tr(section.title)) {
+                                ForEach(Array(section.rows.enumerated()), id: \.offset) { position, item in
+                                    if position > 0 { IOSRowDivider() }
+                                    optionRow(item.option, row: item.row)
+                                        .padAnchor(item.row)
+                                }
                             }
-                            optionRow(option, row: index + 1)
-                                .padAnchor(index + 1)
+                        }
+                        if options.isEmpty && isRetro {
+                            Text(tr("Las opciones de este núcleo salen aquí en cuanto se puedan leer."))
+                                .font(.system(size: 13))
+                                .foregroundStyle(.white.opacity(0.5))
+                                .padding(.horizontal, 16)
                         }
                     }
                     .padding(.horizontal, 16)
-                    .padding(.bottom, 18)
+                    .padding(.top, 4)
+                    .padding(.bottom, 24)
                 }
             }
             .navigationTitle(title)
@@ -88,9 +134,14 @@ struct EmulatorConfigSheet: View {
             }
         }
         .presentationDetents([.large])
-        .presentationBackground(.ultraThinMaterial)
+        .presentationBackground(.regularMaterial)
         .preferredColorScheme(.dark)
         .onAppear {
+            // Núcleos libretro: sus opciones se leen ahora si aún no se tenían.
+            if case .retro(let system) = emulator {
+                RetroCoreOptions.prepare(system)
+                revision += 1
+            }
             if !tabs.contains(tab), let first = tabs.first { tab = first }
             if snapshot == nil {
                 snapshot = gameID.map { EmulatorConfig.game(emulator, $0) } ?? EmulatorConfig.global(emulator)
@@ -139,33 +190,41 @@ struct EmulatorConfigSheet: View {
 
     // MARK: Pestañas
 
+    /// Pestañas como un control segmentado de iOS (con su icono encima).
     private var tabBar: some View {
-        HStack(spacing: 8) {
+        HStack(spacing: 2) {
             ForEach(tabs) { item in
                 let active: Bool = item == tab
                 Button {
                     switchTab(item)
                 } label: {
-                    // Icono encima del nombre: caben las cinco pestañas de MeloNX en vertical.
-                    VStack(spacing: 3) {
+                    VStack(spacing: 2) {
                         Image(systemName: item.symbol)
-                            .font(.system(size: 13, weight: .semibold))
+                            .font(.system(size: 12, weight: .semibold))
                         Text(tr(item.title))
-                            .font(AppFont.text(10, .semibold))
+                            .font(.system(size: 11, weight: active ? .semibold : .medium))
                             .lineLimit(1)
                             .minimumScaleFactor(0.6)
                     }
-                        .foregroundStyle(active ? Color.black : Color.white.opacity(0.85))
-                        .frame(maxWidth: .infinity)
-                        .padding(.vertical, 7)
-                        .background(active ? Color.cyan : Color.white.opacity(0.08), in: RoundedRectangle(cornerRadius: 14, style: .continuous))
-                        .contentShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+                    .foregroundStyle(active ? Color.white : Color.white.opacity(0.65))
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, 6)
+                    .background {
+                        if active {
+                            RoundedRectangle(cornerRadius: 9, style: .continuous)
+                                .fill(Color.white.opacity(0.22))
+                                .shadow(color: .black.opacity(0.25), radius: 3, y: 1)
+                        }
+                    }
+                    .contentShape(Rectangle())
                 }
-                .buttonStyle(ControllerFocusableButtonStyle())
+                .buttonStyle(.plain)
             }
         }
-        .padding(4)
-        .padRing(pad.gamepadConnected && selected == 0, cornerRadius: 22)
+        .padding(2)
+        .background(Color.white.opacity(0.09), in: RoundedRectangle(cornerRadius: 11, style: .continuous))
+        .padRing(pad.gamepadConnected && selected == 0, cornerRadius: 12)
+        .animation(.easeInOut(duration: 0.18), value: tab)
     }
 
     private func switchTab(_ item: EmuTab) {
@@ -198,60 +257,69 @@ struct EmulatorConfigSheet: View {
         let value: String = currentValue(option)
         let inherited: Bool = gameID != nil && ownValue(option) == nil
         let changed: Bool = gameID == nil ? value != option.defaultValue : !inherited
+        let focused: Bool = pad.gamepadConnected && selected == row
         return HStack(alignment: .center, spacing: 12) {
-            VStack(alignment: .leading, spacing: 3) {
+            VStack(alignment: .leading, spacing: 2) {
                 Text(tr(option.title))
-                    .font(AppFont.text(14, .semibold))
+                    .font(.system(size: 16))
                     .foregroundStyle(.white)
                 if !option.detail.isEmpty {
                     Text(tr(option.detail))
-                        .font(AppFont.text(11))
+                        .font(.system(size: 12))
                         .foregroundStyle(.white.opacity(0.5))
                         .fixedSize(horizontal: false, vertical: true)
                 }
             }
             Spacer(minLength: 8)
-            Menu {
-                if gameID != nil {
-                    Button {
-                        set(option, nil)
-                    } label: {
-                        menuLabel(tr("General (%@)", tr(option.label(for: EmulatorConfig.globalValue(option, emulator)))), checked: inherited)
-                    }
-                }
-                ForEach(option.choices, id: \.self) { choice in
-                    Button {
-                        set(option, choice.value)
-                    } label: {
-                        menuLabel(tr(choice.label), checked: !inherited && value == choice.value)
-                    }
-                }
-            } label: {
-                HStack(spacing: 5) {
-                    VStack(alignment: .trailing, spacing: 1) {
-                        Text(tr(option.label(for: value)))
-                            .font(AppFont.text(13, .bold))
-                            .foregroundStyle(changed ? Color.cyan : Color.white.opacity(0.85))
-                            .lineLimit(1)
-                        if inherited {
-                            Text(tr("general"))
-                                .font(AppFont.text(9, .semibold))
-                                .foregroundStyle(.white.opacity(0.45))
+            // Sí/No en los ajustes generales: un interruptor, como en iOS.
+            if option.isToggle && gameID == nil {
+                Toggle("", isOn: Binding(
+                    get: { value == "true" },
+                    set: { set(option, $0 ? "true" : "false") }
+                ))
+                .labelsHidden()
+                .tint(Color.cyan)
+            } else {
+                Menu {
+                    if gameID != nil {
+                        Button {
+                            set(option, nil)
+                        } label: {
+                            menuLabel(tr("General (%@)", tr(option.label(for: EmulatorConfig.globalValue(option, emulator)))), checked: inherited)
                         }
                     }
-                    Image(systemName: "chevron.up.chevron.down")
-                        .font(.system(size: 11, weight: .semibold))
-                        .foregroundStyle(.white.opacity(0.5))
+                    ForEach(option.choices, id: \.self) { choice in
+                        Button {
+                            set(option, choice.value)
+                        } label: {
+                            menuLabel(tr(choice.label), checked: !inherited && value == choice.value)
+                        }
+                    }
+                } label: {
+                    HStack(spacing: 4) {
+                        VStack(alignment: .trailing, spacing: 1) {
+                            Text(tr(option.label(for: value)))
+                                .font(.system(size: 15))
+                                .foregroundStyle(changed ? Color.cyan : Color.white.opacity(0.5))
+                                .lineLimit(1)
+                            if inherited {
+                                Text(tr("general"))
+                                    .font(.system(size: 10, weight: .medium))
+                                    .foregroundStyle(.white.opacity(0.35))
+                            }
+                        }
+                        Image(systemName: "chevron.up.chevron.down")
+                            .font(.system(size: 11, weight: .semibold))
+                            .foregroundStyle(.white.opacity(0.35))
+                    }
                 }
-                .padding(.horizontal, 12)
-                .padding(.vertical, 8)
-                .background(Color.white.opacity(0.08), in: Capsule())
             }
         }
-        .padding(12)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .glassCard()
-        .padRing(pad.gamepadConnected && selected == row, cornerRadius: 18)
+        .padding(.horizontal, 16)
+        .padding(.vertical, 11)
+        .frame(maxWidth: .infinity, minHeight: 44, alignment: .leading)
+        .contentShape(Rectangle())
+        .iosRowHighlight(focused)
     }
 
     @ViewBuilder
