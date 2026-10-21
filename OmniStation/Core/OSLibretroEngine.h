@@ -28,6 +28,13 @@ NS_ASSUME_NONNULL_BEGIN
 /// Hay una partida abierta.
 @property (nonatomic, readonly) BOOL busy;
 
+/// Opciones del núcleo que se pueden cambiar desde el menú de la partida (se ponen antes de
+/// launchGame). Cada una: «key», «title», «group», «values» ([[valor, etiqueta]]) y «value».
+@property (nonatomic, copy, nullable) NSArray<NSDictionary<NSString *, id> *> *menuOptions;
+
+/// Se llama (en el hilo principal) cuando se cambia una opción desde el menú de la partida.
+@property (nonatomic, copy, nullable) void (^menuOptionChanged)(NSString *key, NSString *value);
+
 /// Arranca `gamePath` con el núcleo `framework`.
 /// - layout: botones del mando táctil («nes», «snes», «gb», «gba», «nds», «ps1», «n64», «psp», «dc»).
 /// - systemDirectory: BIOS; saveDirectory: partidas (.srm) y estados (.state).

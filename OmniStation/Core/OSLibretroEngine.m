@@ -116,6 +116,9 @@ static NSMutableDictionary<NSString *, NSData *> *gOptionStrings;
 
 // Fotograma convertido a BGRA (lo pinta la pantalla).
 static os_unfair_lock gFrameLock = OS_UNFAIR_LOCK_INIT;
+// Opciones cambiadas desde el menú de la partida: el hilo de emulación las pasa al núcleo.
+static NSMutableDictionary<NSString *, NSString *> *gPendingOptions;
+static os_unfair_lock gPendingLock = OS_UNFAIR_LOCK_INIT;
 static uint32_t *gFrame;
 static size_t gFrameCapacity;
 static unsigned gFrameWidth, gFrameHeight;
@@ -228,6 +231,9 @@ static BOOL OSLRUsesJITScript(void) {
 // Sin depurador, un «brk #0xf00d» (petición de JIT del núcleo) cerraría la app: se contesta 0.
 static struct sigaction gPreviousTrapAction;
 static bool gTrapGuardInstalled;
+// El núcleo pidió memoria de JIT (comando 1) y no había depurador que la preparase: esa partida
+// va sin JIT de verdad (o el núcleo no puede seguir). Así el menú dice la verdad.
+static volatile sig_atomic_t gJITUnanswered;
 
 static void OSLRTrapHandler(int signalNumber, siginfo_t *info, void *context) {
     ucontext_t *state = (ucontext_t *)context;
@@ -235,6 +241,7 @@ static void OSLRTrapHandler(int signalNumber, siginfo_t *info, void *context) {
         uint64_t pc = state->uc_mcontext->__ss.__pc;
         uint32_t instruction = pc != 0 ? *(const uint32_t *)(uintptr_t)pc : 0;
         if (instruction == 0xD43E01A0u) { // brk #0xf00d
+            if (state->uc_mcontext->__ss.__x[16] == 1) gJITUnanswered = 1;
             state->uc_mcontext->__ss.__pc = pc + 4;
             state->uc_mcontext->__ss.__x[0] = 0;
             return;
@@ -1487,6 +1494,8 @@ static bool OSLREnvironment(unsigned command, void *data) {
             const struct retro_system_av_info *info = data;
             if (info == NULL) return false;
             OSLRUpdateGeometry(&info->geometry);
+            // El ritmo también puede cambiar (el bucle lo lee en cada fotograma).
+            if (info->timing.fps > 1) gFPS = info->timing.fps;
             // Más resolución que antes: el framebuffer del núcleo crece.
             if (gGLContext != nil && (info->geometry.max_width > gGLWidth || info->geometry.max_height > gGLHeight)) {
                 OSLRResizeGL(MAX(info->geometry.max_width, gGLWidth), MAX(info->geometry.max_height, gGLHeight));
@@ -1910,6 +1919,9 @@ static int OSLRRetroButtonForMapID(NSString *name) {
 @property (nonatomic, strong, readonly) OSLRVideoView *videoView;
 @property (nonatomic, copy, nullable) void (^menuChanged)(BOOL open);
 @property (nonatomic, copy, nullable) void (^menuAction)(NSInteger action);
+/// Opciones del núcleo que se pueden cambiar en la partida («key», «title», «group», «values», «value»).
+@property (nonatomic, strong) NSArray<NSMutableDictionary<NSString *, id> *> *coreOptions;
+@property (nonatomic, copy, nullable) void (^optionChanged)(NSString *key, NSString *value);
 /// Mapa de botones del juego: botón físico (RETRO id) → el que manda.
 @property (nonatomic, copy) NSDictionary<NSNumber *, NSNumber *> *buttonMap;
 - (void)showStatus:(NSString *)message;
@@ -1924,7 +1936,8 @@ typedef NS_ENUM(NSInteger, OSLRMenuAction) {
     OSLRMenuActionLoadState,
     OSLRMenuActionReset,
     OSLRMenuActionQuit,
-    OSLRMenuActionDisc
+    OSLRMenuActionDisc,
+    OSLRMenuActionOptions
 };
 
 @implementation OSLRGameViewController {
@@ -1937,6 +1950,16 @@ typedef NS_ENUM(NSInteger, OSLRMenuAction) {
     NSArray<UIButton *> *_menuRows;
     NSArray<UIButton *> *_visibleRows;
     UILabel *_jitLabel;
+    // Opciones del núcleo (una página del menú).
+    UIView *_optionsView;
+    UILabel *_optionsTitle;
+    UILabel *_optionsHint;
+    UIScrollView *_optionsScroll;
+    NSMutableArray<UIButton *> *_optionRows;
+    NSMutableArray<UILabel *> *_optionHeaders;
+    BOOL _optionsVisible;
+    NSInteger _optionIndex;
+    BOOL _prevLeft, _prevRight;
     NSInteger _menuIndex;
     BOOL _menuVisible;
     CADisplayLink *_displayLink;
@@ -1963,6 +1986,7 @@ typedef NS_ENUM(NSInteger, OSLRMenuAction) {
         _observers = [NSMutableArray new];
         _groups = [NSMutableArray new];
         _buttonMap = @{};
+        _coreOptions = @[];
         _videoView = [[OSLRVideoView alloc] initWithFrame:CGRectMake(0, 0, 4, 3)];
     }
     return self;
@@ -2230,14 +2254,7 @@ typedef NS_ENUM(NSInteger, OSLRMenuAction) {
     [self updateControlsVisibility];
 }
 
-- (void)buildMenu {
-    _menuView = [[UIView alloc] initWithFrame:self.view.bounds];
-    _menuView.backgroundColor = [UIColor colorWithWhite:0 alpha:0.72];
-    _menuView.hidden = YES;
-    // Si el núcleo puede ir con o sin JIT, arriba se ve cómo arrancó.
-    _jitLabel = [UILabel new];
-    _jitLabel.textAlignment = NSTextAlignmentCenter;
-    _jitLabel.numberOfLines = 2;
+- (void)updateJITLabel {
     _jitLabel.hidden = self.jitText.length == 0;
     if (self.jitText.length > 0) {
         UIColor *color = self.jitOn ? [UIColor colorWithRed:0.30 green:0.95 blue:0.45 alpha:1.0] : [UIColor colorWithRed:1.0 green:0.42 blue:0.38 alpha:1.0];
@@ -2255,15 +2272,27 @@ typedef NS_ENUM(NSInteger, OSLRMenuAction) {
             NSFontAttributeName: [UIFont systemFontOfSize:14 weight:UIFontWeightBold]}]];
         _jitLabel.attributedText = text;
     }
+}
+
+- (void)buildMenu {
+    _menuView = [[UIView alloc] initWithFrame:self.view.bounds];
+    _menuView.backgroundColor = [UIColor colorWithWhite:0 alpha:0.72];
+    _menuView.hidden = YES;
+    // Si el núcleo puede ir con o sin JIT, arriba se ve cómo arrancó.
+    _jitLabel = [UILabel new];
+    _jitLabel.textAlignment = NSTextAlignmentCenter;
+    _jitLabel.numberOfLines = 2;
+    [self updateJITLabel];
     [_menuView addSubview:_jitLabel];
     NSArray<NSString *> *titles = @[[self t:@"Continuar" en:@"Resume"],
                                     [self t:@"Guardar estado" en:@"Save state"],
                                     [self t:@"Cargar estado" en:@"Load state"],
                                     [self t:@"Reiniciar" en:@"Reset"],
                                     [self t:@"Cambiar de disco" en:@"Change disc"],
+                                    [self t:@"Opciones del núcleo" en:@"Core options"],
                                     [self t:@"Salir del juego" en:@"Quit game"]];
     NSArray<NSNumber *> *actions = @[@(OSLRMenuActionResume), @(OSLRMenuActionSaveState), @(OSLRMenuActionLoadState),
-                                     @(OSLRMenuActionReset), @(OSLRMenuActionDisc), @(OSLRMenuActionQuit)];
+                                     @(OSLRMenuActionReset), @(OSLRMenuActionDisc), @(OSLRMenuActionOptions), @(OSLRMenuActionQuit)];
     NSMutableArray<UIButton *> *rows = [NSMutableArray new];
     for (NSUInteger index = 0; index < titles.count; index++) {
         UIButton *row = [UIButton buttonWithType:UIButtonTypeSystem];
@@ -2282,6 +2311,195 @@ typedef NS_ENUM(NSInteger, OSLRMenuAction) {
     _menuRows = rows;
     [self updateVisibleRows];
     [self.view addSubview:_menuView];
+    [self buildOptionsPage];
+}
+
+// MARK: Opciones del núcleo en la partida
+
+- (void)buildOptionsPage {
+    _optionsView = [[UIView alloc] initWithFrame:CGRectZero];
+    _optionsView.backgroundColor = [UIColor colorWithRed:0.04 green:0.07 blue:0.12 alpha:0.94];
+    _optionsView.layer.cornerRadius = 22;
+    _optionsView.layer.borderWidth = 1;
+    _optionsView.layer.borderColor = [UIColor colorWithRed:0.0 green:0.85 blue:1.0 alpha:0.35].CGColor;
+    _optionsView.layer.shadowColor = [UIColor colorWithRed:0.0 green:0.85 blue:1.0 alpha:1.0].CGColor;
+    _optionsView.layer.shadowOpacity = 0.35;
+    _optionsView.layer.shadowRadius = 18;
+    _optionsView.layer.shadowOffset = CGSizeZero;
+    _optionsView.hidden = YES;
+    _optionsTitle = [UILabel new];
+    _optionsTitle.text = [self t:@"Opciones del núcleo" en:@"Core options"];
+    _optionsTitle.textColor = UIColor.whiteColor;
+    _optionsTitle.font = [UIFont systemFontOfSize:18 weight:UIFontWeightBold];
+    [_optionsView addSubview:_optionsTitle];
+    _optionsHint = [UILabel new];
+    _optionsHint.text = [self t:@"‹ › o toca para cambiar · B para volver. Algunas se notan al volver a abrir el juego."
+                             en:@"‹ › or tap to change · B to go back. Some apply when the game is opened again."];
+    _optionsHint.textColor = [UIColor colorWithWhite:1 alpha:0.6];
+    _optionsHint.font = [UIFont systemFontOfSize:12 weight:UIFontWeightMedium];
+    _optionsHint.numberOfLines = 2;
+    [_optionsView addSubview:_optionsHint];
+    UIButton *back = [UIButton buttonWithType:UIButtonTypeSystem];
+    back.tag = 900077;
+    [back setImage:[UIImage systemImageNamed:@"chevron.backward.circle.fill"] forState:UIControlStateNormal];
+    back.tintColor = [UIColor colorWithRed:0.0 green:0.85 blue:1.0 alpha:1.0];
+    [back addTarget:self action:@selector(closeOptionsPage) forControlEvents:UIControlEventTouchUpInside];
+    [_optionsView addSubview:back];
+    _optionsScroll = [UIScrollView new];
+    _optionsScroll.showsVerticalScrollIndicator = YES;
+    _optionsScroll.indicatorStyle = UIScrollViewIndicatorStyleWhite;
+    [_optionsView addSubview:_optionsScroll];
+    _optionRows = [NSMutableArray new];
+    _optionHeaders = [NSMutableArray new];
+    NSString *lastGroup = nil;
+    for (NSUInteger index = 0; index < self.coreOptions.count; index++) {
+        NSDictionary<NSString *, id> *option = self.coreOptions[index];
+        NSString *group = [option[@"group"] isKindOfClass:NSString.class] ? option[@"group"] : @"";
+        if (group.length > 0 && ![group isEqualToString:lastGroup]) {
+            UILabel *header = [UILabel new];
+            header.text = group.uppercaseString;
+            header.textColor = [UIColor colorWithRed:0.0 green:0.85 blue:1.0 alpha:0.9];
+            header.font = [UIFont systemFontOfSize:11 weight:UIFontWeightBold];
+            header.tag = (NSInteger)index; // fila que va debajo
+            [_optionsScroll addSubview:header];
+            [_optionHeaders addObject:header];
+        }
+        lastGroup = group;
+        UIButton *row = [UIButton buttonWithType:UIButtonTypeCustom];
+        row.tag = (NSInteger)index;
+        row.backgroundColor = [UIColor colorWithWhite:1 alpha:0.07];
+        row.layer.cornerRadius = 12;
+        row.layer.borderColor = [UIColor colorWithRed:0.0 green:0.85 blue:1.0 alpha:1.0].CGColor;
+        UILabel *title = [UILabel new];
+        title.tag = 900001;
+        title.textColor = UIColor.whiteColor;
+        title.font = [UIFont systemFontOfSize:15 weight:UIFontWeightSemibold];
+        title.text = option[@"title"];
+        title.adjustsFontSizeToFitWidth = YES;
+        title.minimumScaleFactor = 0.75;
+        [row addSubview:title];
+        UILabel *value = [UILabel new];
+        value.tag = 900002;
+        value.textAlignment = NSTextAlignmentRight;
+        value.textColor = [UIColor colorWithRed:0.0 green:0.85 blue:1.0 alpha:1.0];
+        value.font = [UIFont systemFontOfSize:14 weight:UIFontWeightBold];
+        value.adjustsFontSizeToFitWidth = YES;
+        value.minimumScaleFactor = 0.7;
+        [row addSubview:value];
+        [row addTarget:self action:@selector(optionRowTapped:) forControlEvents:UIControlEventTouchUpInside];
+        [_optionsScroll addSubview:row];
+        [_optionRows addObject:row];
+        [self updateOptionRow:row];
+    }
+    [self.view addSubview:_optionsView];
+}
+
+- (NSString *)labelForOption:(NSDictionary<NSString *, id> *)option {
+    NSString *current = option[@"value"];
+    for (NSArray<NSString *> *pair in option[@"values"]) {
+        if (pair.count > 0 && [pair[0] isEqualToString:current]) return pair.count > 1 ? pair[1] : pair[0];
+    }
+    return current ?: @"";
+}
+
+- (void)updateOptionRow:(UIButton *)row {
+    if (row.tag < 0 || row.tag >= (NSInteger)self.coreOptions.count) return;
+    UILabel *value = [row viewWithTag:900002];
+    value.text = [NSString stringWithFormat:@"‹ %@ ›", [self labelForOption:self.coreOptions[(NSUInteger)row.tag]]];
+}
+
+- (void)layoutOptionsPage {
+    if (_optionsView == nil) return;
+    CGRect bounds = self.view.bounds;
+    UIEdgeInsets safe = self.view.safeAreaInsets;
+    CGFloat w = MIN(bounds.size.width - safe.left - safe.right - 24, 560);
+    CGFloat h = bounds.size.height - safe.top - safe.bottom - 24;
+    _optionsView.frame = CGRectMake(floor((bounds.size.width - w) * 0.5), safe.top + 12, w, h);
+    UIView *back = [_optionsView viewWithTag:900077];
+    back.frame = CGRectMake(12, 12, 36, 36);
+    _optionsTitle.frame = CGRectMake(54, 12, w - 66, 24);
+    _optionsHint.frame = CGRectMake(54, 36, w - 66, 30);
+    _optionsScroll.frame = CGRectMake(12, 72, w - 24, h - 84);
+    CGFloat rowWidth = w - 24;
+    CGFloat y = 0;
+    NSUInteger headerIndex = 0;
+    for (UIButton *row in _optionRows) {
+        while (headerIndex < _optionHeaders.count && _optionHeaders[headerIndex].tag == row.tag) {
+            _optionHeaders[headerIndex].frame = CGRectMake(6, y + 8, rowWidth - 12, 16);
+            y += 28;
+            headerIndex++;
+        }
+        row.frame = CGRectMake(0, y, rowWidth, 46);
+        UIView *title = [row viewWithTag:900001];
+        UIView *value = [row viewWithTag:900002];
+        CGFloat valueWidth = MIN(rowWidth * 0.42, 220);
+        title.frame = CGRectMake(14, 0, rowWidth - valueWidth - 34, 46);
+        value.frame = CGRectMake(rowWidth - valueWidth - 14, 0, valueWidth, 46);
+        y += 52;
+    }
+    _optionsScroll.contentSize = CGSizeMake(rowWidth, y);
+}
+
+- (void)refreshOptionsPage {
+    for (UIButton *row in _optionRows) {
+        BOOL selected = row.tag == _optionIndex && _controller != nil;
+        row.layer.borderWidth = selected ? 2 : 0;
+        row.backgroundColor = [UIColor colorWithWhite:1 alpha:selected ? 0.16 : 0.07];
+    }
+    if (_optionIndex >= 0 && _optionIndex < (NSInteger)_optionRows.count) {
+        CGRect frame = CGRectInset(_optionRows[(NSUInteger)_optionIndex].frame, 0, -34);
+        [_optionsScroll scrollRectToVisible:frame animated:YES];
+    }
+}
+
+- (void)openOptionsPage {
+    if (self.coreOptions.count == 0) return;
+    _optionsVisible = YES;
+    _optionIndex = 0;
+    _menuView.hidden = YES;
+    _optionsView.hidden = NO;
+    [self.view bringSubviewToFront:_optionsView];
+    [self layoutOptionsPage];
+    [self refreshOptionsPage];
+}
+
+- (void)closeOptionsPage {
+    if (!_optionsVisible) return;
+    _optionsVisible = NO;
+    _optionsView.hidden = YES;
+    _menuView.hidden = NO;
+    [self.view bringSubviewToFront:_menuView];
+    [self refreshMenu];
+}
+
+- (void)optionRowTapped:(UIButton *)sender {
+    _optionIndex = sender.tag;
+    [self stepOption:sender.tag by:1];
+    [self refreshOptionsPage];
+}
+
+/// Siguiente (o anterior) valor de una opción: se apunta, se le pasa al núcleo y se guarda.
+- (void)stepOption:(NSInteger)index by:(NSInteger)delta {
+    if (index < 0 || index >= (NSInteger)self.coreOptions.count) return;
+    NSMutableDictionary<NSString *, id> *option = self.coreOptions[(NSUInteger)index];
+    NSArray<NSArray<NSString *> *> *values = option[@"values"];
+    if (values.count < 2) return;
+    NSInteger position = 0;
+    for (NSUInteger i = 0; i < values.count; i++) {
+        if ([values[i].firstObject isEqualToString:option[@"value"]]) { position = (NSInteger)i; break; }
+    }
+    NSInteger count = (NSInteger)values.count;
+    position = ((position + delta) % count + count) % count;
+    NSString *value = values[(NSUInteger)position].firstObject;
+    NSString *key = option[@"key"];
+    if (value == nil || key == nil) return;
+    option[@"value"] = value;
+    [self updateOptionRow:_optionRows[(NSUInteger)index]];
+    os_unfair_lock_lock(&gPendingLock);
+    if (gPendingOptions == nil) gPendingOptions = [NSMutableDictionary new];
+    gPendingOptions[key] = value;
+    os_unfair_lock_unlock(&gPendingLock);
+    if (self.optionChanged) self.optionChanged(key, value);
 }
 
 /// Filas que se ven: «Cambiar de disco» solo si el juego tiene varios discos.
@@ -2289,7 +2507,7 @@ typedef NS_ENUM(NSInteger, OSLRMenuAction) {
     BOOL discs = atomic_load(&gDiskCount) > 1;
     NSMutableArray<UIButton *> *visible = [NSMutableArray new];
     for (UIButton *row in _menuRows) {
-        BOOL show = row.tag != OSLRMenuActionDisc || discs;
+        BOOL show = (row.tag != OSLRMenuActionDisc || discs) && (row.tag != OSLRMenuActionOptions || self.coreOptions.count > 0);
         row.hidden = !show;
         if (show) [visible addObject:row];
     }
@@ -2385,6 +2603,7 @@ typedef NS_ENUM(NSInteger, OSLRMenuAction) {
         row.frame = CGRectMake((w - rowWidth) * 0.5, y, rowWidth, rowHeight);
         y += rowHeight + 12;
     }
+    if (_optionsVisible) [self layoutOptionsPage];
     if (_onTV) [self layoutTV];
 }
 
@@ -2552,7 +2771,24 @@ typedef NS_ENUM(NSInteger, OSLRMenuAction) {
     float y = pad.dpad.yAxis.value;
     if (fabsf(y) < 0.5f) y = pad.leftThumbstick.yAxis.value;
     BOOL up = y > 0.5f, down = y < -0.5f;
+    float x = pad.dpad.xAxis.value;
+    if (fabsf(x) < 0.5f) x = pad.leftThumbstick.xAxis.value;
+    BOOL left = x < -0.5f, right = x > 0.5f;
     BOOL a = pad.buttonA.isPressed, b = pad.buttonB.isPressed;
+    if (_menuVisible && _optionsVisible && !self.closing) {
+        NSInteger count = (NSInteger)_optionRows.count;
+        if (count > 0) {
+            if (up && !_prevUp) { _optionIndex = (_optionIndex + count - 1) % count; [self refreshOptionsPage]; }
+            if (down && !_prevDown) { _optionIndex = (_optionIndex + 1) % count; [self refreshOptionsPage]; }
+            if (left && !_prevLeft) [self stepOption:_optionIndex by:-1];
+            if ((right && !_prevRight) || (a && !_prevA)) [self stepOption:_optionIndex by:1];
+        }
+        if (b && !_prevB) [self closeOptionsPage];
+        if (home && !_prevHome) { [self closeOptionsPage]; [self closeMenu]; }
+        _prevHome = home; _prevCombo = combo; _prevUp = up; _prevDown = down; _prevA = a; _prevB = b;
+        _prevLeft = left; _prevRight = right;
+        return;
+    }
     if (!_menuVisible) {
         if ((home && !_prevHome) || (combo && !_prevCombo)) [self openMenu];
     } else if (!self.closing) {
@@ -2565,6 +2801,7 @@ typedef NS_ENUM(NSInteger, OSLRMenuAction) {
         if ((b && !_prevB) || (home && !_prevHome)) [self closeMenu];
     }
     _prevHome = home; _prevCombo = combo; _prevUp = up; _prevDown = down; _prevA = a; _prevB = b;
+    _prevLeft = left; _prevRight = right;
 }
 
 // MARK: Menú
@@ -2580,6 +2817,12 @@ typedef NS_ENUM(NSInteger, OSLRMenuAction) {
 
 - (void)openMenu {
     if (_menuVisible || self.closing) return;
+    // El núcleo pidió memoria de JIT y nadie se la preparó: esta partida va sin JIT de verdad.
+    if (self.jitOn && gJITUnanswered) {
+        self.jitOn = NO;
+        self.jitText = [self t:@"Sin JIT: el depurador no preparó la memoria del núcleo" en:@"No JIT: the debugger did not prepare the core's memory"];
+        [self updateJITLabel];
+    }
     _menuVisible = YES;
     _menuIndex = 0;
     [self updateVisibleRows];
@@ -2593,6 +2836,10 @@ typedef NS_ENUM(NSInteger, OSLRMenuAction) {
 
 - (void)closeMenu {
     if (!_menuVisible) return;
+    if (_optionsVisible) {
+        _optionsVisible = NO;
+        _optionsView.hidden = YES;
+    }
     _menuVisible = NO;
     _menuView.hidden = YES;
     if (self.menuChanged) self.menuChanged(NO);
@@ -2603,6 +2850,10 @@ typedef NS_ENUM(NSInteger, OSLRMenuAction) {
 }
 
 - (void)activateRow:(NSInteger)action {
+    if (action == OSLRMenuActionOptions) {
+        [self openOptionsPage];
+        return;
+    }
     if (action != OSLRMenuActionQuit) [self closeMenu];
     if (self.menuAction) self.menuAction(action);
 }
@@ -3073,6 +3324,17 @@ typedef NS_ENUM(NSInteger, OSLRMenuAction) {
                 next = OSLRNow();
                 continue;
             }
+            // Opciones cambiadas en el menú de la partida: se le pasan al núcleo.
+            os_unfair_lock_lock(&gPendingLock);
+            NSDictionary<NSString *, NSString *> *pending = gPendingOptions.count ? [gPendingOptions copy] : nil;
+            [gPendingOptions removeAllObjects];
+            os_unfair_lock_unlock(&gPendingLock);
+            if (pending) {
+                NSMutableDictionary<NSString *, NSString *> *options = [gUserOptions mutableCopy] ?: [NSMutableDictionary new];
+                [options addEntriesFromDictionary:pending];
+                gUserOptions = options;
+                atomic_store(&gVariablesChanged, true);
+            }
             // La orientación cambió: la opción que va con ella (NDS) se le pasa al núcleo.
             int orientation = atomic_load(&gOrientWanted);
             if (gOrientKey != nil && orientation >= 0 && orientation != gOrientApplied) {
@@ -3083,6 +3345,7 @@ typedef NS_ENUM(NSInteger, OSLRMenuAction) {
                 gUserOptions = options;
                 atomic_store(&gVariablesChanged, true);
             }
+            frameTime = 1.0 / gFPS;
             if (gHasFrameTimeCallback) gFrameTimeCallback.callback(gFrameTimeCallback.reference);
             gCore.run();
             // Ritmo del juego; si el sonido se llena o se vacía, se corrige un poco.
@@ -3092,8 +3355,17 @@ typedef NS_ENUM(NSInteger, OSLRMenuAction) {
             double now = OSLRNow();
             if (next > now) {
                 [NSThread sleepForTimeInterval:next - now];
-            } else if (now - next > 0.25) {
-                next = now; // muy atrasado (o vuelve de una pausa): sin intentar recuperar
+            } else if (now - next > frameTime * 3) {
+                // Atrasado (un fotograma lento, el JIT preparándose o vuelta de una pausa): se sigue
+                // desde ahora. Recuperar de golpe muchos fotogramas se nota como cámara rápida y
+                // llena el sonido hasta que se pierde (microcortes).
+                next = now;
+            }
+            // El sonido manda: si el núcleo va más deprisa que lo que suena (algunos, como el de
+            // 3DS, entregan el sonido a ráfagas), se espera a que haya sitio en vez de tirarlo.
+            for (int wait = 0; wait < 25 && OSLRAudioFill() > 0.75 && atomic_load(&gRunning); wait++) {
+                [NSThread sleepForTimeInterval:0.002];
+                next = OSLRNow();
             }
             if (now - lastAutosave > 10) {
                 lastAutosave = now;
@@ -3194,6 +3466,10 @@ typedef NS_ENUM(NSInteger, OSLRMenuAction) {
     gHasFrameTimeCallback = NO;
     // JIT: solo si se pidió y OmniStation lo tiene de verdad ahora.
     gJITCapable = [hostOptions[@"jit"] isEqualToString:@"true"] && [OSLibretroEngine jitActive];
+    gJITUnanswered = 0;
+    os_unfair_lock_lock(&gPendingLock);
+    [gPendingOptions removeAllObjects];
+    os_unfair_lock_unlock(&gPendingLock);
     OSLRInstallTrapGuard(NO);
     // Imagen por GPU y proporción.
     memset(&gHWCallback, 0, sizeof(gHWCallback));
@@ -3271,6 +3547,22 @@ typedef NS_ENUM(NSInteger, OSLRMenuAction) {
         if (from >= 0 && to >= 0) map[@(from)] = @(to);
     }
     controller.buttonMap = map;
+    // Opciones del núcleo para el menú de la partida (con el valor con el que arranca).
+    NSMutableArray<NSMutableDictionary<NSString *, id> *> *menuOptions = [NSMutableArray new];
+    for (NSDictionary<NSString *, id> *option in self.menuOptions ?: @[]) {
+        NSString *key = option[@"key"];
+        NSArray *values = option[@"values"];
+        if (![key isKindOfClass:NSString.class] || ![values isKindOfClass:NSArray.class] || values.count < 2) continue;
+        NSMutableDictionary<NSString *, id> *item = [option mutableCopy];
+        if (gUserOptions[key]) item[@"value"] = gUserOptions[key];
+        if (![item[@"value"] isKindOfClass:NSString.class]) item[@"value"] = [values.firstObject firstObject] ?: @"";
+        [menuOptions addObject:item];
+    }
+    controller.coreOptions = menuOptions;
+    void (^changed)(NSString *, NSString *) = self.menuOptionChanged;
+    controller.optionChanged = ^(NSString *key, NSString *value) {
+        if (changed) changed(key, value);
+    };
     if ([hostOptions[@"hud"] boolValue]) {
         OSPerfHUD *hud = [[OSPerfHUD alloc] initWithFrame:CGRectZero];
         hud.showFrameTime = NO;

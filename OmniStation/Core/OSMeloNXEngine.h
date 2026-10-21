@@ -40,6 +40,13 @@ NS_ASSUME_NONNULL_BEGIN
 /// Hay una partida abierta o arrancando.
 @property (nonatomic, readonly) BOOL busy;
 
+/// Ya se jugó (o no terminó de cerrarse) una partida: el núcleo de MeloNX solo abre un juego por
+/// cada vez que se abre la app. Para otro hay que reabrirla.
+@property (nonatomic, readonly) BOOL needsRelaunch;
+
+/// Explica que hay que reabrir la app y ofrece cerrarla.
+- (void)offerRelaunchWithLanguage:(NSString *)language NS_SWIFT_NAME(offerRelaunch(language:));
+
 /// Instala el firmware (zip, xci o carpeta). `completion` llega en el hilo principal.
 - (void)installFirmwareAtPath:(NSString *)path
                    completion:(void (^)(BOOL success, NSString *message))completion;

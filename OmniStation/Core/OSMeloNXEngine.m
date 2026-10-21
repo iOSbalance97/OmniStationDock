@@ -1402,6 +1402,12 @@ static void OSNXTeardownDonor(const OSNXCoreAPI *api) {
     BOOL _finishing;
     /// El núcleo no terminó al salir: hasta reiniciar la app no se puede abrir otro juego.
     BOOL _stuck;
+    /// Ya se jugó una partida en esta sesión de la app: el núcleo de MeloNX solo prepara su mando
+    /// una vez (al arrancar la app) y lo cierra al acabar la partida, así que otra partida
+    /// necesita reabrir la app (MeloNX hace lo mismo: su «Salir» es inestable).
+    BOOL _played;
+    /// Se pidió salir: el error con el que termine el núcleo al pararse no se enseña.
+    BOOL _quitting;
     /// Ajustes de la partida en marcha (los de Ajustes → MeloNX y los del juego).
     NSDictionary<NSString *, NSString *> *_settings;
     /// Teclado del juego abierto: id con el que hay que contestar al núcleo.
@@ -2147,6 +2153,35 @@ static BOOL OSNXNeedsExtendedVirtualAddressing(void) {
     [[self topViewController] presentViewController:alert animated:YES completion:nil];
 }
 
+/// No se puede abrir otro juego hasta reabrir la app: se explica y se ofrece cerrarla.
+- (BOOL)needsRelaunch {
+    return _stuck || _played;
+}
+
+- (void)offerRelaunchWithLanguage:(NSString *)language {
+    NSString *message = _stuck
+        ? OSNXText(language, @"MeloNX no terminó de cerrar el juego anterior. Para jugar otra vez hay que reabrir OmniStation.",
+                   @"MeloNX did not finish closing the previous game. Reopen OmniStation to play again.")
+        : OSNXText(language, @"MeloNX solo puede abrir un juego cada vez que se abre la app (en la app de MeloNX pasa igual). Reabre OmniStation para jugar a otro.",
+                   @"MeloNX can only open one game each time the app is opened (the MeloNX app works the same way). Reopen OmniStation to play another.");
+    dispatch_async(dispatch_get_main_queue(), ^{
+        UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"MeloNX"
+                                                                       message:message
+                                                                preferredStyle:UIAlertControllerStyleAlert];
+        [alert addAction:[UIAlertAction actionWithTitle:OSNXText(language, @"Ahora no", @"Not now")
+                                                  style:UIAlertActionStyleCancel handler:nil]];
+        [alert addAction:[UIAlertAction actionWithTitle:OSNXText(language, @"Cerrar OmniStation", @"Close OmniStation")
+                                                  style:UIAlertActionStyleDestructive
+                                                handler:^(UIAlertAction *action) {
+            // Como MeloNX: la app se cierra y se vuelve a abrir desde la pantalla de inicio.
+            UIApplication *app = UIApplication.sharedApplication;
+            [app performSelector:@selector(suspend)];
+            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.6 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{ exit(0); });
+        }]];
+        [[self topViewController] presentViewController:alert animated:YES completion:nil];
+    });
+}
+
 /// Cierra la pantalla y deja todo listo para otra partida.
 - (void)finishSessionWithMessage:(nullable NSString *)message
                       completion:(nullable void (^)(BOOL, NSString *))completion {
@@ -2224,12 +2259,13 @@ static BOOL OSNXNeedsExtendedVirtualAddressing(void) {
         completion(NO, loadError ?: @"No se pudo cargar MeloNX.");
         return;
     }
-    if (_stuck) {
-        completion(NO, OSNXText(language, @"MeloNX no terminó de cerrar el juego anterior. Cierra OmniStation del todo y vuelve a abrirla para jugar otra vez.",
-                                @"MeloNX did not finish closing the previous game. Fully close OmniStation and open it again to play again."));
+    if (self.needsRelaunch) {
+        completion(NO, @"");
+        [self offerRelaunchWithLanguage:language];
         return;
     }
     _finishing = NO;
+    _quitting = NO;
     self.busy = YES;
     self.endedHandler = ended;
     _menuOpen = NO;
@@ -2334,6 +2370,7 @@ static BOOL OSNXNeedsExtendedVirtualAddressing(void) {
                 // hilo (stop_emulation espera a que acabe la partida; el hilo principal tiene que
                 // seguir libre para lo que el núcleo le pida mientras tanto).
                 strongSelf->_menuOpen = NO;
+                strongSelf->_quitting = YES;
                 for (OSNXPad *pad in strongSelf.pads) pad.suspended = YES;
                 if (strongSelf->_api.togglePause) strongSelf->_api.togglePause(false);
                 void (*stopEmulation)(void) = strongSelf->_api.stopEmulation;
@@ -2402,7 +2439,9 @@ static BOOL OSNXNeedsExtendedVirtualAddressing(void) {
             OSNXTeardownDonor(api);
             printf("[OmniStation] main_ryujinx_sdl terminó con %d\n", result);
             fflush(stdout);
-            if (result != 0) {
+            // El mando del núcleo ya se cerró: otra partida necesita reabrir la app.
+            dispatch_async(dispatch_get_main_queue(), ^{ self->_played = YES; });
+            if (result != 0 && !self->_quitting) {
                 NSString *tail = [OSMeloNXEngine logTail];
                 dispatch_async(dispatch_get_main_queue(), ^{
                     [self.gameController showStatus:tail.length ? tail : @"MeloNX se cerró con un error." sticky:YES];
