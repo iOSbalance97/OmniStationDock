@@ -800,12 +800,26 @@ struct HomeView: View {
 
     private func refreshJITStatus(announce: Bool) {
         jitEnabled = DebugSupport.isJITEnabled
+        preparePermanentJITIfPossible()
         if announce {
             if jitEnabled && !OSLibretroEngine.jitActive {
-                showToast(tr("Se activó el JIT, pero el depurador ya no está enganchado y en iOS 26 hace falta. Pulsa «Activar JIT» para volver a engancharlo sin reiniciar."), seconds: 6)
+                showToast(tr("Se activó el JIT, pero el depurador ya no está enganchado y desde iOS 26 hace falta. Pulsa «Activar JIT» para volver a engancharlo sin reiniciar."), seconds: 6)
             } else {
                 showToast(jitEnabled ? tr("JIT activo en esta app") : tr("JIT no activo en esta app"))
             }
+        }
+    }
+
+    /// Con el JIT recién activado (al abrir la app con StikDebug, por ejemplo), el JIT permanente
+    /// se prepara ya: desde ese momento los núcleos que lo usan tienen JIT toda la vida de la app,
+    /// aunque luego se vaya el depurador o la VPN. Solo con nuestro depurador (no el de una partida
+    /// de ARMSX2 o MeloNX, que usan su propio guion) y sin ninguna partida abierta.
+    private func preparePermanentJITIfPossible() {
+        guard OSLibretroEngine.jitActive, !OSLibretroEngine.persistentJITReady, RetroJIT.fresh,
+              !OSLibretroEngine.shared.busy, !OSArmsx2Engine.shared.busy, !OSMeloNXEngine.shared.busy,
+              RetroSystem.allCases.contains(where: { $0.availableCores.contains(where: \.execMem) }) else { return }
+        if OSLibretroEngine.preparePersistentJIT() {
+            showToast(tr("JIT permanente listo"), seconds: 2.5)
         }
     }
 
@@ -1428,7 +1442,7 @@ struct HomeView: View {
             })
         }
         items.append(cancel)
-        return (tr("Script JIT"), tr("Solo cuenta en iPhone con TXM (iOS 26). Automático usa el que necesita cada emulador conocido."), items)
+        return (tr("Script JIT"), tr("Solo cuenta en iPhone con TXM (iOS 26+). Automático usa el que necesita cada emulador conocido."), items)
     }
 
     private func jitScriptTitle(_ choice: JITScriptChoice) -> String {
@@ -2616,7 +2630,7 @@ struct HomeView: View {
         refreshJITStatus(announce: false)
         guard usesBuiltInJIT else {
             if jitEnabled && !OSLibretroEngine.jitActive {
-                showToast(tr("Se activó el JIT, pero el depurador ya no está enganchado y en iOS 26 hace falta. En StikDebug, pon el script «universal» a LiveContainer y vuelve a activar el JIT."), seconds: 7)
+                showToast(tr("Se activó el JIT, pero el depurador ya no está enganchado y desde iOS 26 hace falta. En StikDebug, pon el script «universal» a LiveContainer y vuelve a activar el JIT."), seconds: 7)
             } else {
                 showToast(jitEnabled ? tr("JIT activo en esta app") : tr("JIT no activo en esta app"), seconds: 3)
             }
@@ -3127,7 +3141,9 @@ struct HomeView: View {
         // Depurador enganchado pero ya usado por otra partida u otro emulador: no vale para preparar
         // la memoria de JIT de esta; se suelta y se engancha otra vez.
         let staleJIT: Bool = OSLibretroEngine.jitActive && !RetroJIT.fresh
-        if wantsJIT && (!OSLibretroEngine.jitActive || staleJIT) && canAskSelfJIT, let pairing = PairingFile.data() {
+        // Núcleo con JIT permanente ya preparado: no hace falta depurador (ni VPN) para jugar.
+        let pooled: Bool = chosen.execMem && OSLibretroEngine.persistentJITReady
+        if wantsJIT && !pooled && (!OSLibretroEngine.jitActive || staleJIT) && canAskSelfJIT, let pairing = PairingFile.data() {
             // Al engancharse el depurador la app se para un instante: la música se quita antes y se
             // espera a que acabe el sonido del botón, para que no se oiga entrecortado.
             SoundManager.shared.silenceForGame()
@@ -3159,7 +3175,7 @@ struct HomeView: View {
         // LiveContainer: los núcleos sueltan el depurador al preparar su memoria de JIT, así que en
         // cada juego hay que volver a engancharlo. StikDebug lo hace sobre la app abierta (sin
         // reiniciarla) y se vuelve aquí; si no vuelve con JIT, el juego arranca sin él.
-        if wantsJIT && (!OSLibretroEngine.jitActive || staleJIT) && DebugSupport.isInsideLiveContainer && DebugSupport.isJITEnabled,
+        if wantsJIT && !pooled && (!OSLibretroEngine.jitActive || staleJIT) && DebugSupport.isInsideLiveContainer && DebugSupport.isJITEnabled,
            let url = DebugSupport.enableJITURL {
             SoundManager.shared.updateAmbient(volume: 0)
             // Primero la pantalla de transición (que se vea antes de saltar a StikDebug).
@@ -3182,7 +3198,7 @@ struct HomeView: View {
             return
         }
         // Quiere JIT y no se puede pedir: se dice por qué (si no, parecería que va con JIT).
-        if wantsJIT && !OSLibretroEngine.jitActive && !DebugSupport.isInsideLiveContainer {
+        if wantsJIT && !pooled && !OSLibretroEngine.jitActive && !DebugSupport.isInsideLiveContainer {
             let problem: String = selfJITProblem
             showToast(problem.isEmpty ? tr("Sin JIT: el juego va en modo intérprete.") : tr("Sin JIT (%@). El juego va en modo intérprete.", problem), seconds: 4.5)
         }
@@ -3204,7 +3220,14 @@ struct HomeView: View {
         hideJITTransition()
         guard !OSLibretroEngine.shared.busy else { return }
         // JIT de verdad ahora y el juego lo quiere (si no, el núcleo que solo va con JIT no vale).
-        let jit: Bool = OSLibretroEngine.jitActive && RetroConfig.wantsJIT(system, gameID: game.id)
+        let wanted: RetroCore? = RetroConfig.core(for: system, gameID: game.id)
+        // Con el depurador enganchado, el JIT permanente se prepara ya (una vez): desde entonces los
+        // núcleos que lo usan tienen JIT siempre, sin StikDebug ni VPN.
+        if wanted?.execMem == true && OSLibretroEngine.jitActive && !OSLibretroEngine.persistentJITReady {
+            _ = OSLibretroEngine.preparePersistentJIT()
+        }
+        let jitNow: Bool = wanted.map { RetroConfig.jitAvailable(for: $0) } ?? OSLibretroEngine.jitActive
+        let jit: Bool = jitNow && RetroConfig.wantsJIT(system, gameID: game.id)
         guard let file = item.fileName, let core = RetroConfig.playableCore(for: system, gameID: game.id, jit: jit) else {
             showToast(tr("Este núcleo necesita JIT. Elige otro núcleo en los ajustes de %@.", system.title), seconds: 5)
             releaseRetroJIT()
@@ -3228,6 +3251,12 @@ struct HomeView: View {
         let language: String = L10n.resolve(appLanguage)
         // Opciones del núcleo en el menú de la partida: lo que se cambie ahí se guarda para este juego.
         OSLibretroEngine.shared.menuOptions = RetroCoreOptions.menuOptions(for: core, current: options.core, language: language)
+        let coreValues: [String: String] = options.core
+        OSLibretroEngine.shared.menuOptionsProvider = {
+            // Núcleo que declara sus opciones al prepararse: se guardan y salen ya en esta partida.
+            RetroCoreOptions.remember(core, list: OSLibretroEngine.shared.lastSessionOptions)
+            return RetroCoreOptions.menuOptions(for: core, current: coreValues, language: language)
+        }
         let gameID: String = game.id
         OSLibretroEngine.shared.menuOptionChanged = { key, value in
             EmulatorConfig.setGame(.retro(system), gameID, "opt." + key, value)
@@ -3254,6 +3283,7 @@ struct HomeView: View {
             },
             ended: {
                 RetroConfig.recordMemoryPeak(system, megabytes: Int(OSLibretroEngine.shared.lastSessionPeakMB))
+                RetroCoreOptions.remember(core, list: OSLibretroEngine.shared.lastSessionOptions)
                 endIntegratedSession()
                 releaseRetroJIT()
             }
@@ -5191,7 +5221,9 @@ struct HomeView: View {
         // En iOS 26 el JIT solo vale mientras el depurador sigue enganchado: el estado dice la verdad.
         let jitUsable: Bool = jitEnabled && OSLibretroEngine.jitActive
         let jitControl: SettingControl = jitUsable ? .badge("ON", Color.green) : (jitEnabled ? .badge(tr("SUELTO"), Color.orange) : .badge("OFF", Color.gray))
-        let jitSubtitle: String = jitUsable ? tr("Activo en esta app") : (jitEnabled ? tr("Se activó, pero el depurador ya no está enganchado") : tr("No activo en esta app"))
+        var jitSubtitle: String = jitUsable ? tr("Activo en esta app") : (jitEnabled ? tr("Se activó, pero el depurador ya no está enganchado") : tr("No activo en esta app"))
+        // El JIT permanente (núcleos compilados por OmniStation) sigue valiendo sin depurador.
+        if OSLibretroEngine.persistentJITReady { jitSubtitle += " · " + tr("JIT permanente listo") }
         let stikFailure: String = tr("No se pudo abrir StikDebug. ¿Está instalado?")
         var items: [SettingItem] = []
         items.append(SettingItem(id: "installMethod", title: tr("Método de instalación"), subtitle: installMethodTitle(method), symbol: method?.symbol ?? "questionmark.app.fill", tint: SettingTint.violet, control: .symbol("chevron.right"), action: {

@@ -165,7 +165,7 @@ enum RetroCoreOptions {
                     CuratedOption(key: "citra_use_virtual_sd", tab: s, title: "Tarjeta SD virtual"),
                     CuratedOption(key: "citra_analog_deadzone", tab: i, title: "Zona muerta del stick"),
                     CuratedOption(key: "citra_enable_motion", tab: i, title: "Sensor de movimiento")]
-        case "dolphin":
+        case "dolphin", "dolphin_omni":
             return [CuratedOption(key: "dolphin_efb_scale", tab: g, title: "Resolución interna"),
                     CuratedOption(key: "dolphin_widescreen", tab: g, title: "Panorámico (16:9)"),
                     CuratedOption(key: "dolphin_widescreen_hack", tab: g, title: "Panorámico (truco)"),
@@ -194,7 +194,7 @@ enum RetroCoreOptions {
             "citra_enable_mouse_touchscreen", "citra_use_default_aes_key", "citra_layout_option",
             "dolphin_cpu_core", "dolphin_cpu_clock_rate", "dolphin_osd_enabled", "dolphin_fast_disc_speed",
             "dolphin_gpu_texture_decoding", "dolphin_shader_compilation_mode", "dolphin_vi_skip",
-            "dolphin_skip_gc_bios", "dolphin_log_level"
+            "dolphin_skip_gc_bios", "dolphin_log_level", "dolphin_renderer"
         ]
         if fixed.contains(key) { return true }
         // Las pantallas de NDS van con la orientación.
@@ -230,6 +230,17 @@ enum RetroCoreOptions {
         let clean: [[String: Any]] = list
         memory[core.framework] = clean
         if let data = try? JSONSerialization.data(withJSONObject: clean) {
+            try? data.write(to: file(core), options: .atomic)
+        }
+    }
+
+    /// Las que declaró el núcleo al jugar (los que solo las declaran al prepararse): se guardan si
+    /// aún no se tenían.
+    static func remember(_ core: RetroCore, list: [[String: Any]]?) {
+        guard let list, !list.isEmpty else { return }
+        if let known = cached(core), !known.isEmpty { return }
+        memory[core.framework] = list
+        if let data = try? JSONSerialization.data(withJSONObject: list) {
             try? data.write(to: file(core), options: .atomic)
         }
     }

@@ -26,6 +26,9 @@ struct RetroCore: Hashable {
     var gpu: Bool = false
     /// Pinta con la GPU por Vulkan (MoltenVK): 3DS, GameCube y Wii.
     var vulkan: Bool = false
+    /// Pide su memoria de JIT a OmniStation (RETRO_ENVIRONMENT_EXEC_MEM_ALLOC): usa el JIT
+    /// permanente y no necesita el depurador en cada partida. Los compilados por OmniStation.
+    var execMem: Bool = false
 }
 
 enum RetroSystem: String, CaseIterable, Identifiable {
@@ -144,7 +147,10 @@ enum RetroSystem: String, CaseIterable, Identifiable {
         case .n3ds:
             return [RetroCore(id: "azahar", name: "Azahar", framework: "azahar.libretro.framework", jit: true, gpu: true, vulkan: true)]
         case .gc, .wii:
-            return [RetroCore(id: "dolphin", name: "Dolphin", framework: "dolphin.libretro.framework", jit: true, gpu: true, vulkan: true)]
+            // Primero el compilado por OmniStation (Dolphin de libretro, con JIT permanente) si va en
+            // esta compilación; si no, el de ManicEMU.
+            return [RetroCore(id: "dolphin_omni", name: "Dolphin (OmniStation)", framework: "dolphin_omni.libretro.framework", jit: true, gpu: true, vulkan: true, execMem: true),
+                    RetroCore(id: "dolphin", name: "Dolphin (ManicEMU)", framework: "dolphin.libretro.framework", jit: true, gpu: true, vulkan: true)]
         }
     }
 
@@ -389,6 +395,12 @@ enum RetroConfig {
         }
     }
 
+    /// ¿Tendrá JIT de verdad esta partida? Con el depurador enganchado, o (los núcleos que piden su
+    /// memoria a OmniStation) con el JIT permanente ya preparado.
+    static func jitAvailable(for core: RetroCore) -> Bool {
+        OSLibretroEngine.jitActive || (core.execMem && OSLibretroEngine.persistentJITReady)
+    }
+
     /// ¿Quiere este juego usar el JIT? (Ajuste «Usar JIT»; por defecto sí.)
     static func wantsJIT(_ system: RetroSystem, gameID: String?) -> Bool {
         guard system.usesJIT else { return false }
@@ -418,6 +430,8 @@ enum RetroConfig {
         host["jit"] = (core.jit && wants) ? "true" : "false"
         host["jitOption"] = core.jit ? "true" : "false"
         host["gpu"] = core.vulkan ? "vulkan" : (core.gpu ? "true" : "false")
+        // Núcleo que pide su memoria de JIT a OmniStation: puede usar el JIT permanente.
+        host["jitPool"] = core.execMem ? "true" : "false"
         // Lo que cada núcleo necesita para ir bien aquí (como lo deja ManicEMU), con o sin JIT.
         switch core.id {
         case "melondsds":
@@ -473,6 +487,12 @@ enum RetroConfig {
             coreOptions["dolphin_shader_compilation_mode"] = useJIT ? "0" : "3"
             coreOptions["dolphin_vi_skip"] = useJIT ? "disabled" : "enabled"
             coreOptions["dolphin_skip_gc_bios"] = "disabled"
+            coreOptions["dolphin_log_level"] = "1"
+        case "dolphin_omni":
+            // Dolphin de libretro: él mismo mira si OmniStation le da memoria de JIT (si no, intérprete).
+            coreOptions["dolphin_renderer"] = "Hardware"
+            coreOptions["dolphin_cpu_core"] = useJIT ? "4" : "5"
+            coreOptions["dolphin_osd_enabled"] = "disabled"
             coreOptions["dolphin_log_level"] = "1"
         default:
             break

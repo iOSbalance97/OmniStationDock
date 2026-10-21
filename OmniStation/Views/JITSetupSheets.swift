@@ -96,7 +96,7 @@ struct JITSetupSheet: View {
     /// Solo informa: con TXM se usa el script de cada app, sin TXM basta con conectar.
     private var txmRow: some View {
         let known: Bool = BuiltInJIT.txmPresent != nil
-        return statusRow(tr("TXM (iOS 26)"), ok: known ? true : nil, detail: txmText)
+        return statusRow(tr("TXM (iOS 26+)"), ok: known ? true : nil, detail: txmText)
     }
 
     private var txmText: String {

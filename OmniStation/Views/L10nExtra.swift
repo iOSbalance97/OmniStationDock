@@ -350,7 +350,7 @@ extension L10n {
         "PCSX ReARMed va sin BIOS. Beetle PSX HW la necesita: scph5501.bin (o scph5500.bin / scph5502.bin).": "PCSX ReARMed works without a BIOS. Beetle PSX HW needs one: scph5501.bin (or scph5500.bin / scph5502.bin).",
         "Opcional: dc_boot.bin y dc_flash.bin dentro de BIOS → dc (sin ellas, Flycast usa su BIOS interna).": "Optional: dc_boot.bin and dc_flash.bin inside BIOS → dc (without them, Flycast uses its built-in BIOS).",
         "Flycast (sin JIT)": "Flycast (no JIT)",
-        "Se activó el JIT, pero el depurador ya no está enganchado y en iOS 26 hace falta. En StikDebug, pon el script «universal» a LiveContainer y vuelve a activar el JIT.": "JIT was enabled, but the debugger is no longer attached and iOS 26 needs it. In StikDebug, assign the “universal” script to LiveContainer and enable JIT again.",
+        "Se activó el JIT, pero el depurador ya no está enganchado y desde iOS 26 hace falta. En StikDebug, pon el script «universal» a LiveContainer y vuelve a activar el JIT.": "JIT was enabled, but the debugger is no longer attached and iOS 26 and later need it. In StikDebug, assign the “universal” script to LiveContainer and enable JIT again.",
         "Los juegos se reconocen solos": "Games are recognised automatically",
         "Importa prod.keys para que los juegos se reconozcan solos": "Import prod.keys so games are recognised automatically",
         "MeloNX: importa tus claves (prod.keys) para que OmniStation reconozca y abra sus juegos solo.": "MeloNX: import your keys (prod.keys) so OmniStation recognises and opens its games by itself.",
@@ -362,7 +362,7 @@ extension L10n {
         "SUELTO": "DETACHED",
         "Se activó, pero el depurador ya no está enganchado": "Enabled, but the debugger is no longer attached",
         "Con StikDebug, sin reiniciar la app": "With StikDebug, without restarting the app",
-        "Se activó el JIT, pero el depurador ya no está enganchado y en iOS 26 hace falta. Pulsa «Activar JIT» para volver a engancharlo sin reiniciar.": "JIT was enabled, but the debugger is no longer attached and iOS 26 needs it. Tap “Enable JIT” to attach it again without restarting.",
+        "Se activó el JIT, pero el depurador ya no está enganchado y desde iOS 26 hace falta. Pulsa «Activar JIT» para volver a engancharlo sin reiniciar.": "JIT was enabled, but the debugger is no longer attached and iOS 26 and later need it. Tap “Enable JIT” to attach it again without restarting.",
         "Las opciones de este núcleo salen aquí en cuanto se puedan leer.": "This core's options show up here as soon as they can be read.",
         "Calidad": "Quality",
         "Renderizado": "Rendering",
@@ -393,6 +393,7 @@ extension L10n {
         "Elegir en Archivos (LiveContainer → Applications)": "Choose in Files (LiveContainer → Applications)",
         "Escribir el nombre": "Type the name",
         "Elige la app de %@ entre las de LiveContainer.": "Choose the %@ app among LiveContainer's apps.",
-        "Elige la carpeta .app de %@ en Archivos → LiveContainer → Applications, o escribe su nombre.": "Choose the %@ .app folder in Files → LiveContainer → Applications, or type its name."
+        "Elige la carpeta .app de %@ en Archivos → LiveContainer → Applications, o escribe su nombre.": "Choose the %@ .app folder in Files → LiveContainer → Applications, or type its name.",
+        "JIT permanente listo": "permanent JIT ready"
     ]
 }
