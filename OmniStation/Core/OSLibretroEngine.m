@@ -112,6 +112,10 @@ static _Atomic bool gInputSuspended;
 static struct retro_frame_time_callback gFrameTimeCallback;
 static bool gHasFrameTimeCallback;
 static _Atomic bool gShutdownRequested;
+// Bucle de emulación: en marcha, en pausa (menú) y lo que pide el menú (-1: nada).
+static _Atomic bool gRunning;
+static _Atomic bool gPaused;
+static _Atomic int gPendingAction = -1;
 
 typedef void (^OSLRMessageBlock)(NSString *message);
 static OSLRMessageBlock gMessageHandler;
@@ -1299,9 +1303,6 @@ typedef NS_ENUM(NSInteger, OSLRMenuAction) {
 @implementation OSLibretroEngine {
     NSMutableDictionary<NSString *, NSValue *> *_handles;
     NSThread *_thread;
-    _Atomic bool _running;
-    _Atomic bool _paused;
-    _Atomic int _pendingAction;
     OSLRAudio *_audio;
     NSData *_gameData;
     NSString *_savePath;
@@ -1320,7 +1321,7 @@ typedef NS_ENUM(NSInteger, OSLRMenuAction) {
     self = [super init];
     if (self) {
         _handles = [NSMutableDictionary new];
-        atomic_store(&_pendingAction, -1);
+        atomic_store(&gPendingAction, -1);
     }
     return self;
 }
@@ -1529,9 +1530,9 @@ typedef NS_ENUM(NSInteger, OSLRMenuAction) {
     double frameTime = 1.0 / gFPS;
     double next = OSLRNow();
     double lastAutosave = next;
-    while (atomic_load(&_running) && !atomic_load(&gShutdownRequested)) {
+    while (atomic_load(&gRunning) && !atomic_load(&gShutdownRequested)) {
         @autoreleasepool {
-            int action = atomic_exchange(&_pendingAction, -1);
+            int action = atomic_exchange(&gPendingAction, -1);
             if (action == OSLRMenuActionSaveState) {
                 BOOL ok = [self saveState];
                 [self showStatus:ok ? OSLRText(_language, @"Estado guardado", @"State saved") : OSLRText(_language, @"No se pudo guardar el estado", @"Could not save the state")];
@@ -1541,7 +1542,7 @@ typedef NS_ENUM(NSInteger, OSLRMenuAction) {
             } else if (action == OSLRMenuActionReset) {
                 gCore.reset();
             }
-            if (atomic_load(&_paused)) {
+            if (atomic_load(&gPaused)) {
                 [NSThread sleepForTimeInterval:0.02];
                 next = OSLRNow();
                 continue;
@@ -1652,9 +1653,9 @@ typedef NS_ENUM(NSInteger, OSLRMenuAction) {
     atomic_store(&gFrameSerial, 0);
     atomic_store(&gFrameCount, 0);
     atomic_store(&gAspect, 4.0 / 3.0);
-    atomic_store(&_paused, false);
-    atomic_store(&_pendingAction, -1);
-    atomic_store(&_running, true);
+    atomic_store(&gPaused, false);
+    atomic_store(&gPendingAction, -1);
+    atomic_store(&gRunning, true);
     os_unfair_lock_lock(&gFrameLock);
     gFrameWidth = 0;
     gFrameHeight = 0;
@@ -1691,7 +1692,7 @@ typedef NS_ENUM(NSInteger, OSLRMenuAction) {
     controller.menuChanged = ^(BOOL open) {
         OSLibretroEngine *strongSelf = weakSelf;
         if (!strongSelf) return;
-        atomic_store(&strongSelf->_paused, open);
+        atomic_store(&gPaused, open);
         atomic_store(&gInputSuspended, open);
     };
     controller.menuAction = ^(NSInteger action) {
@@ -1699,11 +1700,11 @@ typedef NS_ENUM(NSInteger, OSLRMenuAction) {
         if (!strongSelf) return;
         if (action == OSLRMenuActionQuit) {
             weakController.closing = YES;
-            atomic_store(&strongSelf->_running, false);
-            atomic_store(&strongSelf->_paused, false);
+            atomic_store(&gRunning, false);
+            atomic_store(&gPaused, false);
             return;
         }
-        if (action != OSLRMenuActionResume) atomic_store(&strongSelf->_pendingAction, (int)action);
+        if (action != OSLRMenuActionResume) atomic_store(&gPendingAction, (int)action);
     };
     gMessageHandler = ^(NSString *message) {
         [weakController showStatus:message];
