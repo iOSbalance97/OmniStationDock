@@ -147,10 +147,8 @@ enum RetroSystem: String, CaseIterable, Identifiable {
         case .n3ds:
             return [RetroCore(id: "azahar", name: "Azahar", framework: "azahar.libretro.framework", jit: true, gpu: true, vulkan: true)]
         case .gc, .wii:
-            // Primero el compilado por OmniStation (Dolphin de libretro, con JIT permanente) si va en
-            // esta compilación; si no, el de ManicEMU.
-            return [RetroCore(id: "dolphin_omni", name: "Dolphin (OmniStation)", framework: "dolphin_omni.libretro.framework", jit: true, gpu: true, vulkan: true, execMem: true),
-                    RetroCore(id: "dolphin", name: "Dolphin (ManicEMU)", framework: "dolphin.libretro.framework", jit: true, gpu: true, vulkan: true)]
+            // El compilado por OmniStation (Dolphin de libretro, con JIT permanente).
+            return [RetroCore(id: "dolphin_omni", name: "Dolphin", framework: "dolphin_omni.libretro.framework", jit: true, gpu: true, vulkan: true, execMem: true)]
         }
     }
 
@@ -477,17 +475,6 @@ enum RetroConfig {
             host["orient.key"] = "citra_layout_option"
             host["orient.portrait"] = "default"
             host["orient.landscape"] = "side_by_side"
-        case "dolphin":
-            // Lo mismo que deja ManicEMU con y sin JIT (4: JIT ARM64; 6: su intérprete rápido).
-            coreOptions["dolphin_cpu_core"] = useJIT ? "4" : "6"
-            coreOptions["dolphin_cpu_clock_rate"] = useJIT ? "1.00" : "0.40"
-            coreOptions["dolphin_osd_enabled"] = "disabled"
-            coreOptions["dolphin_fast_disc_speed"] = useJIT ? "disabled" : "enabled"
-            coreOptions["dolphin_gpu_texture_decoding"] = useJIT ? "disabled" : "enabled"
-            coreOptions["dolphin_shader_compilation_mode"] = useJIT ? "0" : "3"
-            coreOptions["dolphin_vi_skip"] = useJIT ? "disabled" : "enabled"
-            coreOptions["dolphin_skip_gc_bios"] = "disabled"
-            coreOptions["dolphin_log_level"] = "1"
         case "dolphin_omni":
             // Dolphin de libretro: él mismo mira si OmniStation le da memoria de JIT (si no, intérprete).
             coreOptions["dolphin_renderer"] = "Hardware"

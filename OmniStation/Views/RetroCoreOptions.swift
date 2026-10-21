@@ -165,7 +165,7 @@ enum RetroCoreOptions {
                     CuratedOption(key: "citra_use_virtual_sd", tab: s, title: "Tarjeta SD virtual"),
                     CuratedOption(key: "citra_analog_deadzone", tab: i, title: "Zona muerta del stick"),
                     CuratedOption(key: "citra_enable_motion", tab: i, title: "Sensor de movimiento")]
-        case "dolphin", "dolphin_omni":
+        case "dolphin_omni":
             return [CuratedOption(key: "dolphin_efb_scale", tab: g, title: "Resolución interna"),
                     CuratedOption(key: "dolphin_widescreen", tab: g, title: "Panorámico (16:9)"),
                     CuratedOption(key: "dolphin_widescreen_hack", tab: g, title: "Panorámico (truco)"),

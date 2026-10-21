@@ -97,7 +97,7 @@ private enum SettingsDialog {
     case assignPlatform, externalFolder
     case jitEnabler, jitScript, emulatorLocation, emulatorBundle, emulatorUpdate, emulatorFolder, emulatorHelp
     case coverOptions
-    case armsx2Mode, armsx2CoreGames, armsx2CoreHelp, armsx2CoreFlavor
+    case armsx2Mode, armsx2CoreGames, armsx2CoreHelp
     case melonxMode, melonxCoreGames, melonxCoreHelp, memoryHelp
     case retroSystem
     case lcFolderPick
@@ -161,8 +161,6 @@ struct HomeView: View {
     /// PS2: app ARMSX2 aparte («external») o núcleo integrado («integrated»).
     @AppStorage(ARMSX2Mode.storageKey) private var armsx2ModeRaw = ARMSX2Mode.external.rawValue
     @AppStorage(ARMSX2CoreFolders.touchAlwaysKey) private var armsx2TouchAlways = false
-    /// Núcleo de ARMSX2 integrado: el de NeoStation o el compilado por OmniStation.
-    @AppStorage("armsx2CoreFlavor") private var armsx2CoreFlavorRaw = "neostation"
     /// Switch: app MeloNX aparte («external») o MeloNX integrado («integrated»).
     @AppStorage(MeloNXMode.storageKey) private var melonxModeRaw = MeloNXMode.external.rawValue
     /// Durante una partida de un núcleo integrado, el juego va a pantalla completa en la tele.
@@ -1375,8 +1373,6 @@ struct HomeView: View {
             return (tr("ARMSX2 integrado"), tr("Necesita:\n• OmniStation instalada con SideStore o AltStore (no en LiveContainer), sin quitarle su extensión de JIT.\n• iOS 18 o posterior y Modo desarrollador.\n• Archivo de emparejamiento RPPairing y la VPN LocalDevVPN conectada.\n• Tu BIOS de PS2 en ARMSX2 → BIOS.\nTodo lo de ARMSX2 (juegos, BIOS, tarjetas de memoria, estados, texturas, trucos) queda en Archivos → OmniStation Dock → ARMSX2.\nCon mando: Home o SELECT+START abre el menú del juego."), [
                 PadMenuItem(title: tr("Entendido"), kind: .cancel) { closePadMenu() }
             ])
-        case .armsx2CoreFlavor:
-            return armsx2CoreFlavorMenu(cancel)
         case .melonxMode:
             return melonxModeMenu(cancel)
         case .melonxCoreGames:
@@ -2849,15 +2845,12 @@ struct HomeView: View {
         var items: [SettingItem] = [armsx2ModeItem]
         let bundled: Bool = OSArmsx2Engine.coreBundled
         let revision: String = OSArmsx2Engine.shared.coreRevision
-        let flavorName: String = OSArmsx2Engine.coreFlavor == "omnistation" ? "OmniStation" : "NeoStation"
-        let baseText: String = revision.isEmpty ? "ARMSX2 iOS 2.6" : "ARMSX2 " + String(revision.prefix(8))
-        let coreText: String = bundled ? baseText + " · " + flavorName : tr("No incluido en esta compilación")
+        let details: String = OSArmsx2Engine.omniStationCoreDetails
+        let baseText: String = revision.isEmpty ? "ARMSX2 (OmniStation)" : "ARMSX2 " + String(revision.prefix(8))
+        let coreText: String = bundled ? (details.isEmpty ? baseText : baseText + " · " + details) : tr("No incluido en esta compilación")
         let coreControl: SettingControl = bundled ? .badge("OK", Color.green) : .badge(tr("FALTA"), Color.orange)
         items.append(SettingItem(id: "armsx2CoreStatus", title: tr("Núcleo"), subtitle: coreText, symbol: "cpu", tint: SettingTint.blue, control: coreControl, action: {
             dialog = .armsx2CoreHelp
-        }))
-        items.append(SettingItem(id: "armsx2CoreFlavor", title: tr("Versión del núcleo"), subtitle: armsx2FlavorSubtitle, symbol: "square.stack.3d.up.fill", tint: SettingTint.blue, control: .symbol("chevron.right"), action: {
-            dialog = .armsx2CoreFlavor
         }))
         let count: Int = libraryGames.filter { $0.source == ARMSX2CoreFolders.source }.count
         items.append(SettingItem(id: "armsx2CoreGames", title: tr("Juegos"), subtitle: "ARMSX2/Juegos", symbol: "externaldrive.fill", tint: SettingTint.blue, control: .badge("\(count)", Color.green), action: {
@@ -3257,6 +3250,15 @@ struct HomeView: View {
             RetroCoreOptions.remember(core, list: OSLibretroEngine.shared.lastSessionOptions)
             return RetroCoreOptions.menuOptions(for: core, current: coreValues, language: language)
         }
+        // A los pocos segundos de jugar, el motor suelta el depurador (el JIT ya está preparado): con
+        // SideStore se cierra entonces la extensión, y la partida ya no depende de la VPN ni de la red.
+        OSLibretroEngine.shared.debuggerReleasedHandler = {
+            guard RetroJIT.holding else { return }
+            RetroJIT.holding = false
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
+                OSMeloNXEngine.shared.releaseSharedJIT()
+            }
+        }
         let gameID: String = game.id
         OSLibretroEngine.shared.menuOptionChanged = { key, value in
             EmulatorConfig.setGame(.retro(system), gameID, "opt." + key, value)
@@ -3407,43 +3409,6 @@ struct HomeView: View {
         controllers.navigationEnabled = true
         SoundManager.shared.updateAmbient(volume: volumeAmbient)
         emulatorRevision += 1
-    }
-
-    // MARK: - Versión del núcleo de ARMSX2 (NeoStation u OmniStation)
-
-    private var armsx2FlavorSubtitle: String {
-        _ = emulatorRevision
-        let chosen: String = OSArmsx2Engine.coreFlavor == "omnistation" ? "OmniStation" : "NeoStation"
-        let details: String = OSArmsx2Engine.coreFlavor == "omnistation" ? OSArmsx2Engine.omniStationCoreDetails : ""
-        return details.isEmpty ? chosen : chosen + " · " + details
-    }
-
-    private func armsx2CoreFlavorMenu(_ cancel: PadMenuItem) -> PadMenuContent {
-        let current: String = OSArmsx2Engine.coreFlavor
-        let loaded: String = OSArmsx2Engine.loadedCoreFlavor
-        var items: [PadMenuItem] = []
-        let options: [(flavor: String, title: String, bundled: Bool)] = [
-            ("neostation", tr("NeoStation (compilado por NeoStation iOS)"), OSArmsx2Engine.neoStationCoreBundled),
-            ("omnistation", tr("OmniStation (compilado por nosotros)"), OSArmsx2Engine.omniStationCoreBundled),
-        ]
-        for option in options {
-            let title: String = option.bundled ? option.title : option.title + " — " + tr("no incluido")
-            items.append(PadMenuItem(title: checked(title, current == option.flavor)) {
-                closePadMenu()
-                guard option.bundled else {
-                    showToast(tr("Esa versión no va en esta compilación."), seconds: 3.5)
-                    return
-                }
-                armsx2CoreFlavorRaw = option.flavor
-                emulatorRevision += 1
-                if !loaded.isEmpty && loaded != option.flavor {
-                    showToast(tr("Se usará al volver a abrir OmniStation (ya hay un núcleo cargado)."), seconds: 4.5)
-                }
-            })
-        }
-        items.append(cancel)
-        let message: String = tr("Mismo ARMSX2 2.6; el de OmniStation se compila con LTO, como la app oficial. Prueba los dos y quédate con el que vaya mejor.")
-        return (tr("Versión del núcleo"), message, items)
     }
 
     // MARK: - MeloNX integrado (Switch dentro de OmniStation)
