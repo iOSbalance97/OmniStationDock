@@ -1,0 +1,131 @@
+name: Build libretro cores (OmniStation)
+
+# Compila núcleos libretro desde su código (Cores/Libretro/sources.json) y los publica como release
+# «libretro-cores» de este repositorio. El workflow de la app los descarga de ahí (no los vuelve a
+# compilar). De momento: Dolphin (GameCube/Wii), que pide su memoria de JIT a OmniStation y usa el
+# JIT permanente. Tarda bastante (30-60 min de Mac): lánzalo solo cuando quieras un núcleo nuevo.
+on:
+  workflow_dispatch:
+    inputs:
+      core:
+        description: "Núcleo"
+        type: choice
+        options:
+          - dolphin
+        default: dolphin
+
+permissions:
+  contents: write
+
+concurrency:
+  group: libretro-cores
+  cancel-in-progress: false
+
+jobs:
+  core:
+    runs-on: macos-26
+    timeout-minutes: 150
+    env:
+      HOMEBREW_NO_AUTO_UPDATE: "1"
+      CORE: ${{ inputs.core }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Read pinned source
+        id: source
+        run: |
+          python3 - <<'PY'
+          import json, os, re
+          from pathlib import Path
+          info = json.loads(Path('Cores/Libretro/sources.json').read_text())[os.environ['CORE']]
+          assert info['repository'].startswith('https://github.com/')
+          assert re.fullmatch('[0-9a-f]{40}', info['revision'])
+          repo = info['repository'].removeprefix('https://github.com/').removesuffix('.git')
+          with open(os.environ['GITHUB_OUTPUT'], 'a') as output:
+              print('repository=' + repo, file=output)
+              print('revision=' + info['revision'], file=output)
+              print('framework=' + info['framework'], file=output)
+          PY
+
+      - name: Checkout core source
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ steps.source.outputs.repository }}
+          ref: ${{ steps.source.outputs.revision }}
+          path: .native-sources/${{ inputs.core }}
+          submodules: recursive
+          persist-credentials: false
+
+      - name: Select Xcode and tools
+        run: |
+          set -euo pipefail
+          sudo xcode-select -switch /Applications/Xcode.app
+          xcodebuild -version
+          # Lo mismo que instala el workflow de iOS del propio Dolphin de libretro.
+          brew install cmake mbedtls zlib || true
+          cmake --version
+          bash -n Cores/Libretro/build_core.sh
+
+      - name: Compile core
+        run: bash Cores/Libretro/build_core.sh "$CORE" ".native-sources/$CORE"
+
+      - name: Package core
+        run: |
+          set -euo pipefail
+          cd dist/libretro
+          FW="${{ steps.source.outputs.framework }}.libretro.framework"
+          ditto -c -k --keepParent "$FW" "$FW.zip"
+          if [ -d dolphin-sys ]; then ditto -c -k dolphin-sys dolphin-sys.zip; fi
+          python3 - "$CORE" "${{ steps.source.outputs.repository }}" "${{ steps.source.outputs.revision }}" "$FW" <<'PY'
+          import json, sys
+          core, repo, revision, framework = sys.argv[1:5]
+          try:
+              data = json.load(open('cores.json'))
+          except Exception:
+              data = {}
+          data[core] = {"repository": repo, "revision": revision, "framework": framework}
+          json.dump(data, open('cores.json', 'w'), indent=2)
+          PY
+          ls -l
+
+      # La release guarda todos los núcleos: se bajan los que ya había, se añade/cambia este.
+      - name: Publish release libretro-cores
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          cd dist/libretro
+          mkdir -p previous
+          gh release download libretro-cores --repo "$GITHUB_REPOSITORY" --dir previous 2>/dev/null || true
+          if [ -f previous/cores.json ]; then
+            python3 - <<'PY'
+          import json
+          old = json.load(open('previous/cores.json'))
+          new = json.load(open('cores.json'))
+          old.update(new)
+          json.dump(old, open('cores.json', 'w'), indent=2)
+          PY
+          fi
+          FW="${{ steps.source.outputs.framework }}.libretro.framework"
+          for file in previous/*.zip; do
+            [ -f "$file" ] || continue
+            name="$(basename "$file")"
+            [ -f "$name" ] || cp "$file" "$name"
+          done
+          gh release delete libretro-cores --repo "$GITHUB_REPOSITORY" --cleanup-tag --yes 2>/dev/null || true
+          gh release create libretro-cores --repo "$GITHUB_REPOSITORY" ./*.zip cores.json \
+            --title "Núcleos libretro (OmniStation)" \
+            --notes "Núcleos libretro compilados por OmniStation Dock desde su código (Cores/Libretro/sources.json). Los usa el workflow de la app." \
+            --prerelease
+
+      - name: Upload build logs
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: libretro-${{ inputs.core }}-logs
+          path: build/libretro-${{ inputs.core }}/*.log
+          if-no-files-found: ignore
+          retention-days: 7
