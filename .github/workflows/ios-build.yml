@@ -182,8 +182,9 @@ jobs:
           fi
           python3 -I tools/fetch_melonx_runtime.py Vendor/MeloNX "$LOCAL"
 
-      # Núcleos libretro de ManicEMU (NES, SNES, Game Boy, GBA y NDS) sacados de su IPA pública.
-      # Opcionales: si no se consiguen, la app va sin ellos. En caché por versión de ManicEMU.
+      # Núcleos libretro de ManicEMU (NES, SNES, Game Boy, GBA, NDS, PS1, N64, PSP y Dreamcast)
+      # sacados de su IPA pública. Opcionales: si no se consiguen, la app va sin ellos. En caché por
+      # versión de ManicEMU y por la lista de núcleos (tools/fetch_manic_cores.py).
       - name: Cache ManicEMU cores
         id: manic-cache
         uses: actions/cache@v4
@@ -206,6 +207,42 @@ jobs:
           ls -l "$RUNNER_TEMP/manic"
           python3 -I tools/fetch_manic_cores.py Vendor/Libretro "$RUNNER_TEMP/manic"
           rm -rf "$RUNNER_TEMP/manic"
+
+      # Archivos que necesita PPSSPP (PSP) en su carpeta de sistema: los de PPSSPP (assets) y las
+      # tablas VFPU de ManicEMU (las mismas que usa su núcleo). Opcionales y en caché.
+      - name: Cache PPSSPP assets
+        id: ppsspp-cache
+        uses: actions/cache@v4
+        with:
+          path: Vendor/LibretroSystem
+          key: libretro-system-ppsspp-v1
+
+      - name: Fetch PPSSPP assets (optional)
+        if: steps.ppsspp-cache.outputs.cache-hit != 'true'
+        run: |
+          set -uo pipefail
+          rm -rf Vendor/LibretroSystem "$RUNNER_TEMP/ppsspp" "$RUNNER_TEMP/manic-src"
+          if git clone --depth 1 --filter=blob:none --sparse https://github.com/hrydgard/ppsspp.git "$RUNNER_TEMP/ppsspp" \
+             && git -C "$RUNNER_TEMP/ppsspp" sparse-checkout set assets; then
+            mkdir -p Vendor/LibretroSystem
+            cp -R "$RUNNER_TEMP/ppsspp/assets" Vendor/LibretroSystem/PPSSPP
+            rm -rf Vendor/LibretroSystem/PPSSPP/debugger Vendor/LibretroSystem/PPSSPP/upload \
+              Vendor/LibretroSystem/PPSSPP/themes Vendor/LibretroSystem/PPSSPP/ui_images
+            if [ ! -f Vendor/LibretroSystem/PPSSPP/ppge_atlas.zim ]; then
+              echo "::warning::Los archivos de PPSSPP no están completos: la PSP irá sin ellos."
+              rm -rf Vendor/LibretroSystem
+            fi
+          else
+            echo "::warning::No se pudieron descargar los archivos de PPSSPP: la PSP irá sin ellos."
+          fi
+          if [ -d Vendor/LibretroSystem/PPSSPP ] \
+             && GIT_LFS_SKIP_SMUDGE=1 git clone --depth 1 --filter=blob:none --sparse https://github.com/Manic-EMU/ManicEMU.git "$RUNNER_TEMP/manic-src" \
+             && git -C "$RUNNER_TEMP/manic-src" sparse-checkout set System.core/Libretro/system/PPSSPP/vfpu; then
+            mkdir -p Vendor/LibretroSystem/PPSSPP/vfpu
+            cp "$RUNNER_TEMP"/manic-src/System.core/Libretro/system/PPSSPP/vfpu/*.dat Vendor/LibretroSystem/PPSSPP/vfpu/ || true
+          fi
+          rm -rf "$RUNNER_TEMP/ppsspp" "$RUNNER_TEMP/manic-src"
+          du -sh Vendor/LibretroSystem 2>/dev/null || true
 
       - name: Generate Xcode project
         run: xcodegen generate
@@ -265,6 +302,11 @@ jobs:
               cp -R "$item" "Payload/OmniStationDock.app/Frameworks/$name"
             done
             cp Vendor/Libretro/cores.json Payload/OmniStationDock.app/LibretroCores.json
+          fi
+          # Archivos de sistema de los núcleos (PPSSPP); la app los copia a PSP/BIOS al jugar.
+          if [ -d Vendor/LibretroSystem/PPSSPP ]; then
+            mkdir -p Payload/OmniStationDock.app/RetroSystem
+            cp -R Vendor/LibretroSystem/PPSSPP Payload/OmniStationDock.app/RetroSystem/PPSSPP
           fi
           # Permisos de la app (get-task-allow y más memoria). SideStore los conserva al firmar
           # si el perfil los permite; «Increased Memory Limit» se añade al App ID con GetMoreRam.
