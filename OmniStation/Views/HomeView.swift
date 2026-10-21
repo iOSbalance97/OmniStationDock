@@ -3253,7 +3253,7 @@ struct HomeView: View {
                 }
             },
             ended: {
-                RetroConfig.recordMemoryPeak(system, megabytes: OSLibretroEngine.shared.lastSessionPeakMB)
+                RetroConfig.recordMemoryPeak(system, megabytes: Int(OSLibretroEngine.shared.lastSessionPeakMB))
                 endIntegratedSession()
                 releaseRetroJIT()
             }
