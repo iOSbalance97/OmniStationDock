@@ -13,9 +13,11 @@ import subprocess
 import sys
 import zipfile
 
-# Fase 1: los que van sin JIT ni GPU propia (NES, SNES, Game Boy, GBA y NDS).
+# Fase 1: NES, SNES, Game Boy, GBA y NDS (imagen por CPU).
+# Fase 2: PS1, N64, PSP y Dreamcast (imagen por GPU con OpenGL ES; JIT si OmniStation lo tiene).
 WANTED = [
     'nestopia', 'snes9x', 'gambatte', 'mgba', 'gpsp', 'vbam', 'melondsds', 'desmume',
+    'pcsx.rearmed', 'mednafen.psx.hw', 'mupen64plus.next', 'ppsspp', 'flycast', 'flycast-jitless',
 ]
 MACHO_MAGICS = {b'\xcf\xfa\xed\xfe', b'\xca\xfe\xba\xbe', b'\xbe\xba\xfe\xca'}
 
@@ -38,14 +40,24 @@ def pick_ipa(source: Path) -> Path | None:
 
 
 def rpath_dependencies(binary: Path) -> list[str]:
-    """Dependencias @rpath/… de un binario (otool, solo en macOS). Vacío si no hay otool."""
+    """Dependencias @rpath/… de un binario (otool, solo en macOS). Vacío si no hay otool.
+    No cuenta el nombre del propio binario (otool -L lo pone el primero en las librerías)."""
     try:
         text = subprocess.check_output(['otool', '-L', str(binary)], text=True, stderr=subprocess.DEVNULL)
     except Exception:  # noqa: BLE001
         return []
+    own = ''
+    try:
+        ident = subprocess.check_output(['otool', '-D', str(binary)], text=True, stderr=subprocess.DEVNULL)
+        lines = [line.strip() for line in ident.splitlines()[1:] if line.strip()]
+        own = lines[0] if lines else ''
+    except Exception:  # noqa: BLE001
+        pass
     found = []
     for line in text.splitlines()[1:]:
         path = line.strip().split(' ', 1)[0]
+        if path == own:
+            continue
         if path.startswith('@rpath/'):
             found.append(path[len('@rpath/'):])
     return found
