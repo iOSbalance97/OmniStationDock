@@ -232,6 +232,37 @@ jobs:
           python3 -I tools/fetch_manic_cores.py Vendor/Libretro "$RUNNER_TEMP/manic"
           rm -rf "$RUNNER_TEMP/manic"
 
+      # Núcleos libretro compilados por OmniStation desde su código (workflow «Build libretro cores»):
+      # Dolphin con JIT permanente. Opcionales: sin la release «libretro-cores» van solo los de ManicEMU.
+      - name: Fetch OmniStation libretro cores (optional)
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          rm -rf Vendor/OmniCores "$RUNNER_TEMP/omnicores"
+          mkdir -p "$RUNNER_TEMP/omnicores" Vendor
+          if ! gh release download libretro-cores --repo "$GITHUB_REPOSITORY" --dir "$RUNNER_TEMP/omnicores" 2>/dev/null; then
+            echo "::notice::Aún no hay núcleos libretro propios (release libretro-cores)."
+            exit 0
+          fi
+          mkdir -p Vendor/OmniCores
+          for zip in "$RUNNER_TEMP"/omnicores/*.libretro.framework.zip; do
+            [ -f "$zip" ] || continue
+            ditto -x -k "$zip" Vendor/OmniCores
+          done
+          for fw in Vendor/OmniCores/*.libretro.framework; do
+            [ -d "$fw" ] || continue
+            name="$(basename "$fw" .framework)"
+            if [ ! -f "$fw/$name" ] || [ ! -f "$fw/Info.plist" ] || ! nm -gU "$fw/$name" | grep ' _retro_run$' >/dev/null; then
+              echo "::warning::$(basename "$fw") no es un núcleo libretro válido. Se ignora."
+              rm -rf "$fw"
+            fi
+          done
+          if [ -f "$RUNNER_TEMP/omnicores/dolphin-sys.zip" ]; then
+            ditto -x -k "$RUNNER_TEMP/omnicores/dolphin-sys.zip" Vendor/OmniCores/dolphin-sys
+          fi
+          ls -l Vendor/OmniCores
+
       # Archivos de sistema de los núcleos: los de PPSSPP (assets) más las tablas VFPU de ManicEMU, y
       # la carpeta Sys de Dolphin de ManicEMU (la de su núcleo). Opcionales y en caché.
       - name: Cache core system files
@@ -343,6 +374,21 @@ jobs:
               cp -R "Vendor/LibretroSystem/$item" "Payload/OmniStationDock.app/RetroSystem/$item"
             fi
           done
+          # Núcleos libretro propios (si se descargaron) y, con el Dolphin propio, su carpeta Sys
+          # (la de su mismo código) en lugar de la de ManicEMU.
+          if [ -d Vendor/OmniCores ]; then
+            for fw in Vendor/OmniCores/*.libretro.framework; do
+              [ -d "$fw" ] || continue
+              rm -rf "Payload/OmniStationDock.app/Frameworks/$(basename "$fw")"
+              cp -R "$fw" "Payload/OmniStationDock.app/Frameworks/"
+              echo "Núcleo propio: $(basename "$fw")"
+            done
+            if [ -d Vendor/OmniCores/dolphin-sys/Sys ] && [ -d Vendor/OmniCores/dolphin_omni.libretro.framework ]; then
+              mkdir -p Payload/OmniStationDock.app/RetroSystem/dolphin-emu
+              rm -rf Payload/OmniStationDock.app/RetroSystem/dolphin-emu/Sys
+              cp -R Vendor/OmniCores/dolphin-sys/Sys Payload/OmniStationDock.app/RetroSystem/dolphin-emu/Sys
+            fi
+          fi
           # Permisos de la app (get-task-allow y más memoria). SideStore los conserva al firmar
           # si el perfil los permite; «Increased Memory Limit» se añade al App ID con GetMoreRam.
           if command -v ldid >/dev/null 2>&1 || HOMEBREW_NO_AUTO_UPDATE=1 brew install ldid >/dev/null 2>&1; then
