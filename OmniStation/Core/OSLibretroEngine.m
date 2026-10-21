@@ -39,6 +39,8 @@
 #import <os/lock.h>
 #import <stdatomic.h>
 #import <mach/mach_time.h>
+#import <mach/mach.h>
+#import <sys/mman.h>
 #import <stdarg.h>
 #import <signal.h>
 #import <sys/sysctl.h>
@@ -176,8 +178,10 @@ static _Atomic int32_t gTouchAxis[2];
 static _Atomic bool gTouchStickActive;
 static _Atomic uint32_t gTouchCBits; // 1 arriba, 2 abajo, 4 izquierda, 8 derecha
 
-// JIT: si el núcleo puede usarlo en esta partida.
+// JIT: si el núcleo puede usarlo en esta partida (con el depurador o con el bloque permanente).
 static bool gJITCapable;
+// El juego quiere JIT (ajuste «Usar JIT»): el bloque permanente solo se da si lo quiere.
+static bool gJITWanted;
 
 // Proporción sacada del propio fotograma (NDS: cambia con la colocación de las pantallas).
 static bool gUseFrameAspect;
@@ -277,6 +281,140 @@ __attribute__((noinline, naked)) static void OSLRUniversalDetach(void) {
                      "ret");
 }
 
+/// Pide al depurador (script universal, comando 1) que prepare `size` bytes en `address` para JIT.
+__attribute__((noinline)) static void OSLRUniversalPrepare(void *address, size_t size) {
+    register void *x0 __asm__("x0") = address;
+    register size_t x1 __asm__("x1") = size;
+    register uint64_t x16 __asm__("x16") = 1;
+    __asm__ volatile("brk #0xf00d" : "+r"(x0), "+r"(x1) : "r"(x16) : "memory");
+}
+
+// MARK: JIT permanente (memoria de JIT que da OmniStation)
+//
+// Como DolphiniOS: un solo bloque grande de memoria de JIT para toda la vida de la app. Se prepara
+// UNA vez con el depurador enganchado (comando 1 del script universal) y luego vale siempre,
+// aunque el depurador se vaya: no hace falta volver a StikDebug ni a la VPN en cada partida.
+// Se lo dan a los núcleos que lo piden con RETRO_ENVIRONMENT_EXEC_MEM_ALLOC (libretro estándar;
+// el núcleo de Dolphin de libretro ya lo usa). Los de ManicEMU no lo piden: siguen como antes.
+//
+// Dos vistas de las mismas páginas: RX (se ejecuta) y RW (se escribe), como TXM exige.
+#define OSLR_RETRO_ENVIRONMENT_EXEC_MEM_ALLOC 83
+#define OSLR_RETRO_ENVIRONMENT_EXEC_MEM_FREE 84
+#define OSLR_EXEC_MEM_MODE_UNAVAILABLE 0
+#define OSLR_EXEC_MEM_MODE_UNRESTRICTED 1
+#define OSLR_EXEC_MEM_MODE_DUAL_MAP 4
+struct OSLRExecMemAlloc { unsigned version; size_t size; unsigned mode; void *rx; void *rw; };
+struct OSLRExecMemFree { void *rx; };
+
+static const size_t kOSLRJITPoolSize = (size_t)512 * 1024 * 1024; // como DolphiniOS
+static const size_t kOSLRJITPage = 16384;
+static uint8_t *gJITPoolRX;
+static ptrdiff_t gJITPoolDiff;            // rw - rx
+static uint32_t *gJITPoolRuns;            // en la primera página de cada bloque: cuántas páginas tiene
+static uint8_t *gJITPoolUsed;             // 1 si la página está usada
+static size_t gJITPoolPages;
+static os_unfair_lock gJITPoolLock = OS_UNFAIR_LOCK_INIT;
+// Bloques dados en la partida de ahora (se devuelven al cerrarla, como pide libretro).
+static NSMutableArray<NSValue *> *gJITSessionBlocks;
+
+/// Prepara el bloque (una vez). Necesita el depurador enganchado; si no, no hace nada.
+static BOOL OSLRPrepareJITPool(void) {
+    os_unfair_lock_lock(&gJITPoolLock);
+    BOOL ready = gJITPoolRX != NULL;
+    os_unfair_lock_unlock(&gJITPoolLock);
+    if (ready) return YES;
+    if (!OSLRUsesJITScript() || !OSLRIsDebugged() || !OSLRIsTraced()) return NO;
+    size_t size = kOSLRJITPoolSize;
+    void *rx = mmap(NULL, size, PROT_READ | PROT_EXEC, MAP_ANON | MAP_PRIVATE, -1, 0);
+    if (rx == MAP_FAILED) return NO;
+    // Si nadie contesta (no había depurador de verdad), la trampa lo dice y no se usa.
+    OSLRInstallTrapGuard(YES);
+    gJITUnanswered = 0;
+    OSLRUniversalPrepare(rx, size);
+    if (gJITUnanswered) {
+        gJITUnanswered = 0;
+        munmap(rx, size);
+        return NO;
+    }
+    vm_address_t rw = 0;
+    vm_prot_t current = 0, maximum = 0;
+    kern_return_t result = vm_remap(mach_task_self(), &rw, size, 0, VM_FLAGS_ANYWHERE, mach_task_self(),
+                                    (vm_address_t)rx, FALSE, &current, &maximum, VM_INHERIT_DEFAULT);
+    if (result != KERN_SUCCESS) {
+        munmap(rx, size);
+        return NO;
+    }
+    if (mprotect((void *)rw, size, PROT_READ | PROT_WRITE) != 0) {
+        vm_deallocate(mach_task_self(), rw, size);
+        munmap(rx, size);
+        return NO;
+    }
+    size_t pages = size / kOSLRJITPage;
+    uint32_t *runs = calloc(pages, sizeof(uint32_t));
+    uint8_t *used = calloc(pages, 1);
+    if (runs == NULL || used == NULL) {
+        free(runs);
+        free(used);
+        return NO;
+    }
+    os_unfair_lock_lock(&gJITPoolLock);
+    gJITPoolRuns = runs;
+    gJITPoolUsed = used;
+    gJITPoolPages = pages;
+    gJITPoolDiff = (uint8_t *)rw - (uint8_t *)rx;
+    gJITPoolRX = rx;
+    os_unfair_lock_unlock(&gJITPoolLock);
+    printf("[OmniStation] JIT permanente listo: %zu MB\n", size / (1024 * 1024));
+    return YES;
+}
+
+/// Un trozo del bloque (en páginas enteras, el primero libre donde quepa).
+static void *OSLRJITPoolAllocate(size_t size) {
+    if (size == 0) return NULL;
+    size_t need = (size + kOSLRJITPage - 1) / kOSLRJITPage;
+    void *result = NULL;
+    os_unfair_lock_lock(&gJITPoolLock);
+    if (gJITPoolRX != NULL) {
+        size_t run = 0;
+        for (size_t page = 0; page < gJITPoolPages; page++) {
+            run = gJITPoolUsed[page] ? 0 : run + 1;
+            if (run == need) {
+                size_t first = page + 1 - need;
+                memset(gJITPoolUsed + first, 1, need);
+                gJITPoolRuns[first] = (uint32_t)need;
+                result = gJITPoolRX + first * kOSLRJITPage;
+                break;
+            }
+        }
+    }
+    os_unfair_lock_unlock(&gJITPoolLock);
+    return result;
+}
+
+static BOOL OSLRJITPoolFree(void *pointer) {
+    if (pointer == NULL) return NO;
+    BOOL freed = NO;
+    os_unfair_lock_lock(&gJITPoolLock);
+    if (gJITPoolRX != NULL) {
+        uint8_t *rx = pointer;
+        // Vale también el puntero RW.
+        if (rx >= gJITPoolRX + gJITPoolDiff && rx < gJITPoolRX + gJITPoolDiff + kOSLRJITPoolSize) rx -= gJITPoolDiff;
+        if (rx >= gJITPoolRX && rx < gJITPoolRX + kOSLRJITPoolSize) {
+            size_t first = (size_t)(rx - gJITPoolRX) / kOSLRJITPage;
+            uint32_t count = gJITPoolRuns[first];
+            if (count > 0) {
+                // Lo que deja escrito un núcleo no debe verlo el siguiente.
+                memset(gJITPoolRX + gJITPoolDiff + first * kOSLRJITPage, 0, (size_t)count * kOSLRJITPage);
+                memset(gJITPoolUsed + first, 0, count);
+                gJITPoolRuns[first] = 0;
+                freed = YES;
+            }
+        }
+    }
+    os_unfair_lock_unlock(&gJITPoolLock);
+    return freed;
+}
+
 // MARK: Opciones
 
 static void OSLRRegisterOption(const char *key, const char *defaultValue, NSArray<NSString *> *values) {
@@ -345,6 +483,21 @@ static const char *OSLROptionValue(const char *key) {
 }
 
 
+/// Opciones para el menú de la partida, con el valor que usa ahora el núcleo.
+static NSArray<NSMutableDictionary<NSString *, id> *> *OSLRMenuOptions(NSArray<NSDictionary<NSString *, id> *> *source) {
+    NSMutableArray<NSMutableDictionary<NSString *, id> *> *menuOptions = [NSMutableArray new];
+    for (NSDictionary<NSString *, id> *option in source ?: @[]) {
+        NSString *key = option[@"key"];
+        NSArray *values = option[@"values"];
+        if (![key isKindOfClass:NSString.class] || ![values isKindOfClass:NSArray.class] || values.count < 2) continue;
+        NSMutableDictionary<NSString *, id> *item = [option mutableCopy];
+        if (gUserOptions[key]) item[@"value"] = gUserOptions[key];
+        if (![item[@"value"] isKindOfClass:NSString.class]) item[@"value"] = [values.firstObject firstObject] ?: @"";
+        [menuOptions addObject:item];
+    }
+    return menuOptions;
+}
+
 // MARK: Opciones que declara el núcleo (para los ajustes de cada núcleo)
 //
 // Para enseñar las opciones de un núcleo sin abrir ningún juego se le llama a
@@ -354,6 +507,21 @@ static const char *OSLROptionValue(const char *key) {
 static BOOL gCapturing;
 static NSMutableArray<NSMutableDictionary<NSString *, id> *> *gCaptured;
 static NSMutableDictionary<NSString *, NSString *> *gCapturedCategories;
+// En una partida de verdad también se apuntan (sin dejar de usarlas): así se conocen las de los
+// núcleos que las declaran al prepararse (retro_init) sin tener que prepararlos aparte.
+static BOOL gRecording;
+
+/// Lo apuntado, con el nombre de cada categoría.
+static NSArray<NSDictionary<NSString *, id> *> *OSLRCapturedList(void) {
+    NSMutableArray<NSDictionary<NSString *, id> *> *result = [NSMutableArray new];
+    for (NSMutableDictionary<NSString *, id> *entry in gCaptured) {
+        NSMutableDictionary<NSString *, id> *item = [entry mutableCopy];
+        NSString *category = item[@"category"];
+        item[@"categoryTitle"] = category.length ? (gCapturedCategories[category] ?: @"") : @"";
+        [result addObject:item];
+    }
+    return result;
+}
 
 static NSString *OSLRString(const char *text) {
     if (text == NULL) return @"";
@@ -1432,7 +1600,8 @@ static bool OSLREnvironment(unsigned command, void *data) {
             return variable->value != NULL;
         }
         case RETRO_ENVIRONMENT_SET_VARIABLES:
-            if (gCapturing) { OSLRCaptureVariables(data); return true; }
+            if (gCapturing || gRecording) OSLRCaptureVariables(data);
+            if (gCapturing) return true;
             OSLRRegisterVariables(data);
             return true;
         case RETRO_ENVIRONMENT_SET_VARIABLE: {
@@ -1452,28 +1621,26 @@ static bool OSLREnvironment(unsigned command, void *data) {
             if (data) *(unsigned *)data = 2;
             return true;
         case RETRO_ENVIRONMENT_SET_CORE_OPTIONS:
-            if (gCapturing) { OSLRCaptureV1(data, NO); return true; }
+            if (gCapturing || gRecording) OSLRCaptureV1(data, NO);
+            if (gCapturing) return true;
             OSLRRegisterV1(data);
             return true;
         case RETRO_ENVIRONMENT_SET_CORE_OPTIONS_INTL: {
             const struct retro_core_options_intl *options = data;
-            if (gCapturing) {
-                if (options) { OSLRCaptureV1(options->us, NO); OSLRCaptureV1(options->local, YES); }
-                return true;
-            }
+            if ((gCapturing || gRecording) && options) { OSLRCaptureV1(options->us, NO); OSLRCaptureV1(options->local, YES); }
+            if (gCapturing) return true;
             if (options) OSLRRegisterV1(options->us);
             return true;
         }
         case RETRO_ENVIRONMENT_SET_CORE_OPTIONS_V2:
-            if (gCapturing) { OSLRCaptureV2(data, NO); return true; }
+            if (gCapturing || gRecording) OSLRCaptureV2(data, NO);
+            if (gCapturing) return true;
             OSLRRegisterV2(data);
             return true;
         case RETRO_ENVIRONMENT_SET_CORE_OPTIONS_V2_INTL: {
             const struct retro_core_options_v2_intl *options = data;
-            if (gCapturing) {
-                if (options) { OSLRCaptureV2(options->us, NO); OSLRCaptureV2(options->local, YES); }
-                return true;
-            }
+            if ((gCapturing || gRecording) && options) { OSLRCaptureV2(options->us, NO); OSLRCaptureV2(options->local, YES); }
+            if (gCapturing) return true;
             if (options) OSLRRegisterV2(options->us);
             return true;
         }
@@ -1531,6 +1698,38 @@ static bool OSLREnvironment(unsigned command, void *data) {
         case RETRO_ENVIRONMENT_GET_SAVESTATE_CONTEXT:
             if (data) *(int *)data = 0; // RETRO_SAVESTATE_CONTEXT_NORMAL
             return true;
+        case OSLR_RETRO_ENVIRONMENT_EXEC_MEM_ALLOC: {
+            struct OSLRExecMemAlloc *request = data;
+            if (request == NULL || gCapturing) return false;
+            request->rx = NULL;
+            request->rw = NULL;
+            if (!OSLRUsesJITScript()) {
+                // Antes de iOS 26 el JIT del depurador deja que el núcleo se reserve su memoria.
+                request->mode = gJITCapable ? OSLR_EXEC_MEM_MODE_UNRESTRICTED : OSLR_EXEC_MEM_MODE_UNAVAILABLE;
+                return request->size == 0;
+            }
+            // El JIT de esta partida: el del bloque permanente (se prepara ahora si hay depurador).
+            if (!gJITWanted || !OSLRPrepareJITPool()) {
+                request->mode = OSLR_EXEC_MEM_MODE_UNAVAILABLE;
+                return request->size == 0;
+            }
+            request->mode = OSLR_EXEC_MEM_MODE_DUAL_MAP;
+            if (request->size == 0) return true;
+            void *rx = OSLRJITPoolAllocate(request->size);
+            if (rx == NULL) return false;
+            request->rx = rx;
+            request->rw = (uint8_t *)rx + gJITPoolDiff;
+            [gJITSessionBlocks addObject:[NSValue valueWithPointer:rx]];
+            return true;
+        }
+        case OSLR_RETRO_ENVIRONMENT_EXEC_MEM_FREE: {
+            const struct OSLRExecMemFree *request = data;
+            if (request == NULL) return false;
+            uint8_t *rx = request->rx;
+            if (rx != NULL && gJITPoolRX != NULL && rx >= gJITPoolRX + gJITPoolDiff) rx -= gJITPoolDiff;
+            [gJITSessionBlocks removeObject:[NSValue valueWithPointer:rx]];
+            return OSLRJITPoolFree(rx);
+        }
         case RETRO_ENVIRONMENT_GET_JIT_CAPABLE:
             if (data) *(bool *)data = gJITCapable;
             return true;
@@ -1911,6 +2110,67 @@ static int OSLRRetroButtonForMapID(NSString *name) {
 
 // MARK: - Pantalla de juego
 
+// MARK: Estilo de la app en los menús de la partida (como los ajustes de OmniStation)
+
+/// Orbitron (la letra de la app; la registra OmniStation al abrirse), algo más pequeña como allí.
+static UIFont *OSLRAppFont(CGFloat size, UIFontWeight weight) {
+    NSString *name = weight >= UIFontWeightBold ? @"Orbitron-Bold"
+        : (weight >= UIFontWeightSemibold ? @"Orbitron-SemiBold"
+        : (weight >= UIFontWeightMedium ? @"Orbitron-Medium" : @"Orbitron-Regular"));
+    return [UIFont fontWithName:name size:round(size * 0.88)] ?: [UIFont systemFontOfSize:size weight:weight];
+}
+
+static UIColor *OSLRCyan(CGFloat alpha) { return [UIColor colorWithRed:0.0 green:0.85 blue:1.0 alpha:alpha]; }
+
+/// Fondo de panel de la app: azul noche con brillo cian arriba y violeta abajo.
+static void OSLRApplyPanelBackground(UIView *view, CGFloat cornerRadius) {
+    view.backgroundColor = [UIColor colorWithRed:0.02 green:0.04 blue:0.09 alpha:0.94];
+    view.layer.cornerRadius = cornerRadius;
+    view.layer.masksToBounds = NO;
+    view.layer.borderWidth = 0.8;
+    view.layer.borderColor = OSLRCyan(0.40).CGColor;
+    view.layer.shadowColor = OSLRCyan(1).CGColor;
+    view.layer.shadowOpacity = 0.30;
+    view.layer.shadowRadius = 20;
+    view.layer.shadowOffset = CGSizeZero;
+    for (CALayer *layer in [view.layer.sublayers copy]) {
+        if ([layer.name isEqualToString:@"omni.glow"]) [layer removeFromSuperlayer];
+    }
+    NSArray *glows = @[@[OSLRCyan(0.22), [NSValue valueWithCGPoint:CGPointMake(0, 0)]],
+                       @[[UIColor colorWithRed:0.55 green:0.42 blue:1.0 alpha:0.18], [NSValue valueWithCGPoint:CGPointMake(1, 1)]]];
+    for (NSArray *glow in glows) {
+        CAGradientLayer *layer = [CAGradientLayer layer];
+        layer.name = @"omni.glow";
+        layer.type = kCAGradientLayerRadial;
+        layer.colors = @[(id)((UIColor *)glow[0]).CGColor, (id)UIColor.clearColor.CGColor];
+        CGPoint center = [glow[1] CGPointValue];
+        layer.startPoint = center;
+        layer.endPoint = CGPointMake(center.x == 0 ? 0.9 : 0.1, center.y == 0 ? 0.7 : 0.3);
+        layer.cornerRadius = cornerRadius;
+        layer.masksToBounds = YES;
+        [view.layer insertSublayer:layer atIndex:0];
+    }
+}
+
+/// Las capas de brillo siguen el tamaño del panel.
+static void OSLRLayoutPanelBackground(UIView *view) {
+    for (CALayer *layer in view.layer.sublayers) {
+        if ([layer.name isEqualToString:@"omni.glow"]) layer.frame = view.bounds;
+    }
+}
+
+/// Fila como las tarjetas de la app: cristal oscuro con borde de luz; la marcada, iluminada.
+static void OSLRStyleRow(UIView *row, BOOL selected) {
+    row.layer.cornerRadius = 14;
+    row.layer.borderWidth = selected ? 2.0 : 0.8;
+    row.layer.borderColor = selected ? OSLRCyan(1).CGColor : OSLRCyan(0.22).CGColor;
+    row.backgroundColor = selected ? OSLRCyan(0.20) : [UIColor colorWithWhite:1 alpha:0.07];
+    row.layer.shadowColor = OSLRCyan(1).CGColor;
+    row.layer.shadowOpacity = selected ? 0.55 : 0;
+    row.layer.shadowRadius = 8;
+    row.layer.shadowOffset = CGSizeZero;
+}
+
 @interface OSLRGameViewController : UIViewController
 @property (nonatomic, copy) NSString *language;
 @property (nonatomic, copy) NSString *layout;
@@ -1933,6 +2193,7 @@ static int OSLRRetroButtonForMapID(NSString *name) {
 /// Mapa de botones del juego: botón físico (RETRO id) → el que manda.
 @property (nonatomic, copy) NSDictionary<NSNumber *, NSNumber *> *buttonMap;
 - (void)showStatus:(NSString *)message;
+- (void)reloadCoreOptions:(NSArray<NSMutableDictionary<NSString *, id> *> *)options;
 - (void)openMenu;
 - (void)closeMenu;
 - (void)releaseExternalDisplay;
@@ -2277,14 +2538,14 @@ typedef NS_ENUM(NSInteger, OSLRMenuAction) {
         }
         [text appendAttributedString:[[NSAttributedString alloc] initWithString:self.jitText attributes:@{
             NSForegroundColorAttributeName: color,
-            NSFontAttributeName: [UIFont systemFontOfSize:14 weight:UIFontWeightBold]}]];
+            NSFontAttributeName: OSLRAppFont(14, UIFontWeightBold)}]];
         _jitLabel.attributedText = text;
     }
 }
 
 - (void)buildMenu {
     _menuView = [[UIView alloc] initWithFrame:self.view.bounds];
-    _menuView.backgroundColor = [UIColor colorWithWhite:0 alpha:0.72];
+    _menuView.backgroundColor = [UIColor colorWithRed:0.01 green:0.02 blue:0.05 alpha:0.80];
     _menuView.hidden = YES;
     // Si el núcleo puede ir con o sin JIT, arriba se ve cómo arrancó.
     _jitLabel = [UILabel new];
@@ -2305,10 +2566,8 @@ typedef NS_ENUM(NSInteger, OSLRMenuAction) {
     for (NSUInteger index = 0; index < titles.count; index++) {
         UIButton *row = [UIButton buttonWithType:UIButtonTypeSystem];
         row.tag = actions[index].integerValue;
-        row.backgroundColor = [UIColor colorWithWhite:1 alpha:0.10];
-        row.layer.cornerRadius = 14;
-        row.layer.borderColor = [UIColor colorWithRed:0.0 green:0.85 blue:1.0 alpha:1.0].CGColor;
-        row.titleLabel.font = [UIFont systemFontOfSize:16 weight:UIFontWeightSemibold];
+        OSLRStyleRow(row, NO);
+        row.titleLabel.font = OSLRAppFont(16, UIFontWeightSemibold);
         [row setTitle:titles[index] forState:UIControlStateNormal];
         UIColor *color = row.tag == OSLRMenuActionQuit ? [UIColor colorWithRed:1.0 green:0.55 blue:0.45 alpha:1.0] : UIColor.whiteColor;
         [row setTitleColor:color forState:UIControlStateNormal];
@@ -2326,25 +2585,18 @@ typedef NS_ENUM(NSInteger, OSLRMenuAction) {
 
 - (void)buildOptionsPage {
     _optionsView = [[UIView alloc] initWithFrame:CGRectZero];
-    _optionsView.backgroundColor = [UIColor colorWithRed:0.04 green:0.07 blue:0.12 alpha:0.94];
-    _optionsView.layer.cornerRadius = 22;
-    _optionsView.layer.borderWidth = 1;
-    _optionsView.layer.borderColor = [UIColor colorWithRed:0.0 green:0.85 blue:1.0 alpha:0.35].CGColor;
-    _optionsView.layer.shadowColor = [UIColor colorWithRed:0.0 green:0.85 blue:1.0 alpha:1.0].CGColor;
-    _optionsView.layer.shadowOpacity = 0.35;
-    _optionsView.layer.shadowRadius = 18;
-    _optionsView.layer.shadowOffset = CGSizeZero;
+    OSLRApplyPanelBackground(_optionsView, 22);
     _optionsView.hidden = YES;
     _optionsTitle = [UILabel new];
     _optionsTitle.text = [self t:@"Opciones del núcleo" en:@"Core options"];
     _optionsTitle.textColor = UIColor.whiteColor;
-    _optionsTitle.font = [UIFont systemFontOfSize:18 weight:UIFontWeightBold];
+    _optionsTitle.font = OSLRAppFont(18, UIFontWeightBold);
     [_optionsView addSubview:_optionsTitle];
     _optionsHint = [UILabel new];
     _optionsHint.text = [self t:@"‹ › o toca para cambiar · B para volver. Algunas se notan al volver a abrir el juego."
                              en:@"‹ › or tap to change · B to go back. Some apply when the game is opened again."];
     _optionsHint.textColor = [UIColor colorWithWhite:1 alpha:0.6];
-    _optionsHint.font = [UIFont systemFontOfSize:12 weight:UIFontWeightMedium];
+    _optionsHint.font = OSLRAppFont(11, UIFontWeightMedium);
     _optionsHint.numberOfLines = 2;
     [_optionsView addSubview:_optionsHint];
     UIButton *back = [UIButton buttonWithType:UIButtonTypeSystem];
@@ -2365,9 +2617,13 @@ typedef NS_ENUM(NSInteger, OSLRMenuAction) {
         NSString *group = [option[@"group"] isKindOfClass:NSString.class] ? option[@"group"] : @"";
         if (group.length > 0 && ![group isEqualToString:lastGroup]) {
             UILabel *header = [UILabel new];
-            header.text = group.uppercaseString;
-            header.textColor = [UIColor colorWithRed:0.0 green:0.85 blue:1.0 alpha:0.9];
-            header.font = [UIFont systemFontOfSize:11 weight:UIFontWeightBold];
+            header.text = [@"▍ " stringByAppendingString:group.uppercaseString];
+            header.textColor = OSLRCyan(0.9);
+            header.font = OSLRAppFont(11, UIFontWeightBold);
+            header.layer.shadowColor = OSLRCyan(1).CGColor;
+            header.layer.shadowOpacity = 0.6;
+            header.layer.shadowRadius = 4;
+            header.layer.shadowOffset = CGSizeZero;
             header.tag = (NSInteger)index; // fila que va debajo
             [_optionsScroll addSubview:header];
             [_optionHeaders addObject:header];
@@ -2375,13 +2631,11 @@ typedef NS_ENUM(NSInteger, OSLRMenuAction) {
         lastGroup = group;
         UIButton *row = [UIButton buttonWithType:UIButtonTypeCustom];
         row.tag = (NSInteger)index;
-        row.backgroundColor = [UIColor colorWithWhite:1 alpha:0.07];
-        row.layer.cornerRadius = 12;
-        row.layer.borderColor = [UIColor colorWithRed:0.0 green:0.85 blue:1.0 alpha:1.0].CGColor;
+        OSLRStyleRow(row, NO);
         UILabel *title = [UILabel new];
         title.tag = 900001;
         title.textColor = UIColor.whiteColor;
-        title.font = [UIFont systemFontOfSize:15 weight:UIFontWeightSemibold];
+        title.font = OSLRAppFont(14, UIFontWeightSemibold);
         title.text = option[@"title"];
         title.adjustsFontSizeToFitWidth = YES;
         title.minimumScaleFactor = 0.75;
@@ -2390,7 +2644,7 @@ typedef NS_ENUM(NSInteger, OSLRMenuAction) {
         value.tag = 900002;
         value.textAlignment = NSTextAlignmentRight;
         value.textColor = [UIColor colorWithRed:0.0 green:0.85 blue:1.0 alpha:1.0];
-        value.font = [UIFont systemFontOfSize:14 weight:UIFontWeightBold];
+        value.font = OSLRAppFont(13, UIFontWeightBold);
         value.adjustsFontSizeToFitWidth = YES;
         value.minimumScaleFactor = 0.7;
         [row addSubview:value];
@@ -2400,6 +2654,16 @@ typedef NS_ENUM(NSInteger, OSLRMenuAction) {
         [self updateOptionRow:row];
     }
     [self.view addSubview:_optionsView];
+}
+
+- (void)reloadCoreOptions:(NSArray<NSMutableDictionary<NSString *, id> *> *)options {
+    if (_optionsVisible) return;
+    self.coreOptions = options;
+    [_optionsView removeFromSuperview];
+    _optionsView = nil;
+    [self buildOptionsPage];
+    [self updateVisibleRows];
+    [self.view setNeedsLayout];
 }
 
 - (NSString *)labelForOption:(NSDictionary<NSString *, id> *)option {
@@ -2423,6 +2687,7 @@ typedef NS_ENUM(NSInteger, OSLRMenuAction) {
     CGFloat w = MIN(bounds.size.width - safe.left - safe.right - 24, 560);
     CGFloat h = bounds.size.height - safe.top - safe.bottom - 24;
     _optionsView.frame = CGRectMake(floor((bounds.size.width - w) * 0.5), safe.top + 12, w, h);
+    OSLRLayoutPanelBackground(_optionsView);
     UIView *back = [_optionsView viewWithTag:900077];
     back.frame = CGRectMake(12, 12, 36, 36);
     _optionsTitle.frame = CGRectMake(54, 12, w - 66, 24);
@@ -2450,9 +2715,7 @@ typedef NS_ENUM(NSInteger, OSLRMenuAction) {
 
 - (void)refreshOptionsPage {
     for (UIButton *row in _optionRows) {
-        BOOL selected = row.tag == _optionIndex && _controller != nil;
-        row.layer.borderWidth = selected ? 2 : 0;
-        row.backgroundColor = [UIColor colorWithWhite:1 alpha:selected ? 0.16 : 0.07];
+        OSLRStyleRow(row, row.tag == _optionIndex && _controller != nil);
     }
     if (_optionIndex >= 0 && _optionIndex < (NSInteger)_optionRows.count) {
         CGRect frame = CGRectInset(_optionRows[(NSUInteger)_optionIndex].frame, 0, -34);
@@ -2824,9 +3087,7 @@ typedef NS_ENUM(NSInteger, OSLRMenuAction) {
 - (void)refreshMenu {
     UIButton *current = _menuIndex < (NSInteger)_visibleRows.count ? _visibleRows[_menuIndex] : nil;
     for (UIButton *row in _menuRows) {
-        BOOL selected = row == current && _controller != nil;
-        row.layer.borderWidth = selected ? 2.5 : 0;
-        row.backgroundColor = [UIColor colorWithWhite:1 alpha:selected ? 0.18 : 0.10];
+        OSLRStyleRow(row, row == current && _controller != nil);
     }
 }
 
@@ -3030,6 +3291,7 @@ typedef NS_ENUM(NSInteger, OSLRMenuAction) {
 @interface OSLibretroEngine ()
 @property (nonatomic, assign) BOOL busy;
 @property (atomic, assign) NSUInteger lastSessionPeakMB;
+@property (atomic, copy, nullable) NSArray<NSDictionary<NSString *, id> *> *lastSessionOptions;
 @property (nonatomic, strong, nullable) OSLRGameViewController *gameController;
 @property (nonatomic, copy, nullable) void (^endedHandler)(void);
 @end
@@ -3080,6 +3342,17 @@ typedef NS_ENUM(NSInteger, OSLRMenuAction) {
     return OSLRUsesJITScript() ? OSLRIsTraced() : YES;
 }
 
++ (BOOL)persistentJITReady {
+    os_unfair_lock_lock(&gJITPoolLock);
+    BOOL ready = gJITPoolRX != NULL;
+    os_unfair_lock_unlock(&gJITPoolLock);
+    return ready;
+}
+
++ (BOOL)preparePersistentJIT {
+    return OSLRPrepareJITPool();
+}
+
 + (void)detachJITDebugger {
     if (!OSLRUsesJITScript() || !OSLRIsTraced()) return;
     OSLRInstallTrapGuard(YES);
@@ -3094,20 +3367,12 @@ typedef NS_ENUM(NSInteger, OSLRMenuAction) {
     gCaptured = [NSMutableArray new];
     gCapturedCategories = [NSMutableDictionary new];
     gCapturing = YES;
+    // Solo retro_set_environment (libretro deja llamarla sin más). Nunca retro_init/retro_deinit
+    // fuera de una partida: núcleos como el de Wii no se recuperan bien de eso y la partida
+    // siguiente fallaba. Los que declaran sus opciones al prepararse se apuntan al jugar.
     gCore.setEnvironment(OSLREnvironment);
-    // Alguno las declara al prepararse (retro_init) y no antes.
-    if (gCaptured.count == 0) {
-        gCore.init();
-        gCore.deinit();
-    }
     gCapturing = NO;
-    NSMutableArray<NSDictionary<NSString *, id> *> *result = [NSMutableArray new];
-    for (NSMutableDictionary<NSString *, id> *entry in gCaptured) {
-        NSMutableDictionary<NSString *, id> *item = [entry mutableCopy];
-        NSString *category = item[@"category"];
-        item[@"categoryTitle"] = category.length ? (gCapturedCategories[category] ?: @"") : @"";
-        [result addObject:item];
-    }
+    NSArray<NSDictionary<NSString *, id> *> *result = OSLRCapturedList();
     gCaptured = nil;
     gCapturedCategories = nil;
     return result;
@@ -3253,6 +3518,10 @@ typedef NS_ENUM(NSInteger, OSLRMenuAction) {
     __block NSString *failure = nil;
     BOOL loaded = NO;
     @autoreleasepool {
+        // Se apuntan las opciones que declare (para sus ajustes) mientras se prepara.
+        gCaptured = [NSMutableArray new];
+        gCapturedCategories = [NSMutableDictionary new];
+        gRecording = YES;
         gCore.setEnvironment(OSLREnvironment);
         gCore.setVideoRefresh(OSLRVideoRefresh);
         gCore.setAudioSample(OSLRAudioSample);
@@ -3277,6 +3546,10 @@ typedef NS_ENUM(NSInteger, OSLRMenuAction) {
             loaded = gCore.loadGame(&game);
             if (!loaded) failure = OSLRText(_language, @"El núcleo no pudo abrir este juego.", @"The core could not open this game.");
         }
+        gRecording = NO;
+        self.lastSessionOptions = OSLRCapturedList();
+        gCaptured = nil;
+        gCapturedCategories = nil;
         struct retro_system_av_info av;
         memset(&av, 0, sizeof(av));
         if (loaded) {
@@ -3322,6 +3595,12 @@ typedef NS_ENUM(NSInteger, OSLRMenuAction) {
         if (loaded) {
             self->_audio = [OSLRAudio new];
             [self->_audio startWithSampleRate:gSampleRate];
+            // Núcleo que declara sus opciones al prepararse: ahora ya se conocen y el menú de la
+            // partida puede enseñarlas desde esta misma partida.
+            if (self.gameController.coreOptions.count == 0 && self.menuOptionsProvider) {
+                NSArray<NSDictionary<NSString *, id> *> *late = self.menuOptionsProvider();
+                if (late.count > 0) [self.gameController reloadCoreOptions:OSLRMenuOptions(late)];
+            }
         } else {
             // Si no arranca, solo se avisa por `completion` (no también por `ended`).
             self.endedHandler = nil;
@@ -3332,6 +3611,8 @@ typedef NS_ENUM(NSInteger, OSLRMenuAction) {
         gCore.deinit();
         OSLRDestroyGL();
         OSLRDestroyVulkan();
+        for (NSValue *block in gJITSessionBlocks) OSLRJITPoolFree(block.pointerValue);
+        [gJITSessionBlocks removeAllObjects];
         [self finishSession];
         return;
     }
@@ -3427,6 +3708,9 @@ typedef NS_ENUM(NSInteger, OSLRMenuAction) {
     gCore.deinit();
     OSLRDestroyGL();
     OSLRDestroyVulkan();
+    // Lo que el núcleo no devolvió del bloque permanente vuelve al bloque (el bloque se queda).
+    for (NSValue *block in gJITSessionBlocks) OSLRJITPoolFree(block.pointerValue);
+    [gJITSessionBlocks removeAllObjects];
     // Cuánta memoria llegó a gastar la partida (para avisar antes de la próxima si no cabe).
     if (gSessionStartFree > 0 && gSessionMinFree > 0 && gSessionStartFree > gSessionMinFree) {
         self.lastSessionPeakMB = (NSUInteger)((gSessionStartFree - gSessionMinFree) / (1024 * 1024));
@@ -3520,7 +3804,12 @@ typedef NS_ENUM(NSInteger, OSLRMenuAction) {
     gPixelFormat = RETRO_PIXEL_FORMAT_0RGB1555;
     gHasFrameTimeCallback = NO;
     // JIT: solo si se pidió y OmniStation lo tiene de verdad ahora.
-    gJITCapable = [hostOptions[@"jit"] isEqualToString:@"true"] && [OSLibretroEngine jitActive];
+    gJITWanted = [hostOptions[@"jit"] isEqualToString:@"true"];
+    // Núcleo que pide su memoria de JIT a OmniStation: le vale el bloque permanente aunque ya no
+    // haya depurador.
+    BOOL pooled = [hostOptions[@"jitPool"] isEqualToString:@"true"] && [OSLibretroEngine persistentJITReady];
+    gJITCapable = gJITWanted && ([OSLibretroEngine jitActive] || pooled);
+    gJITSessionBlocks = [NSMutableArray new];
     gJITUnanswered = 0;
     gSessionStartFree = os_proc_available_memory();
     gSessionMinFree = 0;
@@ -3591,7 +3880,7 @@ typedef NS_ENUM(NSInteger, OSLRMenuAction) {
         } else if (![hostOptions[@"jit"] isEqualToString:@"true"]) {
             controller.jitText = OSLRText(language, @"Sin JIT: desactivado en sus ajustes", @"No JIT: turned off in its settings");
         } else if (OSLRUsesJITScript() && OSLRIsDebugged() && !OSLRIsTraced()) {
-            controller.jitText = OSLRText(language, @"Sin JIT: hay JIT pero el depurador ya no está enganchado (iOS 26 lo necesita)", @"No JIT: JIT was enabled but the debugger is no longer attached (iOS 26 needs it)");
+            controller.jitText = OSLRText(language, @"Sin JIT: hay JIT pero el depurador ya no está enganchado (desde iOS 26 hace falta)", @"No JIT: JIT was enabled but the debugger is no longer attached (iOS 26 and later need it)");
         } else {
             controller.jitText = OSLRText(language, @"Sin JIT (modo intérprete)", @"No JIT (interpreter mode)");
         }
@@ -3605,17 +3894,7 @@ typedef NS_ENUM(NSInteger, OSLRMenuAction) {
     }
     controller.buttonMap = map;
     // Opciones del núcleo para el menú de la partida (con el valor con el que arranca).
-    NSMutableArray<NSMutableDictionary<NSString *, id> *> *menuOptions = [NSMutableArray new];
-    for (NSDictionary<NSString *, id> *option in self.menuOptions ?: @[]) {
-        NSString *key = option[@"key"];
-        NSArray *values = option[@"values"];
-        if (![key isKindOfClass:NSString.class] || ![values isKindOfClass:NSArray.class] || values.count < 2) continue;
-        NSMutableDictionary<NSString *, id> *item = [option mutableCopy];
-        if (gUserOptions[key]) item[@"value"] = gUserOptions[key];
-        if (![item[@"value"] isKindOfClass:NSString.class]) item[@"value"] = [values.firstObject firstObject] ?: @"";
-        [menuOptions addObject:item];
-    }
-    controller.coreOptions = menuOptions;
+    controller.coreOptions = OSLRMenuOptions(self.menuOptions);
     void (^changed)(NSString *, NSString *) = self.menuOptionChanged;
     controller.optionChanged = ^(NSString *key, NSString *value) {
         if (changed) changed(key, value);

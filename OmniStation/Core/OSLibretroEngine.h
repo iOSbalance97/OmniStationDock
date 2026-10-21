@@ -20,6 +20,14 @@ NS_ASSUME_NONNULL_BEGIN
 /// que la próxima vez se pueda volver a enganchar sin que se cuelgue.
 + (void)detachJITDebugger;
 
+/// JIT permanente: un bloque de memoria de JIT preparado una vez (con el depurador) que vale para
+/// toda la vida de la app. Lo usan los núcleos que piden su memoria a OmniStation
+/// (RETRO_ENVIRONMENT_EXEC_MEM_ALLOC), como el Dolphin de OmniStation.
+@property (class, nonatomic, readonly) BOOL persistentJITReady;
+
+/// Prepara el bloque si aún no está y hay depurador enganchado (en iOS 26). YES si ya vale.
++ (BOOL)preparePersistentJIT;
+
 /// Opciones que declara un núcleo, sin abrir ningún juego (para sus ajustes). Cada una: «key»,
 /// «title», «info», «category», «categoryTitle», «default» y «values» ([valor, etiqueta]).
 /// nil si hay una partida abierta o el núcleo no carga. Llamar en el hilo principal.
@@ -31,9 +39,17 @@ NS_ASSUME_NONNULL_BEGIN
 /// Memoria (MB) que llegó a gastar la última partida, contada desde que empezó (0 si no se supo).
 @property (atomic, readonly) NSUInteger lastSessionPeakMB;
 
+/// Opciones que declaró el núcleo en la última partida (como `optionsForCore:language:`), para
+/// los núcleos que solo las declaran al prepararse. nil si no se supo.
+@property (atomic, readonly, copy, nullable) NSArray<NSDictionary<NSString *, id> *> *lastSessionOptions;
+
 /// Opciones del núcleo que se pueden cambiar desde el menú de la partida (se ponen antes de
 /// launchGame). Cada una: «key», «title», «group», «values» ([[valor, etiqueta]]) y «value».
 @property (nonatomic, copy, nullable) NSArray<NSDictionary<NSString *, id> *> *menuOptions;
+
+/// Si `menuOptions` iba vacío (núcleo que las declara al prepararse), se pide aquí al abrir la
+/// partida (en el hilo principal), cuando ya se conocen.
+@property (nonatomic, copy, nullable) NSArray<NSDictionary<NSString *, id> *> * _Nullable (^menuOptionsProvider)(void);
 
 /// Se llama (en el hilo principal) cuando se cambia una opción desde el menú de la partida.
 @property (nonatomic, copy, nullable) void (^menuOptionChanged)(NSString *key, NSString *value);
