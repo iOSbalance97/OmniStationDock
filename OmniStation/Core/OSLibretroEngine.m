@@ -173,6 +173,36 @@ static _Atomic int gPendingAction = -1;
 typedef void (^OSLRMessageBlock)(NSString *message);
 static OSLRMessageBlock gMessageHandler;
 
+// Registro de cada partida (Archivos → OmniStation Dock → Registro libretro.txt): por dónde va al
+// abrir y al cerrar, para saber dónde se queda si un núcleo no termina.
+static NSString *OSLRTracePath(void) {
+    NSString *documents = NSSearchPathForDirectoriesInDomains(NSDocumentDirectory, NSUserDomainMask, YES).firstObject ?: NSTemporaryDirectory();
+    return [documents stringByAppendingPathComponent:@"Registro libretro.txt"];
+}
+
+static void OSLRTrace(NSString *step, BOOL reset) {
+    static dispatch_queue_t queue;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{ queue = dispatch_queue_create("omnistation.libretro.trace", DISPATCH_QUEUE_SERIAL); });
+    NSString *line = [NSString stringWithFormat:@"%@ %@\n", [NSDate.date descriptionWithLocale:nil], step];
+    dispatch_async(queue, ^{
+        NSString *path = OSLRTracePath();
+        if (reset || ![NSFileManager.defaultManager fileExistsAtPath:path]) {
+            [line writeToFile:path atomically:NO encoding:NSUTF8StringEncoding error:nil];
+            return;
+        }
+        NSFileHandle *handle = [NSFileHandle fileHandleForWritingAtPath:path];
+        [handle seekToEndOfFile];
+        [handle writeData:[line dataUsingEncoding:NSUTF8StringEncoding]];
+        [handle closeFile];
+    });
+}
+
+// El núcleo no terminó de cerrarse (se le esperó y no acabó): hasta reabrir la app no se puede
+// abrir otro juego de estos núcleos (su hilo sigue ocupado).
+static _Atomic bool gCoreStuck;
+static _Atomic bool gLoopDone;
+
 // Mando táctil: stick analógico (N64, PSP, Dreamcast) y botones C de N64 (stick derecho).
 static _Atomic int32_t gTouchAxis[2];
 static _Atomic bool gTouchStickActive;
@@ -317,16 +347,20 @@ static os_unfair_lock gJITPoolLock = OS_UNFAIR_LOCK_INIT;
 // Bloques dados en la partida de ahora (se devuelven al cerrarla, como pide libretro).
 static NSMutableArray<NSValue *> *gJITSessionBlocks;
 
+/// Cómo quedó el último intento de preparar el bloque (para enseñarlo en Ajustes y en el menú).
+static NSString *gJITPoolStatus;
+
 /// Prepara el bloque (una vez). Necesita el depurador enganchado; si no, no hace nada.
 static BOOL OSLRPrepareJITPool(void) {
     os_unfair_lock_lock(&gJITPoolLock);
     BOOL ready = gJITPoolRX != NULL;
     os_unfair_lock_unlock(&gJITPoolLock);
     if (ready) return YES;
-    if (!OSLRUsesJITScript() || !OSLRIsDebugged() || !OSLRIsTraced()) return NO;
+    if (!OSLRUsesJITScript()) { gJITPoolStatus = @"no-txm"; return NO; }
+    if (!OSLRIsDebugged() || !OSLRIsTraced()) { gJITPoolStatus = @"no-debugger"; return NO; }
     size_t size = kOSLRJITPoolSize;
     void *rx = mmap(NULL, size, PROT_READ | PROT_EXEC, MAP_ANON | MAP_PRIVATE, -1, 0);
-    if (rx == MAP_FAILED) return NO;
+    if (rx == MAP_FAILED) { gJITPoolStatus = [NSString stringWithFormat:@"mmap:%d", errno]; return NO; }
     // Si nadie contesta (no había depurador de verdad), la trampa lo dice y no se usa.
     OSLRInstallTrapGuard(YES);
     gJITUnanswered = 0;
@@ -334,6 +368,7 @@ static BOOL OSLRPrepareJITPool(void) {
     if (gJITUnanswered) {
         gJITUnanswered = 0;
         munmap(rx, size);
+        gJITPoolStatus = @"unanswered";
         return NO;
     }
     vm_address_t rw = 0;
@@ -342,11 +377,14 @@ static BOOL OSLRPrepareJITPool(void) {
                                     (vm_address_t)rx, FALSE, &current, &maximum, VM_INHERIT_DEFAULT);
     if (result != KERN_SUCCESS) {
         munmap(rx, size);
+        gJITPoolStatus = [NSString stringWithFormat:@"vm_remap:0x%x", result];
         return NO;
     }
     if (mprotect((void *)rw, size, PROT_READ | PROT_WRITE) != 0) {
+        int code = errno;
         vm_deallocate(mach_task_self(), rw, size);
         munmap(rx, size);
+        gJITPoolStatus = [NSString stringWithFormat:@"mprotect:%d", code];
         return NO;
     }
     size_t pages = size / kOSLRJITPage;
@@ -355,6 +393,7 @@ static BOOL OSLRPrepareJITPool(void) {
     if (runs == NULL || used == NULL) {
         free(runs);
         free(used);
+        gJITPoolStatus = @"memory";
         return NO;
     }
     os_unfair_lock_lock(&gJITPoolLock);
@@ -364,6 +403,7 @@ static BOOL OSLRPrepareJITPool(void) {
     gJITPoolDiff = (uint8_t *)rw - (uint8_t *)rx;
     gJITPoolRX = rx;
     os_unfair_lock_unlock(&gJITPoolLock);
+    gJITPoolStatus = @"ready";
     printf("[OmniStation] JIT permanente listo: %zu MB\n", size / (1024 * 1024));
     return YES;
 }
@@ -1710,12 +1750,14 @@ static bool OSLREnvironment(unsigned command, void *data) {
             }
             // El JIT de esta partida: el del bloque permanente (se prepara ahora si hay depurador).
             if (!gJITWanted || !OSLRPrepareJITPool()) {
+                OSLRTrace([NSString stringWithFormat:@"JIT permanente: no (%@)", gJITWanted ? (gJITPoolStatus ?: @"?") : @"JIT desactivado"], NO);
                 request->mode = OSLR_EXEC_MEM_MODE_UNAVAILABLE;
                 return request->size == 0;
             }
             request->mode = OSLR_EXEC_MEM_MODE_DUAL_MAP;
             if (request->size == 0) return true;
             void *rx = OSLRJITPoolAllocate(request->size);
+            OSLRTrace([NSString stringWithFormat:@"JIT permanente: %zu KB %@", request->size / 1024, rx ? @"dados" : @"NO caben"], NO);
             if (rx == NULL) return false;
             request->rx = rx;
             request->rw = (uint8_t *)rx + gJITPoolDiff;
@@ -3353,6 +3395,11 @@ typedef NS_ENUM(NSInteger, OSLRMenuAction) {
     return OSLRPrepareJITPool();
 }
 
++ (NSString *)persistentJITStatus {
+    if ([self persistentJITReady]) return @"ready";
+    return gJITPoolStatus ?: @"";
+}
+
 + (void)detachJITDebugger {
     if (!OSLRUsesJITScript() || !OSLRIsTraced()) return;
     OSLRInstallTrapGuard(YES);
@@ -3547,6 +3594,7 @@ typedef NS_ENUM(NSInteger, OSLRMenuAction) {
             if (!loaded) failure = OSLRText(_language, @"El núcleo no pudo abrir este juego.", @"The core could not open this game.");
         }
         gRecording = NO;
+        OSLRTrace(loaded ? @"abrir: juego cargado" : @"abrir: el núcleo no pudo cargar el juego", NO);
         self.lastSessionOptions = OSLRCapturedList();
         gCaptured = nil;
         gCapturedCategories = nil;
@@ -3701,13 +3749,20 @@ typedef NS_ENUM(NSInteger, OSLRMenuAction) {
             }
         }
     }
+    OSLRTrace(@"salir: guardar partida", NO);
     [self writeSaveRAMIfChanged:lastSave];
     // Como RetroArch: primero se avisa al núcleo de que se va el contexto y luego se cierra el juego.
+    OSLRTrace(@"salir: context_destroy", NO);
     if ((gGLContext != nil || gVKDevice != VK_NULL_HANDLE) && gHWCallback.context_destroy) gHWCallback.context_destroy();
+    OSLRTrace(@"salir: retro_unload_game", NO);
     gCore.unloadGame();
+    OSLRTrace(@"salir: retro_deinit", NO);
     gCore.deinit();
+    OSLRTrace(@"salir: cerrar imagen", NO);
     OSLRDestroyGL();
     OSLRDestroyVulkan();
+    OSLRTrace(@"salir: listo", NO);
+    atomic_store(&gLoopDone, true);
     // Lo que el núcleo no devolvió del bloque permanente vuelve al bloque (el bloque se queda).
     for (NSValue *block in gJITSessionBlocks) OSLRJITPoolFree(block.pointerValue);
     [gJITSessionBlocks removeAllObjects];
@@ -3722,8 +3777,42 @@ typedef NS_ENUM(NSInteger, OSLRMenuAction) {
     [self finishSession];
 }
 
+/// El núcleo no terminó: se cierra su pantalla y se vuelve a la app (su hilo sigue ocupado).
+- (void)abandonSession {
+    [_audio stop];
+    _audio = nil;
+    gMessageHandler = nil;
+    OSLRGameViewController *controller = self.gameController;
+    self.gameController = nil;
+    controller.closing = YES;
+    [controller releaseExternalDisplay];
+    void (^done)(void) = ^{
+        self.busy = NO;
+        void (^ended)(void) = self.endedHandler;
+        self.endedHandler = nil;
+        if (ended) ended();
+    };
+    UIViewController *presenter = controller.presentingViewController;
+    if (presenter) {
+        [presenter dismissViewControllerAnimated:NO completion:done];
+    } else {
+        done();
+    }
+}
+
 - (void)finishSession {
     dispatch_async(dispatch_get_main_queue(), ^{
+        // Terminó tarde (ya se había vuelto a la biblioteca): solo queda limpiar.
+        if (atomic_load(&gCoreStuck)) {
+            atomic_store(&gCoreStuck, false);
+            free(gAudioRing);
+            gAudioRing = NULL;
+            gAudioCapacity = 0;
+            self->_gameData = nil;
+            gGLLayer = nil;
+            gMetalLayer = nil;
+            return;
+        }
         [self->_audio stop];
         self->_audio = nil;
         self->_gameData = nil;
@@ -3772,6 +3861,11 @@ typedef NS_ENUM(NSInteger, OSLRMenuAction) {
         completion(NO, OSLRText(language, @"Ya hay una partida abierta.", @"A game is already running."));
         return;
     }
+    if (atomic_load(&gCoreStuck)) {
+        completion(NO, OSLRText(language, @"El núcleo del juego anterior no terminó de cerrarse. Reabre OmniStation para jugar a estos sistemas (ARMSX2 y MeloNX siguen funcionando).",
+                                @"The previous game's core did not finish closing. Reopen OmniStation to play these systems (ARMSX2 and MeloNX still work)."));
+        return;
+    }
     if (![NSFileManager.defaultManager isReadableFileAtPath:gamePath]) {
         completion(NO, OSLRText(language, @"No se puede leer el archivo del juego.", @"The game file cannot be read."));
         return;
@@ -3811,6 +3905,9 @@ typedef NS_ENUM(NSInteger, OSLRMenuAction) {
     gJITCapable = gJITWanted && ([OSLibretroEngine jitActive] || pooled);
     gJITSessionBlocks = [NSMutableArray new];
     gJITUnanswered = 0;
+    atomic_store(&gLoopDone, false);
+    OSLRTrace([NSString stringWithFormat:@"abrir: %@ con %@ (JIT %@, depurador %@)", gamePath.lastPathComponent, framework,
+               [hostOptions[@"jit"] isEqualToString:@"true"] ? @"pedido" : @"no", OSLRIsTraced() ? @"enganchado" : @"no"], YES);
     gSessionStartFree = os_proc_available_memory();
     gSessionMinFree = 0;
     os_unfair_lock_lock(&gPendingLock);
@@ -3920,9 +4017,19 @@ typedef NS_ENUM(NSInteger, OSLRMenuAction) {
         OSLibretroEngine *strongSelf = weakSelf;
         if (!strongSelf) return;
         if (action == OSLRMenuActionQuit) {
+            OSLRTrace(@"salir: pedido", NO);
             weakController.closing = YES;
             atomic_store(&gRunning, false);
             atomic_store(&gPaused, false);
+            // Si el núcleo no termina de cerrarse, la app no se queda colgada en su pantalla: se
+            // vuelve a la biblioteca y se avisa (ese núcleo queda ocupado hasta reabrir la app).
+            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(12 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+                OSLibretroEngine *engine = weakSelf;
+                if (engine == nil || !engine.busy || atomic_load(&gLoopDone)) return;
+                OSLRTrace(@"salir: el núcleo no terminó en 12 s; se vuelve a la biblioteca", NO);
+                atomic_store(&gCoreStuck, true);
+                [engine abandonSession];
+            });
             return;
         }
         if (action != OSLRMenuActionResume) atomic_store(&gPendingAction, (int)action);

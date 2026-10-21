@@ -28,6 +28,10 @@ NS_ASSUME_NONNULL_BEGIN
 /// Prepara el bloque si aún no está y hay depurador enganchado (en iOS 26). YES si ya vale.
 + (BOOL)preparePersistentJIT;
 
+/// Cómo quedó: «ready», «» (no se ha intentado), «no-debugger», «unanswered» (el depurador no
+/// contestó), «vm_remap:…», «mprotect:…», «mmap:…», «no-txm».
+@property (class, nonatomic, readonly, copy) NSString *persistentJITStatus;
+
 /// Opciones que declara un núcleo, sin abrir ningún juego (para sus ajustes). Cada una: «key»,
 /// «title», «info», «category», «categoryTitle», «default» y «values» ([valor, etiqueta]).
 /// nil si hay una partida abierta o el núcleo no carga. Llamar en el hilo principal.
