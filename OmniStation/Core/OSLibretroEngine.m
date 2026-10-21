@@ -13,7 +13,7 @@
 #import "OSLibretroEngine.h"
 #import "OSExternalDisplay.h"
 #import "OSPerfHUD.h"
-#import "Libretro/libretro.h"
+#import "OSRetroAPI.h"   // libretro.h (MIT), en plano para que no se pierda en el repo
 
 #import <AVFoundation/AVFoundation.h>
 #import <GameController/GameController.h>
