@@ -16,6 +16,10 @@ NS_ASSUME_NONNULL_BEGIN
 /// ¿Tiene OmniStation JIT ahora mismo? (Depurador enganchado; en iOS 26, que siga enganchado.)
 @property (class, nonatomic, readonly) BOOL jitActive;
 
+/// Suelta el depurador enganchado con el script universal (al salir de un juego con JIT), para
+/// que la próxima vez se pueda volver a enganchar sin que se cuelgue.
++ (void)detachJITDebugger;
+
 /// Hay una partida abierta.
 @property (nonatomic, readonly) BOOL busy;
 

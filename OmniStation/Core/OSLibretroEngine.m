@@ -22,10 +22,15 @@
 #import "OSExternalDisplay.h"
 #import "OSPerfHUD.h"
 #import "OSRetroAPI.h"   // libretro.h (MIT), en plano para que no se pierda en el repo
+// Vulkan (3DS y GameCube/Wii): sin enlazar con nada; las funciones se piden a MoltenVK.
+#define VK_NO_PROTOTYPES 1
+#define VK_USE_PLATFORM_METAL_EXT 1
+#import "OSRetroVulkan.h" // libretro_vulkan.h (MIT); necesita Vendor/Vulkan-Headers
 
 #import <AVFoundation/AVFoundation.h>
 #import <GameController/GameController.h>
 #import <QuartzCore/QuartzCore.h>
+#import <Metal/Metal.h>
 #import <OpenGLES/EAGL.h>
 #import <OpenGLES/EAGLDrawable.h>
 #import <OpenGLES/ES3/gl.h>
@@ -40,6 +45,7 @@
 #import <sys/types.h>
 #import <sys/utsname.h>
 #import <unistd.h>
+#import <pthread.h>
 
 extern int csops(pid_t pid, unsigned int ops, void *useraddr, size_t usersize);
 
@@ -185,6 +191,15 @@ static _Atomic bool gGLLayerChanged;
 static _Atomic bool gGLLayerShown;
 static bool gGLSmooth;
 
+// Juegos de varios discos: la interfaz de discos del núcleo (solo desde el hilo de emulación).
+static struct retro_disk_control_ext_callback gDisk;
+static bool gHasDisk;
+static _Atomic unsigned gDiskCount;
+
+// Imagen por GPU con Vulkan (MoltenVK): la capa la crea la pantalla antes de arrancar.
+static CAMetalLayer *gMetalLayer;
+static _Atomic bool gMetalLayerChanged;
+
 // MARK: JIT y depurador
 
 static BOOL OSLRIsDebugged(void) {
@@ -226,8 +241,8 @@ static void OSLRTrapHandler(int signalNumber, siginfo_t *info, void *context) {
     sigaction(SIGTRAP, &gPreviousTrapAction, NULL);
 }
 
-static void OSLRInstallTrapGuard(void) {
-    if (gTrapGuardInstalled || !OSLRUsesJITScript() || OSLRIsTraced()) return;
+static void OSLRInstallTrapGuard(BOOL force) {
+    if (gTrapGuardInstalled || !OSLRUsesJITScript() || (!force && OSLRIsTraced())) return;
     struct sigaction action;
     memset(&action, 0, sizeof(action));
     action.sa_sigaction = OSLRTrapHandler;
@@ -236,10 +251,12 @@ static void OSLRInstallTrapGuard(void) {
     if (sigaction(SIGTRAP, &action, &gPreviousTrapAction) == 0) gTrapGuardInstalled = true;
 }
 
-static void OSLRRemoveTrapGuard(void) {
-    if (!gTrapGuardInstalled) return;
-    sigaction(SIGTRAP, &gPreviousTrapAction, NULL);
-    gTrapGuardInstalled = false;
+/// Suelta el depurador del script universal (comando 0): así la próxima vez se puede volver a
+/// enganchar. Sin depurador, la trampa de arriba lo contesta.
+__attribute__((noinline, naked)) static void OSLRUniversalDetach(void) {
+    __asm__ volatile("mov x16, #0\n"
+                     "brk #0xf00d\n"
+                     "ret");
 }
 
 // MARK: Opciones
@@ -475,12 +492,687 @@ static void OSLRPresentGL(unsigned width, unsigned height) {
     glBindRenderbuffer(GL_RENDERBUFFER, (GLuint)previousRenderbuffer);
 }
 
+// MARK: Imagen por GPU con Vulkan (MoltenVK)
+//
+// Como el controlador de Vulkan de RetroArch, en pequeño: OmniStation crea la instancia, el
+// dispositivo (o deja que lo haga el núcleo con su interfaz de negociación), la superficie sobre
+// una CAMetalLayer y la cadena de imágenes. El núcleo pinta en su imagen (set_image) y cada
+// fotograma se copia (blit) a la pantalla. La cola se comparte con el núcleo (lock/unlock).
+
+#define OSLR_VK_FRAMES 2
+#define OSLR_VK_MAX_SWAP 8
+#define OSLR_VK_MAX_WAITS 16
+
+static struct {
+    PFN_vkGetInstanceProcAddr GetInstanceProcAddr;
+    PFN_vkGetDeviceProcAddr GetDeviceProcAddr;
+    PFN_vkCreateInstance CreateInstance;
+    PFN_vkEnumerateInstanceExtensionProperties EnumerateInstanceExtensionProperties;
+    PFN_vkDestroyInstance DestroyInstance;
+    PFN_vkEnumeratePhysicalDevices EnumeratePhysicalDevices;
+    PFN_vkGetPhysicalDeviceFeatures GetPhysicalDeviceFeatures;
+    PFN_vkGetPhysicalDeviceQueueFamilyProperties GetPhysicalDeviceQueueFamilyProperties;
+    PFN_vkEnumerateDeviceExtensionProperties EnumerateDeviceExtensionProperties;
+    PFN_vkCreateDevice CreateDevice;
+    PFN_vkCreateMetalSurfaceEXT CreateMetalSurfaceEXT;
+    PFN_vkDestroySurfaceKHR DestroySurfaceKHR;
+    PFN_vkGetPhysicalDeviceSurfaceCapabilitiesKHR GetPhysicalDeviceSurfaceCapabilitiesKHR;
+    PFN_vkGetPhysicalDeviceSurfaceFormatsKHR GetPhysicalDeviceSurfaceFormatsKHR;
+    PFN_vkDestroyDevice DestroyDevice;
+    PFN_vkGetDeviceQueue GetDeviceQueue;
+    PFN_vkDeviceWaitIdle DeviceWaitIdle;
+    PFN_vkCreateSwapchainKHR CreateSwapchainKHR;
+    PFN_vkDestroySwapchainKHR DestroySwapchainKHR;
+    PFN_vkGetSwapchainImagesKHR GetSwapchainImagesKHR;
+    PFN_vkAcquireNextImageKHR AcquireNextImageKHR;
+    PFN_vkQueuePresentKHR QueuePresentKHR;
+    PFN_vkQueueSubmit QueueSubmit;
+    PFN_vkCreateCommandPool CreateCommandPool;
+    PFN_vkDestroyCommandPool DestroyCommandPool;
+    PFN_vkAllocateCommandBuffers AllocateCommandBuffers;
+    PFN_vkBeginCommandBuffer BeginCommandBuffer;
+    PFN_vkEndCommandBuffer EndCommandBuffer;
+    PFN_vkResetCommandBuffer ResetCommandBuffer;
+    PFN_vkCmdPipelineBarrier CmdPipelineBarrier;
+    PFN_vkCmdBlitImage CmdBlitImage;
+    PFN_vkCreateFence CreateFence;
+    PFN_vkDestroyFence DestroyFence;
+    PFN_vkWaitForFences WaitForFences;
+    PFN_vkResetFences ResetFences;
+    PFN_vkCreateSemaphore CreateSemaphore;
+    PFN_vkDestroySemaphore DestroySemaphore;
+} vk;
+
+static void *gVKLibrary;
+static VkInstance gVKInstance;
+static VkPhysicalDevice gVKGPU;
+static VkDevice gVKDevice;
+static VkQueue gVKQueue;
+static uint32_t gVKQueueFamily;
+static VkSurfaceKHR gVKSurface;
+static VkSwapchainKHR gVKSwapchain;
+static VkExtent2D gVKSwapExtent;
+static uint32_t gVKSwapCount;
+static VkImage gVKSwapImages[OSLR_VK_MAX_SWAP];
+static VkSemaphore gVKRendered[OSLR_VK_MAX_SWAP];
+static VkCommandPool gVKPool;
+static VkCommandBuffer gVKCommands[OSLR_VK_FRAMES];
+static VkFence gVKFences[OSLR_VK_FRAMES];
+static VkSemaphore gVKAcquired[OSLR_VK_FRAMES];
+static uint32_t gVKFrame;
+static bool gVKPortabilitySubset;
+static pthread_mutex_t gVKQueueLock = PTHREAD_MUTEX_INITIALIZER;
+// Lo que manda el núcleo para el fotograma.
+static struct retro_vulkan_image gVKImage;
+static bool gVKHasImage;
+static VkSemaphore gVKWaits[OSLR_VK_MAX_WAITS];
+static VkPipelineStageFlags gVKWaitStages[OSLR_VK_MAX_WAITS];
+static uint32_t gVKWaitCount;
+static VkCommandBuffer gVKCoreCommands[OSLR_VK_MAX_WAITS];
+static uint32_t gVKCoreCommandCount;
+static VkSemaphore gVKSignal;
+static struct retro_hw_render_interface_vulkan gVKInterface;
+static const struct retro_hw_render_context_negotiation_interface_vulkan *gVKNegotiation;
+static bool gVKCoreCreatedDevice;
+
+static BOOL OSLRLoadVulkanLibrary(void) {
+    if (gVKLibrary != NULL) return vk.GetInstanceProcAddr != NULL;
+    NSString *frameworks = NSBundle.mainBundle.privateFrameworksPath ?: [NSBundle.mainBundle.bundlePath stringByAppendingPathComponent:@"Frameworks"];
+    // El de MeloNX si va (así solo hay un MoltenVK en la app); si no, el de los núcleos.
+    NSArray<NSString *> *candidates = @[@"libMoltenVK.dylib", @"MoltenVK.framework/MoltenVK"];
+    for (NSString *relative in candidates) {
+        NSString *path = [frameworks stringByAppendingPathComponent:relative];
+        if (![NSFileManager.defaultManager fileExistsAtPath:path]) continue;
+        gVKLibrary = dlopen(path.fileSystemRepresentation, RTLD_NOW | RTLD_GLOBAL);
+        if (gVKLibrary != NULL) break;
+    }
+    if (gVKLibrary == NULL) return NO;
+    vk.GetInstanceProcAddr = (PFN_vkGetInstanceProcAddr)dlsym(gVKLibrary, "vkGetInstanceProcAddr");
+    if (vk.GetInstanceProcAddr == NULL) return NO;
+    vk.CreateInstance = (PFN_vkCreateInstance)vk.GetInstanceProcAddr(VK_NULL_HANDLE, "vkCreateInstance");
+    vk.EnumerateInstanceExtensionProperties = (PFN_vkEnumerateInstanceExtensionProperties)vk.GetInstanceProcAddr(VK_NULL_HANDLE, "vkEnumerateInstanceExtensionProperties");
+    return vk.CreateInstance != NULL;
+}
+
+static void OSLRLoadInstanceFunctions(VkInstance instance) {
+    #define OSLR_VKI(name) vk.name = (PFN_vk##name)vk.GetInstanceProcAddr(instance, "vk" #name)
+    OSLR_VKI(GetDeviceProcAddr);
+    OSLR_VKI(DestroyInstance);
+    OSLR_VKI(EnumeratePhysicalDevices);
+    OSLR_VKI(GetPhysicalDeviceFeatures);
+    OSLR_VKI(GetPhysicalDeviceQueueFamilyProperties);
+    OSLR_VKI(EnumerateDeviceExtensionProperties);
+    OSLR_VKI(CreateDevice);
+    OSLR_VKI(CreateMetalSurfaceEXT);
+    OSLR_VKI(DestroySurfaceKHR);
+    OSLR_VKI(GetPhysicalDeviceSurfaceCapabilitiesKHR);
+    OSLR_VKI(GetPhysicalDeviceSurfaceFormatsKHR);
+    #undef OSLR_VKI
+}
+
+static void OSLRLoadDeviceFunctions(VkDevice device) {
+    #define OSLR_VKD(name) vk.name = (PFN_vk##name)vk.GetDeviceProcAddr(device, "vk" #name)
+    OSLR_VKD(DestroyDevice);
+    OSLR_VKD(GetDeviceQueue);
+    OSLR_VKD(DeviceWaitIdle);
+    OSLR_VKD(CreateSwapchainKHR);
+    OSLR_VKD(DestroySwapchainKHR);
+    OSLR_VKD(GetSwapchainImagesKHR);
+    OSLR_VKD(AcquireNextImageKHR);
+    OSLR_VKD(QueuePresentKHR);
+    OSLR_VKD(QueueSubmit);
+    OSLR_VKD(CreateCommandPool);
+    OSLR_VKD(DestroyCommandPool);
+    OSLR_VKD(AllocateCommandBuffers);
+    OSLR_VKD(BeginCommandBuffer);
+    OSLR_VKD(EndCommandBuffer);
+    OSLR_VKD(ResetCommandBuffer);
+    OSLR_VKD(CmdPipelineBarrier);
+    OSLR_VKD(CmdBlitImage);
+    OSLR_VKD(CreateFence);
+    OSLR_VKD(DestroyFence);
+    OSLR_VKD(WaitForFences);
+    OSLR_VKD(ResetFences);
+    OSLR_VKD(CreateSemaphore);
+    OSLR_VKD(DestroySemaphore);
+    #undef OSLR_VKD
+}
+
+/// Junta las extensiones pedidas con las que necesita OmniStation (sin repetir).
+static NSArray<NSString *> *OSLRMergeExtensions(const char *const *names, uint32_t count, NSArray<NSString *> *extra) {
+    NSMutableArray<NSString *> *list = [NSMutableArray new];
+    for (uint32_t index = 0; index < count; index++) {
+        if (names[index] == NULL) continue;
+        NSString *name = [NSString stringWithUTF8String:names[index]];
+        if (name && ![list containsObject:name]) [list addObject:name];
+    }
+    for (NSString *name in extra) {
+        if (![list containsObject:name]) [list addObject:name];
+    }
+    return list;
+}
+
+/// Punteros C de una lista (viven mientras viva `storage`).
+static const char **OSLRCStrings(NSArray<NSString *> *list, NSMutableData *storage) {
+    [storage setLength:sizeof(char *) * MAX(list.count, 1u)];
+    const char **pointers = (const char **)storage.mutableBytes;
+    for (NSUInteger index = 0; index < list.count; index++) pointers[index] = list[index].UTF8String;
+    return pointers;
+}
+
+static NSArray<NSString *> *OSLRInstanceExtensions(void) {
+    NSMutableArray<NSString *> *wanted = [NSMutableArray arrayWithArray:@[@VK_KHR_SURFACE_EXTENSION_NAME, @VK_EXT_METAL_SURFACE_EXTENSION_NAME]];
+    // Si MoltenVK la tiene, la de propiedades 2 (la piden muchos núcleos).
+    uint32_t count = 0;
+    if (vk.EnumerateInstanceExtensionProperties && vk.EnumerateInstanceExtensionProperties(NULL, &count, NULL) == VK_SUCCESS && count > 0) {
+        VkExtensionProperties *properties = calloc(count, sizeof(VkExtensionProperties));
+        if (properties && vk.EnumerateInstanceExtensionProperties(NULL, &count, properties) == VK_SUCCESS) {
+            for (uint32_t index = 0; index < count; index++) {
+                if (strcmp(properties[index].extensionName, VK_KHR_GET_PHYSICAL_DEVICE_PROPERTIES_2_EXTENSION_NAME) == 0) {
+                    [wanted addObject:@VK_KHR_GET_PHYSICAL_DEVICE_PROPERTIES_2_EXTENSION_NAME];
+                }
+            }
+        }
+        free(properties);
+    }
+    return wanted;
+}
+
+static NSArray<NSString *> *OSLRDeviceExtensions(VkPhysicalDevice gpu) {
+    NSMutableArray<NSString *> *wanted = [NSMutableArray arrayWithObject:@VK_KHR_SWAPCHAIN_EXTENSION_NAME];
+    gVKPortabilitySubset = false;
+    uint32_t count = 0;
+    if (vk.EnumerateDeviceExtensionProperties && vk.EnumerateDeviceExtensionProperties(gpu, NULL, &count, NULL) == VK_SUCCESS && count > 0) {
+        VkExtensionProperties *properties = calloc(count, sizeof(VkExtensionProperties));
+        if (properties && vk.EnumerateDeviceExtensionProperties(gpu, NULL, &count, properties) == VK_SUCCESS) {
+            for (uint32_t index = 0; index < count; index++) {
+                // MoltenVK: si existe, hay que activarla.
+                if (strcmp(properties[index].extensionName, "VK_KHR_portability_subset") == 0) {
+                    [wanted addObject:@"VK_KHR_portability_subset"];
+                    gVKPortabilitySubset = true;
+                }
+            }
+        }
+        free(properties);
+    }
+    return wanted;
+}
+
+static VkInstance OSLRCreateInstanceWrapper(void *opaque, const VkInstanceCreateInfo *createInfo) {
+    if (createInfo == NULL) return VK_NULL_HANDLE;
+    VkInstanceCreateInfo info = *createInfo;
+    NSArray<NSString *> *extensions = OSLRMergeExtensions(createInfo->ppEnabledExtensionNames, createInfo->enabledExtensionCount, OSLRInstanceExtensions());
+    NSMutableData *storage = [NSMutableData new];
+    info.ppEnabledExtensionNames = OSLRCStrings(extensions, storage);
+    info.enabledExtensionCount = (uint32_t)extensions.count;
+    VkInstance instance = VK_NULL_HANDLE;
+    if (vk.CreateInstance(&info, NULL, &instance) != VK_SUCCESS) return VK_NULL_HANDLE;
+    return instance;
+}
+
+static VkDevice OSLRCreateDeviceWrapper(VkPhysicalDevice gpu, void *opaque, const VkDeviceCreateInfo *createInfo) {
+    if (createInfo == NULL) return VK_NULL_HANDLE;
+    VkDeviceCreateInfo info = *createInfo;
+    NSArray<NSString *> *extensions = OSLRMergeExtensions(createInfo->ppEnabledExtensionNames, createInfo->enabledExtensionCount, OSLRDeviceExtensions(gpu));
+    NSMutableData *storage = [NSMutableData new];
+    info.ppEnabledExtensionNames = OSLRCStrings(extensions, storage);
+    info.enabledExtensionCount = (uint32_t)extensions.count;
+    VkDevice device = VK_NULL_HANDLE;
+    if (vk.CreateDevice(gpu, &info, NULL, &device) != VK_SUCCESS) return VK_NULL_HANDLE;
+    return device;
+}
+
+// Lo que el núcleo llama durante la partida.
+static void OSLRVKSetImage(void *handle, const struct retro_vulkan_image *image, uint32_t count, const VkSemaphore *semaphores, uint32_t sourceFamily) {
+    if (image == NULL) {
+        gVKHasImage = false;
+        return;
+    }
+    gVKImage = *image;
+    gVKHasImage = true;
+    gVKWaitCount = 0;
+    for (uint32_t index = 0; index < count && index < OSLR_VK_MAX_WAITS; index++) {
+        gVKWaits[gVKWaitCount] = semaphores[index];
+        gVKWaitStages[gVKWaitCount] = VK_PIPELINE_STAGE_ALL_COMMANDS_BIT;
+        gVKWaitCount++;
+    }
+}
+
+static uint32_t OSLRVKSyncIndex(void *handle) { return gVKFrame; }
+static uint32_t OSLRVKSyncIndexMask(void *handle) { return (1u << OSLR_VK_FRAMES) - 1u; }
+
+static void OSLRVKSetCommandBuffers(void *handle, uint32_t count, const VkCommandBuffer *commands) {
+    gVKCoreCommandCount = 0;
+    for (uint32_t index = 0; index < count && index < OSLR_VK_MAX_WAITS; index++) {
+        gVKCoreCommands[gVKCoreCommandCount++] = commands[index];
+    }
+}
+
+static void OSLRVKWaitSyncIndex(void *handle) {
+    if (gVKDevice == VK_NULL_HANDLE) return;
+    vk.WaitForFences(gVKDevice, 1, &gVKFences[gVKFrame], VK_TRUE, UINT64_MAX);
+}
+
+static void OSLRVKLockQueue(void *handle) { pthread_mutex_lock(&gVKQueueLock); }
+static void OSLRVKUnlockQueue(void *handle) { pthread_mutex_unlock(&gVKQueueLock); }
+static void OSLRVKSetSignalSemaphore(void *handle, VkSemaphore semaphore) { gVKSignal = semaphore; }
+
+static void OSLRDestroySwapchain(void) {
+    if (gVKDevice == VK_NULL_HANDLE) return;
+    for (uint32_t index = 0; index < OSLR_VK_MAX_SWAP; index++) {
+        if (gVKRendered[index] != VK_NULL_HANDLE) vk.DestroySemaphore(gVKDevice, gVKRendered[index], NULL);
+        gVKRendered[index] = VK_NULL_HANDLE;
+    }
+    if (gVKSwapchain != VK_NULL_HANDLE) vk.DestroySwapchainKHR(gVKDevice, gVKSwapchain, NULL);
+    gVKSwapchain = VK_NULL_HANDLE;
+    gVKSwapCount = 0;
+}
+
+/// (Re)hace la cadena de imágenes con el tamaño de la capa. NO si ahora no se puede (capa sin tamaño).
+static BOOL OSLRCreateSwapchain(void) {
+    pthread_mutex_lock(&gVKQueueLock);
+    vk.DeviceWaitIdle(gVKDevice);
+    pthread_mutex_unlock(&gVKQueueLock);
+    VkSwapchainKHR old = gVKSwapchain;
+    for (uint32_t index = 0; index < OSLR_VK_MAX_SWAP; index++) {
+        if (gVKRendered[index] != VK_NULL_HANDLE) vk.DestroySemaphore(gVKDevice, gVKRendered[index], NULL);
+        gVKRendered[index] = VK_NULL_HANDLE;
+    }
+    gVKSwapCount = 0;
+    VkSurfaceCapabilitiesKHR caps;
+    memset(&caps, 0, sizeof(caps));
+    if (vk.GetPhysicalDeviceSurfaceCapabilitiesKHR(gVKGPU, gVKSurface, &caps) != VK_SUCCESS) return NO;
+    VkExtent2D extent = caps.currentExtent;
+    if (extent.width == UINT32_MAX || extent.width == 0) {
+        CGSize size = gMetalLayer.drawableSize;
+        extent.width = (uint32_t)MAX(size.width, 0);
+        extent.height = (uint32_t)MAX(size.height, 0);
+    }
+    if (extent.width == 0 || extent.height == 0) {
+        if (old != VK_NULL_HANDLE) vk.DestroySwapchainKHR(gVKDevice, old, NULL);
+        gVKSwapchain = VK_NULL_HANDLE;
+        return NO;
+    }
+    uint32_t formatCount = 0;
+    vk.GetPhysicalDeviceSurfaceFormatsKHR(gVKGPU, gVKSurface, &formatCount, NULL);
+    VkSurfaceFormatKHR chosen = {VK_FORMAT_B8G8R8A8_UNORM, VK_COLOR_SPACE_SRGB_NONLINEAR_KHR};
+    if (formatCount > 0) {
+        VkSurfaceFormatKHR *formats = calloc(formatCount, sizeof(VkSurfaceFormatKHR));
+        if (formats && vk.GetPhysicalDeviceSurfaceFormatsKHR(gVKGPU, gVKSurface, &formatCount, formats) == VK_SUCCESS) {
+            chosen = formats[0];
+            for (uint32_t index = 0; index < formatCount; index++) {
+                if (formats[index].format == VK_FORMAT_B8G8R8A8_UNORM) { chosen = formats[index]; break; }
+            }
+        }
+        free(formats);
+    }
+    uint32_t minimum = MAX(caps.minImageCount, 3u);
+    if (caps.maxImageCount > 0) minimum = MIN(minimum, caps.maxImageCount);
+    VkCompositeAlphaFlagBitsKHR alpha = VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR;
+    if (!(caps.supportedCompositeAlpha & alpha)) {
+        for (uint32_t bit = 1; bit <= VK_COMPOSITE_ALPHA_INHERIT_BIT_KHR; bit <<= 1) {
+            if (caps.supportedCompositeAlpha & bit) { alpha = (VkCompositeAlphaFlagBitsKHR)bit; break; }
+        }
+    }
+    VkSwapchainCreateInfoKHR info;
+    memset(&info, 0, sizeof(info));
+    info.sType = VK_STRUCTURE_TYPE_SWAPCHAIN_CREATE_INFO_KHR;
+    info.surface = gVKSurface;
+    info.minImageCount = minimum;
+    info.imageFormat = chosen.format;
+    info.imageColorSpace = chosen.colorSpace;
+    info.imageExtent = extent;
+    info.imageArrayLayers = 1;
+    info.imageUsage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT;
+    info.imageSharingMode = VK_SHARING_MODE_EXCLUSIVE;
+    info.preTransform = caps.currentTransform;
+    info.compositeAlpha = alpha;
+    info.presentMode = VK_PRESENT_MODE_FIFO_KHR;
+    info.clipped = VK_TRUE;
+    info.oldSwapchain = old;
+    VkSwapchainKHR swapchain = VK_NULL_HANDLE;
+    VkResult result = vk.CreateSwapchainKHR(gVKDevice, &info, NULL, &swapchain);
+    if (old != VK_NULL_HANDLE) vk.DestroySwapchainKHR(gVKDevice, old, NULL);
+    gVKSwapchain = VK_NULL_HANDLE;
+    if (result != VK_SUCCESS) return NO;
+    uint32_t count = 0;
+    vk.GetSwapchainImagesKHR(gVKDevice, swapchain, &count, NULL);
+    count = MIN(count, (uint32_t)OSLR_VK_MAX_SWAP);
+    vk.GetSwapchainImagesKHR(gVKDevice, swapchain, &count, gVKSwapImages);
+    VkSemaphoreCreateInfo semaphoreInfo = {VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO, NULL, 0};
+    for (uint32_t index = 0; index < count; index++) vk.CreateSemaphore(gVKDevice, &semaphoreInfo, NULL, &gVKRendered[index]);
+    gVKSwapchain = swapchain;
+    gVKSwapCount = count;
+    gVKSwapExtent = extent;
+    return YES;
+}
+
+/// Crea todo lo de Vulkan después de cargar el juego (antes de context_reset).
+static BOOL OSLRCreateVulkan(void) {
+    if (gMetalLayer == nil || !OSLRLoadVulkanLibrary()) return NO;
+    const struct retro_hw_render_context_negotiation_interface_vulkan *negotiation = gVKNegotiation;
+    VkApplicationInfo defaultApp = {VK_STRUCTURE_TYPE_APPLICATION_INFO, NULL, "OmniStation Dock", 1, "OmniStation", 1, VK_API_VERSION_1_1};
+    const VkApplicationInfo *app = &defaultApp;
+    if (negotiation && negotiation->get_application_info) {
+        const VkApplicationInfo *coreApp = negotiation->get_application_info();
+        if (coreApp) app = coreApp;
+    }
+    // Instancia: la del núcleo (negociación v2) o la de OmniStation.
+    if (negotiation && negotiation->interface_version >= 2 && negotiation->create_instance) {
+        gVKInstance = negotiation->create_instance(vk.GetInstanceProcAddr, app, OSLRCreateInstanceWrapper, NULL);
+    }
+    if (gVKInstance == VK_NULL_HANDLE) {
+        VkInstanceCreateInfo info;
+        memset(&info, 0, sizeof(info));
+        info.sType = VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO;
+        info.pApplicationInfo = app;
+        gVKInstance = OSLRCreateInstanceWrapper(NULL, &info);
+    }
+    if (gVKInstance == VK_NULL_HANDLE) return NO;
+    OSLRLoadInstanceFunctions(gVKInstance);
+    if (vk.CreateMetalSurfaceEXT == NULL || vk.GetDeviceProcAddr == NULL) return NO;
+    VkMetalSurfaceCreateInfoEXT surfaceInfo = {
+        .sType = VK_STRUCTURE_TYPE_METAL_SURFACE_CREATE_INFO_EXT,
+        .pNext = NULL,
+        .flags = 0,
+        .pLayer = gMetalLayer,
+    };
+    if (vk.CreateMetalSurfaceEXT(gVKInstance, &surfaceInfo, NULL, &gVKSurface) != VK_SUCCESS) return NO;
+    uint32_t gpuCount = 1;
+    VkPhysicalDevice gpu = VK_NULL_HANDLE;
+    if (vk.EnumeratePhysicalDevices(gVKInstance, &gpuCount, &gpu) < 0 || gpu == VK_NULL_HANDLE) return NO;
+    // Dispositivo: el del núcleo (negociación) o el de OmniStation.
+    struct retro_vulkan_context context;
+    memset(&context, 0, sizeof(context));
+    BOOL created = NO;
+    if (negotiation && negotiation->interface_version >= 2 && negotiation->create_device2) {
+        created = negotiation->create_device2(&context, gVKInstance, gpu, gVKSurface, vk.GetInstanceProcAddr, OSLRCreateDeviceWrapper, NULL);
+        if (!created) {
+            memset(&context, 0, sizeof(context));
+            created = negotiation->create_device2(&context, gVKInstance, VK_NULL_HANDLE, gVKSurface, vk.GetInstanceProcAddr, OSLRCreateDeviceWrapper, NULL);
+        }
+    } else if (negotiation && negotiation->create_device) {
+        NSArray<NSString *> *extensions = OSLRDeviceExtensions(gpu);
+        NSMutableData *storage = [NSMutableData new];
+        const char **names = OSLRCStrings(extensions, storage);
+        VkPhysicalDeviceFeatures features;
+        memset(&features, 0, sizeof(features));
+        created = negotiation->create_device(&context, gVKInstance, gpu, gVKSurface, vk.GetInstanceProcAddr,
+                                             names, (unsigned)extensions.count, NULL, 0, &features);
+    }
+    if (created && context.device != VK_NULL_HANDLE) {
+        gVKCoreCreatedDevice = true;
+        gVKGPU = context.gpu;
+        gVKDevice = context.device;
+        gVKQueue = context.queue;
+        gVKQueueFamily = context.queue_family_index;
+    } else {
+        // Como RetroArch sin negociación: una cola de gráficos y todas las funciones que tenga la GPU.
+        gVKGPU = gpu;
+        uint32_t familyCount = 0;
+        vk.GetPhysicalDeviceQueueFamilyProperties(gpu, &familyCount, NULL);
+        VkQueueFamilyProperties families[16];
+        familyCount = MIN(familyCount, 16u);
+        vk.GetPhysicalDeviceQueueFamilyProperties(gpu, &familyCount, families);
+        gVKQueueFamily = 0;
+        for (uint32_t index = 0; index < familyCount; index++) {
+            if (families[index].queueFlags & VK_QUEUE_GRAPHICS_BIT) { gVKQueueFamily = index; break; }
+        }
+        float priority = 1.0f;
+        VkDeviceQueueCreateInfo queueInfo;
+        memset(&queueInfo, 0, sizeof(queueInfo));
+        queueInfo.sType = VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO;
+        queueInfo.queueFamilyIndex = gVKQueueFamily;
+        queueInfo.queueCount = 1;
+        queueInfo.pQueuePriorities = &priority;
+        VkPhysicalDeviceFeatures features;
+        memset(&features, 0, sizeof(features));
+        vk.GetPhysicalDeviceFeatures(gpu, &features);
+        features.robustBufferAccess = VK_FALSE;
+        VkDeviceCreateInfo info;
+        memset(&info, 0, sizeof(info));
+        info.sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO;
+        info.queueCreateInfoCount = 1;
+        info.pQueueCreateInfos = &queueInfo;
+        info.pEnabledFeatures = &features;
+        gVKDevice = OSLRCreateDeviceWrapper(gpu, NULL, &info);
+        if (gVKDevice == VK_NULL_HANDLE) return NO;
+        OSLRLoadDeviceFunctions(gVKDevice);
+        vk.GetDeviceQueue(gVKDevice, gVKQueueFamily, 0, &gVKQueue);
+    }
+    OSLRLoadDeviceFunctions(gVKDevice);
+    if (vk.QueueSubmit == NULL || vk.CreateSwapchainKHR == NULL || gVKQueue == VK_NULL_HANDLE) return NO;
+    // Lo de cada fotograma.
+    VkCommandPoolCreateInfo poolInfo;
+    memset(&poolInfo, 0, sizeof(poolInfo));
+    poolInfo.sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO;
+    poolInfo.flags = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT;
+    poolInfo.queueFamilyIndex = gVKQueueFamily;
+    if (vk.CreateCommandPool(gVKDevice, &poolInfo, NULL, &gVKPool) != VK_SUCCESS) return NO;
+    VkCommandBufferAllocateInfo allocate;
+    memset(&allocate, 0, sizeof(allocate));
+    allocate.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
+    allocate.commandPool = gVKPool;
+    allocate.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+    allocate.commandBufferCount = OSLR_VK_FRAMES;
+    if (vk.AllocateCommandBuffers(gVKDevice, &allocate, gVKCommands) != VK_SUCCESS) return NO;
+    VkFenceCreateInfo fenceInfo = {VK_STRUCTURE_TYPE_FENCE_CREATE_INFO, NULL, VK_FENCE_CREATE_SIGNALED_BIT};
+    VkSemaphoreCreateInfo semaphoreInfo = {VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO, NULL, 0};
+    for (uint32_t index = 0; index < OSLR_VK_FRAMES; index++) {
+        vk.CreateFence(gVKDevice, &fenceInfo, NULL, &gVKFences[index]);
+        vk.CreateSemaphore(gVKDevice, &semaphoreInfo, NULL, &gVKAcquired[index]);
+    }
+    gVKFrame = 0;
+    atomic_store(&gMetalLayerChanged, true);
+    // La interfaz que pide el núcleo (GET_HW_RENDER_INTERFACE).
+    memset(&gVKInterface, 0, sizeof(gVKInterface));
+    gVKInterface.interface_type = RETRO_HW_RENDER_INTERFACE_VULKAN;
+    gVKInterface.interface_version = RETRO_HW_RENDER_INTERFACE_VULKAN_VERSION;
+    gVKInterface.handle = &gVKInterface;
+    gVKInterface.instance = gVKInstance;
+    gVKInterface.gpu = gVKGPU;
+    gVKInterface.device = gVKDevice;
+    gVKInterface.get_device_proc_addr = vk.GetDeviceProcAddr;
+    gVKInterface.get_instance_proc_addr = vk.GetInstanceProcAddr;
+    gVKInterface.queue = gVKQueue;
+    gVKInterface.queue_index = gVKQueueFamily;
+    gVKInterface.set_image = OSLRVKSetImage;
+    gVKInterface.get_sync_index = OSLRVKSyncIndex;
+    gVKInterface.get_sync_index_mask = OSLRVKSyncIndexMask;
+    gVKInterface.set_command_buffers = OSLRVKSetCommandBuffers;
+    gVKInterface.wait_sync_index = OSLRVKWaitSyncIndex;
+    gVKInterface.lock_queue = OSLRVKLockQueue;
+    gVKInterface.unlock_queue = OSLRVKUnlockQueue;
+    gVKInterface.set_signal_semaphore = OSLRVKSetSignalSemaphore;
+    return YES;
+}
+
+static void OSLRDestroyVulkan(void) {
+    if (gVKDevice != VK_NULL_HANDLE) {
+        pthread_mutex_lock(&gVKQueueLock);
+        vk.DeviceWaitIdle(gVKDevice);
+        pthread_mutex_unlock(&gVKQueueLock);
+        OSLRDestroySwapchain();
+        for (uint32_t index = 0; index < OSLR_VK_FRAMES; index++) {
+            if (gVKFences[index] != VK_NULL_HANDLE) vk.DestroyFence(gVKDevice, gVKFences[index], NULL);
+            if (gVKAcquired[index] != VK_NULL_HANDLE) vk.DestroySemaphore(gVKDevice, gVKAcquired[index], NULL);
+            gVKFences[index] = VK_NULL_HANDLE;
+            gVKAcquired[index] = VK_NULL_HANDLE;
+            gVKCommands[index] = VK_NULL_HANDLE;
+        }
+        if (gVKPool != VK_NULL_HANDLE) vk.DestroyCommandPool(gVKDevice, gVKPool, NULL);
+        gVKPool = VK_NULL_HANDLE;
+    }
+    // Lo propio del núcleo, antes de que se vaya el dispositivo.
+    if (gVKCoreCreatedDevice && gVKNegotiation && gVKNegotiation->destroy_device) gVKNegotiation->destroy_device();
+    if (gVKDevice != VK_NULL_HANDLE) vk.DestroyDevice(gVKDevice, NULL);
+    if (gVKSurface != VK_NULL_HANDLE && vk.DestroySurfaceKHR) vk.DestroySurfaceKHR(gVKInstance, gVKSurface, NULL);
+    if (gVKInstance != VK_NULL_HANDLE && vk.DestroyInstance) vk.DestroyInstance(gVKInstance, NULL);
+    gVKDevice = VK_NULL_HANDLE;
+    gVKSurface = VK_NULL_HANDLE;
+    gVKInstance = VK_NULL_HANDLE;
+    gVKGPU = VK_NULL_HANDLE;
+    gVKQueue = VK_NULL_HANDLE;
+    gVKCoreCreatedDevice = false;
+    gVKNegotiation = NULL;
+    gVKHasImage = false;
+    gVKWaitCount = 0;
+    gVKCoreCommandCount = 0;
+    gVKSignal = VK_NULL_HANDLE;
+}
+
+static void OSLRImageBarrier(VkCommandBuffer command, VkImage image, VkImageLayout from, VkImageLayout to,
+                             VkAccessFlags srcAccess, VkAccessFlags dstAccess,
+                             VkPipelineStageFlags srcStage, VkPipelineStageFlags dstStage) {
+    VkImageMemoryBarrier barrier;
+    memset(&barrier, 0, sizeof(barrier));
+    barrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+    barrier.srcAccessMask = srcAccess;
+    barrier.dstAccessMask = dstAccess;
+    barrier.oldLayout = from;
+    barrier.newLayout = to;
+    barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    barrier.image = image;
+    barrier.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+    barrier.subresourceRange.levelCount = 1;
+    barrier.subresourceRange.layerCount = 1;
+    vk.CmdPipelineBarrier(command, srcStage, dstStage, 0, 0, NULL, 0, NULL, 1, &barrier);
+}
+
+/// Copia la imagen del núcleo (width × height) a la pantalla y la muestra.
+static void OSLRPresentVulkan(unsigned width, unsigned height) {
+    if (gVKDevice == VK_NULL_HANDLE || !gVKHasImage || atomic_load(&gBackground)) return;
+    if (atomic_exchange(&gMetalLayerChanged, false) || gVKSwapchain == VK_NULL_HANDLE) OSLRCreateSwapchain();
+    uint32_t frame = gVKFrame;
+    VkCommandBuffer command = gVKCommands[frame];
+    VkFence fence = gVKFences[frame];
+    vk.WaitForFences(gVKDevice, 1, &fence, VK_TRUE, UINT64_MAX);
+    uint32_t imageIndex = 0;
+    BOOL haveTarget = NO;
+    if (gVKSwapchain != VK_NULL_HANDLE) {
+        VkResult acquired = vk.AcquireNextImageKHR(gVKDevice, gVKSwapchain, UINT64_MAX, gVKAcquired[frame], VK_NULL_HANDLE, &imageIndex);
+        haveTarget = (acquired == VK_SUCCESS || acquired == VK_SUBOPTIMAL_KHR) && imageIndex < gVKSwapCount;
+        if (acquired == VK_ERROR_OUT_OF_DATE_KHR || acquired == VK_SUBOPTIMAL_KHR) atomic_store(&gMetalLayerChanged, true);
+    }
+    vk.ResetFences(gVKDevice, 1, &fence);
+    vk.ResetCommandBuffer(command, 0);
+    VkCommandBufferBeginInfo begin;
+    memset(&begin, 0, sizeof(begin));
+    begin.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
+    begin.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+    vk.BeginCommandBuffer(command, &begin);
+    VkImage source = gVKImage.create_info.image;
+    VkImageLayout layout = gVKImage.image_layout;
+    if (haveTarget && source != VK_NULL_HANDLE) {
+        VkImage target = gVKSwapImages[imageIndex];
+        OSLRImageBarrier(command, source, layout, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                         VK_ACCESS_MEMORY_WRITE_BIT, VK_ACCESS_TRANSFER_READ_BIT,
+                         VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT);
+        OSLRImageBarrier(command, target, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                         0, VK_ACCESS_TRANSFER_WRITE_BIT,
+                         VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT);
+        VkImageBlit region;
+        memset(&region, 0, sizeof(region));
+        region.srcSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+        region.srcSubresource.layerCount = 1;
+        region.srcOffsets[1].x = (int32_t)width;
+        region.srcOffsets[1].y = (int32_t)height;
+        region.srcOffsets[1].z = 1;
+        region.dstSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+        region.dstSubresource.layerCount = 1;
+        region.dstOffsets[1].x = (int32_t)gVKSwapExtent.width;
+        region.dstOffsets[1].y = (int32_t)gVKSwapExtent.height;
+        region.dstOffsets[1].z = 1;
+        vk.CmdBlitImage(command, source, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, target, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                        1, &region, gGLSmooth ? VK_FILTER_LINEAR : VK_FILTER_NEAREST);
+        OSLRImageBarrier(command, target, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_PRESENT_SRC_KHR,
+                         VK_ACCESS_TRANSFER_WRITE_BIT, 0,
+                         VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT);
+        OSLRImageBarrier(command, source, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, layout,
+                         VK_ACCESS_TRANSFER_READ_BIT, VK_ACCESS_MEMORY_READ_BIT | VK_ACCESS_MEMORY_WRITE_BIT,
+                         VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT);
+    }
+    vk.EndCommandBuffer(command);
+    // Primero lo que mandó el núcleo (esperando sus semáforos) y luego la copia.
+    VkSubmitInfo submits[2];
+    memset(submits, 0, sizeof(submits));
+    uint32_t submitCount = 0;
+    VkSemaphore ownWaits[OSLR_VK_MAX_WAITS + 1];
+    VkPipelineStageFlags ownStages[OSLR_VK_MAX_WAITS + 1];
+    uint32_t ownWaitCount = 0;
+    if (gVKCoreCommandCount > 0) {
+        submits[0].sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
+        submits[0].waitSemaphoreCount = gVKWaitCount;
+        submits[0].pWaitSemaphores = gVKWaits;
+        submits[0].pWaitDstStageMask = gVKWaitStages;
+        submits[0].commandBufferCount = gVKCoreCommandCount;
+        submits[0].pCommandBuffers = gVKCoreCommands;
+        submitCount = 1;
+    } else {
+        for (uint32_t index = 0; index < gVKWaitCount; index++) {
+            ownWaits[ownWaitCount] = gVKWaits[index];
+            ownStages[ownWaitCount] = VK_PIPELINE_STAGE_ALL_COMMANDS_BIT;
+            ownWaitCount++;
+        }
+    }
+    if (haveTarget) {
+        ownWaits[ownWaitCount] = gVKAcquired[frame];
+        ownStages[ownWaitCount] = VK_PIPELINE_STAGE_TRANSFER_BIT;
+        ownWaitCount++;
+    }
+    VkSemaphore signals[2];
+    uint32_t signalCount = 0;
+    if (haveTarget) signals[signalCount++] = gVKRendered[imageIndex];
+    if (gVKSignal != VK_NULL_HANDLE) signals[signalCount++] = gVKSignal;
+    VkSubmitInfo *own = &submits[submitCount];
+    own->sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
+    own->waitSemaphoreCount = ownWaitCount;
+    own->pWaitSemaphores = ownWaits;
+    own->pWaitDstStageMask = ownStages;
+    own->commandBufferCount = 1;
+    own->pCommandBuffers = &command;
+    own->signalSemaphoreCount = signalCount;
+    own->pSignalSemaphores = signals;
+    submitCount++;
+    pthread_mutex_lock(&gVKQueueLock);
+    VkResult submitted = vk.QueueSubmit(gVKQueue, submitCount, submits, fence);
+    if (haveTarget && submitted == VK_SUCCESS) {
+        VkPresentInfoKHR present;
+        memset(&present, 0, sizeof(present));
+        present.sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR;
+        present.waitSemaphoreCount = 1;
+        present.pWaitSemaphores = &gVKRendered[imageIndex];
+        present.swapchainCount = 1;
+        present.pSwapchains = &gVKSwapchain;
+        present.pImageIndices = &imageIndex;
+        VkResult presented = vk.QueuePresentKHR(gVKQueue, &present);
+        if (presented == VK_ERROR_OUT_OF_DATE_KHR || presented == VK_SUBOPTIMAL_KHR) atomic_store(&gMetalLayerChanged, true);
+    }
+    pthread_mutex_unlock(&gVKQueueLock);
+    // Los semáforos y comandos de set_image se usan una sola vez.
+    gVKWaitCount = 0;
+    gVKCoreCommandCount = 0;
+    gVKSignal = VK_NULL_HANDLE;
+    gVKFrame = (gVKFrame + 1) % OSLR_VK_FRAMES;
+    if (haveTarget && !atomic_exchange(&gGLLayerShown, true)) {
+        dispatch_async(dispatch_get_main_queue(), ^{ gMetalLayer.hidden = NO; });
+    }
+}
+
 static bool OSLREnvironment(unsigned command, void *data) {
     switch (command) {
         case RETRO_ENVIRONMENT_SET_HW_RENDER: {
             struct retro_hw_render_callback *callback = data;
-            if (callback == NULL || gGLLayer == nil) return false;
+            if (callback == NULL) return false;
             enum retro_hw_context_type type = callback->context_type;
+            if (type == RETRO_HW_CONTEXT_VULKAN) {
+                if (gMetalLayer == nil) return false;
+                gHWCallback = *callback;
+                gHWRequested = true;
+                return true;
+            }
+            if (gGLLayer == nil) return false;
             BOOL gles = type == RETRO_HW_CONTEXT_OPENGLES2 || type == RETRO_HW_CONTEXT_OPENGLES3 ||
                 (type == RETRO_HW_CONTEXT_OPENGLES_VERSION && callback->version_major <= 3);
             if (!gles) return false;
@@ -491,11 +1183,56 @@ static bool OSLREnvironment(unsigned command, void *data) {
             return true;
         }
         case RETRO_ENVIRONMENT_GET_PREFERRED_HW_RENDER:
+            if (gMetalLayer != nil) {
+                if (data) *(unsigned *)data = RETRO_HW_CONTEXT_VULKAN;
+                return true;
+            }
             if (gGLLayer == nil) return false;
             if (data) *(unsigned *)data = RETRO_HW_CONTEXT_OPENGLES3;
             return true;
         case RETRO_ENVIRONMENT_SET_HW_SHARED_CONTEXT:
-            return gGLLayer != nil;
+            return gGLLayer != nil || gMetalLayer != nil;
+        case RETRO_ENVIRONMENT_GET_HW_RENDER_INTERFACE: {
+            if (data == NULL || gVKDevice == VK_NULL_HANDLE) return false;
+            *(const struct retro_hw_render_interface **)data = (const struct retro_hw_render_interface *)&gVKInterface;
+            return true;
+        }
+        case RETRO_ENVIRONMENT_SET_HW_RENDER_CONTEXT_NEGOTIATION_INTERFACE: {
+            const struct retro_hw_render_context_negotiation_interface *iface = data;
+            if (iface == NULL || iface->interface_type != RETRO_HW_RENDER_CONTEXT_NEGOTIATION_INTERFACE_VULKAN) return false;
+            gVKNegotiation = (const struct retro_hw_render_context_negotiation_interface_vulkan *)iface;
+            return true;
+        }
+        case RETRO_ENVIRONMENT_GET_HW_RENDER_CONTEXT_NEGOTIATION_INTERFACE_SUPPORT: {
+            struct retro_hw_render_context_negotiation_interface *iface = data;
+            if (iface == NULL || iface->interface_type != RETRO_HW_RENDER_CONTEXT_NEGOTIATION_INTERFACE_VULKAN) return false;
+            iface->interface_version = RETRO_HW_RENDER_CONTEXT_NEGOTIATION_INTERFACE_VULKAN_VERSION;
+            return true;
+        }
+        case RETRO_ENVIRONMENT_SET_DISK_CONTROL_INTERFACE: {
+            const struct retro_disk_control_callback *callback = data;
+            if (callback == NULL) return false;
+            memset(&gDisk, 0, sizeof(gDisk));
+            gDisk.set_eject_state = callback->set_eject_state;
+            gDisk.get_eject_state = callback->get_eject_state;
+            gDisk.get_image_index = callback->get_image_index;
+            gDisk.set_image_index = callback->set_image_index;
+            gDisk.get_num_images = callback->get_num_images;
+            gDisk.replace_image_index = callback->replace_image_index;
+            gDisk.add_image_index = callback->add_image_index;
+            gHasDisk = true;
+            return true;
+        }
+        case RETRO_ENVIRONMENT_SET_DISK_CONTROL_EXT_INTERFACE: {
+            const struct retro_disk_control_ext_callback *callback = data;
+            if (callback == NULL) return false;
+            gDisk = *callback;
+            gHasDisk = true;
+            return true;
+        }
+        case RETRO_ENVIRONMENT_GET_DISK_CONTROL_INTERFACE_VERSION:
+            if (data) *(unsigned *)data = 1;
+            return true;
         case RETRO_ENVIRONMENT_SET_ROTATION:
             return false;
         case RETRO_ENVIRONMENT_GET_OVERSCAN:
@@ -680,7 +1417,11 @@ static void OSLRVideoRefresh(const void *data, unsigned width, unsigned height, 
     // Imagen por GPU: ya está en el framebuffer del núcleo; se copia a la pantalla.
     if (data == RETRO_HW_FRAME_BUFFER_VALID) {
         OSLRNoteFrameSize(width, height);
-        OSLRPresentGL(width, height);
+        if (gVKDevice != VK_NULL_HANDLE) {
+            OSLRPresentVulkan(width, height);
+        } else {
+            OSLRPresentGL(width, height);
+        }
         return;
     }
     // NULL: el mismo fotograma de antes.
@@ -855,7 +1596,10 @@ static int OSLRRetroButtonForMapID(NSString *name) {
 @property (nonatomic, assign) BOOL pointerEnabled;
 /// Capa de OpenGL ES (núcleos con imagen por GPU). Oculta hasta el primer fotograma.
 @property (nonatomic, strong, nullable) CAEAGLLayer *glLayer;
+/// Capa de Metal (núcleos con Vulkan, por MoltenVK). Oculta hasta el primer fotograma.
+@property (nonatomic, strong, nullable) CAMetalLayer *metalLayer;
 - (void)enableGLLayer;
+- (void)enableMetalLayer;
 @end
 
 @implementation OSLRVideoView {
@@ -886,14 +1630,32 @@ static int OSLRRetroButtonForMapID(NSString *name) {
     self.glLayer = layer;
 }
 
+- (void)enableMetalLayer {
+    if (self.metalLayer != nil) return;
+    CAMetalLayer *layer = [CAMetalLayer layer];
+    layer.opaque = YES;
+    layer.hidden = YES;
+    layer.contentsScale = UIScreen.mainScreen.nativeScale;
+    layer.pixelFormat = MTLPixelFormatBGRA8Unorm;
+    layer.frame = self.bounds;
+    [self.layer addSublayer:layer];
+    self.metalLayer = layer;
+}
+
 - (void)layoutSubviews {
     [super layoutSubviews];
-    if (self.glLayer == nil) return;
+    if (self.glLayer == nil && self.metalLayer == nil) return;
     [CATransaction begin];
     [CATransaction setDisableActions:YES];
-    self.glLayer.frame = self.bounds;
+    if (self.glLayer) self.glLayer.frame = self.bounds;
+    if (self.metalLayer) {
+        self.metalLayer.frame = self.bounds;
+        CGFloat scale = self.metalLayer.contentsScale;
+        self.metalLayer.drawableSize = CGSizeMake(MAX(1, self.bounds.size.width * scale), MAX(1, self.bounds.size.height * scale));
+    }
     [CATransaction commit];
     atomic_store(&gGLLayerChanged, true);
+    atomic_store(&gMetalLayerChanged, true);
 }
 
 - (void)updatePointer:(UITouch *)touch {
@@ -1011,6 +1773,9 @@ static int OSLRRetroButtonForMapID(NSString *name) {
 @property (nonatomic, assign) BOOL smooth;
 @property (nonatomic, assign) BOOL pointer;
 @property (nonatomic, assign) BOOL closing;
+/// Cómo arrancó el JIT («JIT activo», «Sin JIT…»); vacío si el núcleo no tiene esa opción.
+@property (nonatomic, copy) NSString *jitText;
+@property (nonatomic, assign) BOOL jitOn;
 @property (nonatomic, strong, nullable) OSPerfHUD *hud;
 @property (nonatomic, strong, readonly) OSLRVideoView *videoView;
 @property (nonatomic, copy, nullable) void (^menuChanged)(BOOL open);
@@ -1028,7 +1793,8 @@ typedef NS_ENUM(NSInteger, OSLRMenuAction) {
     OSLRMenuActionSaveState,
     OSLRMenuActionLoadState,
     OSLRMenuActionReset,
-    OSLRMenuActionQuit
+    OSLRMenuActionQuit,
+    OSLRMenuActionDisc
 };
 
 @implementation OSLRGameViewController {
@@ -1039,6 +1805,8 @@ typedef NS_ENUM(NSInteger, OSLRMenuAction) {
     UILabel *_tvLabel;
     UIView *_menuView;
     NSArray<UIButton *> *_menuRows;
+    NSArray<UIButton *> *_visibleRows;
+    UILabel *_jitLabel;
     NSInteger _menuIndex;
     BOOL _menuVisible;
     CADisplayLink *_displayLink;
@@ -1165,8 +1933,10 @@ typedef NS_ENUM(NSInteger, OSLRMenuAction) {
     BOOL playStation = [layout isEqualToString:@"ps1"] || [layout isEqualToString:@"psp"];
     BOOL n64 = [layout isEqualToString:@"n64"];
     BOOL dreamcast = [layout isEqualToString:@"dc"];
-    BOOL fourFace = [layout isEqualToString:@"snes"] || [layout isEqualToString:@"nds"];
-    BOOL stick = n64 || dreamcast || [layout isEqualToString:@"psp"];
+    BOOL n3ds = [layout isEqualToString:@"3ds"];
+    BOOL gamecube = [layout isEqualToString:@"gc"] || [layout isEqualToString:@"wii"];
+    BOOL fourFace = [layout isEqualToString:@"snes"] || [layout isEqualToString:@"nds"] || n3ds;
+    BOOL stick = n64 || dreamcast || n3ds || gamecube || [layout isEqualToString:@"psp"];
     if (!n64) {
         UIView *dpad = [self crossWithTitles:@[@"▲", @"▼", @"◀", @"▶"]
                                          ids:@[@(RETRO_DEVICE_ID_JOYPAD_UP), @(RETRO_DEVICE_ID_JOYPAD_DOWN), @(RETRO_DEVICE_ID_JOYPAD_LEFT), @(RETRO_DEVICE_ID_JOYPAD_RIGHT)]
@@ -1182,6 +1952,11 @@ typedef NS_ENUM(NSInteger, OSLRMenuAction) {
     } else if (playStation) {
         // △ arriba, ✕ abajo, □ izquierda, ○ derecha (en libretro: X, B, Y, A).
         face = [self crossWithTitles:@[@"△", @"✕", @"□", @"○"]
+                                 ids:@[@(RETRO_DEVICE_ID_JOYPAD_X), @(RETRO_DEVICE_ID_JOYPAD_B), @(RETRO_DEVICE_ID_JOYPAD_Y), @(RETRO_DEVICE_ID_JOYPAD_A)]
+                                 tag:1002];
+    } else if (gamecube) {
+        // Como en el mando de GameCube: Y arriba, A abajo, B izquierda, X derecha.
+        face = [self crossWithTitles:@[@"Y", @"A", @"B", @"X"]
                                  ids:@[@(RETRO_DEVICE_ID_JOYPAD_X), @(RETRO_DEVICE_ID_JOYPAD_B), @(RETRO_DEVICE_ID_JOYPAD_Y), @(RETRO_DEVICE_ID_JOYPAD_A)]
                                  tag:1002];
     } else if (dreamcast) {
@@ -1211,6 +1986,13 @@ typedef NS_ENUM(NSInteger, OSLRMenuAction) {
     } else if (n64) {
         [_groups addObject:[self pairWithFirst:@"L" firstID:RETRO_DEVICE_ID_JOYPAD_L second:@"Z" secondID:RETRO_DEVICE_ID_JOYPAD_L2 tag:1005]];
         [_groups addObject:[self pairWithFirst:@"R" firstID:RETRO_DEVICE_ID_JOYPAD_R second:nil secondID:-1 tag:1006]];
+    } else if (n3ds) {
+        [_groups addObject:[self pairWithFirst:@"L" firstID:RETRO_DEVICE_ID_JOYPAD_L second:@"ZL" secondID:RETRO_DEVICE_ID_JOYPAD_L2 tag:1005]];
+        [_groups addObject:[self pairWithFirst:@"ZR" firstID:RETRO_DEVICE_ID_JOYPAD_R2 second:@"R" secondID:RETRO_DEVICE_ID_JOYPAD_R tag:1006]];
+    } else if (gamecube) {
+        // Gatillos L y R (en libretro: L2 y R2) y Z (R).
+        [_groups addObject:[self pairWithFirst:@"L" firstID:RETRO_DEVICE_ID_JOYPAD_L2 second:nil secondID:-1 tag:1005]];
+        [_groups addObject:[self pairWithFirst:@"Z" firstID:RETRO_DEVICE_ID_JOYPAD_R second:@"R" secondID:RETRO_DEVICE_ID_JOYPAD_R2 tag:1006]];
     } else if (dreamcast) {
         // Gatillos L y R (en libretro: L2 y R2).
         [_groups addObject:[self pairWithFirst:@"L" firstID:RETRO_DEVICE_ID_JOYPAD_L2 second:nil secondID:-1 tag:1005]];
@@ -1224,7 +2006,7 @@ typedef NS_ENUM(NSInteger, OSLRMenuAction) {
     start.layer.cornerRadius = 12;
     UIView *center = [[UIView alloc] initWithFrame:CGRectMake(0, 0, 168, 34)];
     center.tag = 1007;
-    if (n64 || dreamcast) {
+    if (n64 || dreamcast || gamecube) {
         // Solo START.
         start.frame = CGRectMake(46, 0, 76, 34);
     } else {
@@ -1322,28 +2104,66 @@ typedef NS_ENUM(NSInteger, OSLRMenuAction) {
     _menuView = [[UIView alloc] initWithFrame:self.view.bounds];
     _menuView.backgroundColor = [UIColor colorWithWhite:0 alpha:0.72];
     _menuView.hidden = YES;
+    // Si el núcleo puede ir con o sin JIT, arriba se ve cómo arrancó.
+    _jitLabel = [UILabel new];
+    _jitLabel.textAlignment = NSTextAlignmentCenter;
+    _jitLabel.numberOfLines = 2;
+    _jitLabel.hidden = self.jitText.length == 0;
+    if (self.jitText.length > 0) {
+        UIColor *color = self.jitOn ? [UIColor colorWithRed:0.30 green:0.95 blue:0.45 alpha:1.0] : [UIColor colorWithRed:1.0 green:0.42 blue:0.38 alpha:1.0];
+        UIImageSymbolConfiguration *config = [UIImageSymbolConfiguration configurationWithPointSize:13 weight:UIImageSymbolWeightBold];
+        UIImage *symbol = [[UIImage systemImageNamed:self.jitOn ? @"bolt.fill" : @"bolt.slash.fill" withConfiguration:config] imageWithTintColor:color renderingMode:UIImageRenderingModeAlwaysOriginal];
+        NSMutableAttributedString *text = [NSMutableAttributedString new];
+        if (symbol) {
+            NSTextAttachment *attachment = [NSTextAttachment new];
+            attachment.image = symbol;
+            [text appendAttributedString:[NSAttributedString attributedStringWithAttachment:attachment]];
+            [text appendAttributedString:[[NSAttributedString alloc] initWithString:@"  "]];
+        }
+        [text appendAttributedString:[[NSAttributedString alloc] initWithString:self.jitText attributes:@{
+            NSForegroundColorAttributeName: color,
+            NSFontAttributeName: [UIFont systemFontOfSize:14 weight:UIFontWeightBold]}]];
+        _jitLabel.attributedText = text;
+    }
+    [_menuView addSubview:_jitLabel];
     NSArray<NSString *> *titles = @[[self t:@"Continuar" en:@"Resume"],
                                     [self t:@"Guardar estado" en:@"Save state"],
                                     [self t:@"Cargar estado" en:@"Load state"],
                                     [self t:@"Reiniciar" en:@"Reset"],
+                                    [self t:@"Cambiar de disco" en:@"Change disc"],
                                     [self t:@"Salir del juego" en:@"Quit game"]];
+    NSArray<NSNumber *> *actions = @[@(OSLRMenuActionResume), @(OSLRMenuActionSaveState), @(OSLRMenuActionLoadState),
+                                     @(OSLRMenuActionReset), @(OSLRMenuActionDisc), @(OSLRMenuActionQuit)];
     NSMutableArray<UIButton *> *rows = [NSMutableArray new];
     for (NSUInteger index = 0; index < titles.count; index++) {
         UIButton *row = [UIButton buttonWithType:UIButtonTypeSystem];
-        row.tag = (NSInteger)index;
+        row.tag = actions[index].integerValue;
         row.backgroundColor = [UIColor colorWithWhite:1 alpha:0.10];
         row.layer.cornerRadius = 14;
         row.layer.borderColor = [UIColor colorWithRed:0.0 green:0.85 blue:1.0 alpha:1.0].CGColor;
         row.titleLabel.font = [UIFont systemFontOfSize:16 weight:UIFontWeightSemibold];
         [row setTitle:titles[index] forState:UIControlStateNormal];
-        UIColor *color = index == titles.count - 1 ? [UIColor colorWithRed:1.0 green:0.55 blue:0.45 alpha:1.0] : UIColor.whiteColor;
+        UIColor *color = row.tag == OSLRMenuActionQuit ? [UIColor colorWithRed:1.0 green:0.55 blue:0.45 alpha:1.0] : UIColor.whiteColor;
         [row setTitleColor:color forState:UIControlStateNormal];
         [row addTarget:self action:@selector(menuRowTapped:) forControlEvents:UIControlEventTouchUpInside];
         [_menuView addSubview:row];
         [rows addObject:row];
     }
     _menuRows = rows;
+    [self updateVisibleRows];
     [self.view addSubview:_menuView];
+}
+
+/// Filas que se ven: «Cambiar de disco» solo si el juego tiene varios discos.
+- (void)updateVisibleRows {
+    BOOL discs = atomic_load(&gDiskCount) > 1;
+    NSMutableArray<UIButton *> *visible = [NSMutableArray new];
+    for (UIButton *row in _menuRows) {
+        BOOL show = row.tag != OSLRMenuActionDisc || discs;
+        row.hidden = !show;
+        if (show) [visible addObject:row];
+    }
+    _visibleRows = visible;
 }
 
 - (CGRect)videoFrameInBounds:(CGRect)bounds safe:(UIEdgeInsets)safe portrait:(BOOL)portrait {
@@ -1355,7 +2175,7 @@ typedef NS_ENUM(NSInteger, OSLRMenuAction) {
     }
     if (portrait) {
         // Arriba, dejando sitio debajo para los controles táctiles (NDS, con sus dos pantallas, algo más).
-        CGFloat share = [self.layout isEqualToString:@"nds"] ? 0.64 : 0.55;
+        CGFloat share = ([self.layout isEqualToString:@"nds"] || [self.layout isEqualToString:@"3ds"]) ? 0.64 : 0.55;
         CGFloat maxHeight = MAX(120, h * share - safe.top);
         CGFloat width = w;
         CGFloat height = floor(width / aspect);
@@ -1428,9 +2248,10 @@ typedef NS_ENUM(NSInteger, OSLRMenuAction) {
     _menuView.frame = root.bounds;
     CGFloat rowWidth = MIN(w - 40, 340);
     CGFloat rowHeight = 48;
-    CGFloat total = rowHeight * (CGFloat)_menuRows.count + 12 * (CGFloat)(_menuRows.count - 1);
+    CGFloat total = rowHeight * (CGFloat)_visibleRows.count + 12 * (CGFloat)(_visibleRows.count - 1);
     CGFloat y = (h - total) * 0.5;
-    for (UIButton *row in _menuRows) {
+    _jitLabel.frame = CGRectMake((w - rowWidth) * 0.5, y - 58, rowWidth, 44);
+    for (UIButton *row in _visibleRows) {
         row.frame = CGRectMake((w - rowWidth) * 0.5, y, rowWidth, rowHeight);
         y += rowHeight + 12;
     }
@@ -1605,10 +2426,12 @@ typedef NS_ENUM(NSInteger, OSLRMenuAction) {
     if (!_menuVisible) {
         if ((home && !_prevHome) || (combo && !_prevCombo)) [self openMenu];
     } else if (!self.closing) {
-        NSInteger count = (NSInteger)_menuRows.count;
-        if (up && !_prevUp) { _menuIndex = (_menuIndex + count - 1) % count; [self refreshMenu]; }
-        if (down && !_prevDown) { _menuIndex = (_menuIndex + 1) % count; [self refreshMenu]; }
-        if (a && !_prevA) [self activateRow:_menuIndex];
+        NSInteger count = (NSInteger)_visibleRows.count;
+        if (count > 0) {
+            if (up && !_prevUp) { _menuIndex = (_menuIndex + count - 1) % count; [self refreshMenu]; }
+            if (down && !_prevDown) { _menuIndex = (_menuIndex + 1) % count; [self refreshMenu]; }
+            if (a && !_prevA && _menuIndex < count) [self activateRow:_visibleRows[_menuIndex].tag];
+        }
         if ((b && !_prevB) || (home && !_prevHome)) [self closeMenu];
     }
     _prevHome = home; _prevCombo = combo; _prevUp = up; _prevDown = down; _prevA = a; _prevB = b;
@@ -1617,8 +2440,9 @@ typedef NS_ENUM(NSInteger, OSLRMenuAction) {
 // MARK: Menú
 
 - (void)refreshMenu {
+    UIButton *current = _menuIndex < (NSInteger)_visibleRows.count ? _visibleRows[_menuIndex] : nil;
     for (UIButton *row in _menuRows) {
-        BOOL selected = row.tag == _menuIndex && _controller != nil;
+        BOOL selected = row == current && _controller != nil;
         row.layer.borderWidth = selected ? 2.5 : 0;
         row.backgroundColor = [UIColor colorWithWhite:1 alpha:selected ? 0.18 : 0.10];
     }
@@ -1628,6 +2452,8 @@ typedef NS_ENUM(NSInteger, OSLRMenuAction) {
     if (_menuVisible || self.closing) return;
     _menuVisible = YES;
     _menuIndex = 0;
+    [self updateVisibleRows];
+    [self.view setNeedsLayout];
     [self refreshMenu];
     _menuView.hidden = NO;
     [self.view bringSubviewToFront:_menuView];
@@ -1646,9 +2472,9 @@ typedef NS_ENUM(NSInteger, OSLRMenuAction) {
     [self activateRow:sender.tag];
 }
 
-- (void)activateRow:(NSInteger)row {
-    if (row != OSLRMenuActionQuit) [self closeMenu];
-    if (self.menuAction) self.menuAction(row);
+- (void)activateRow:(NSInteger)action {
+    if (action != OSLRMenuActionQuit) [self closeMenu];
+    if (self.menuAction) self.menuAction(action);
 }
 
 - (void)showStatus:(NSString *)message {
@@ -1822,6 +2648,12 @@ typedef NS_ENUM(NSInteger, OSLRMenuAction) {
     return OSLRUsesJITScript() ? OSLRIsTraced() : YES;
 }
 
++ (void)detachJITDebugger {
+    if (!OSLRUsesJITScript() || !OSLRIsTraced()) return;
+    OSLRInstallTrapGuard(YES);
+    OSLRUniversalDetach();
+}
+
 + (BOOL)coreAvailable:(NSString *)framework {
     if (framework.length == 0) return NO;
     return [NSFileManager.defaultManager fileExistsAtPath:[self binaryPathForFramework:framework]];
@@ -1939,6 +2771,21 @@ typedef NS_ENUM(NSInteger, OSLRMenuAction) {
     dispatch_async(dispatch_get_main_queue(), ^{ [self.gameController showStatus:message]; });
 }
 
+/// Siguiente disco (juegos de varios discos): se abre la bandeja, se cambia y se cierra.
+- (void)changeDisc {
+    if (!gHasDisk || gDisk.get_num_images == NULL || gDisk.set_image_index == NULL || gDisk.get_image_index == NULL) return;
+    unsigned count = gDisk.get_num_images();
+    if (count < 2) return;
+    unsigned next = (gDisk.get_image_index() + 1) % count;
+    if (gDisk.set_eject_state) gDisk.set_eject_state(true);
+    BOOL ok = gDisk.set_image_index(next);
+    if (gDisk.set_eject_state) gDisk.set_eject_state(false);
+    atomic_store(&gDiskCount, count);
+    NSString *spanish = [NSString stringWithFormat:@"Disco %u de %u", next + 1, count];
+    NSString *english = [NSString stringWithFormat:@"Disc %u of %u", next + 1, count];
+    [self showStatus:ok ? OSLRText(_language, spanish, english) : OSLRText(_language, @"No se pudo cambiar de disco", @"Could not change disc")];
+}
+
 // MARK: Bucle de emulación
 
 - (void)emulationLoopWithFramework:(NSString *)framework
@@ -1977,7 +2824,16 @@ typedef NS_ENUM(NSInteger, OSLRMenuAction) {
             gCore.getSystemAVInfo(&av);
             OSLRUpdateGeometry(&av.geometry);
             // Imagen por GPU: el contexto se crea ahora y el núcleo prepara lo suyo (context_reset).
-            if (gHWRequested) {
+            if (gHWRequested && gHWCallback.context_type == RETRO_HW_CONTEXT_VULKAN) {
+                if (OSLRCreateVulkan()) {
+                    if (gHWCallback.context_reset) gHWCallback.context_reset();
+                } else {
+                    failure = OSLRText(_language, @"No se pudo preparar la imagen por GPU (Vulkan).", @"Could not set up GPU rendering (Vulkan).");
+                    gCore.unloadGame();
+                    OSLRDestroyVulkan();
+                    loaded = NO;
+                }
+            } else if (gHWRequested) {
                 unsigned width = MAX(av.geometry.max_width, av.geometry.base_width);
                 unsigned height = MAX(av.geometry.max_height, av.geometry.base_height);
                 if (OSLRCreateGL(width > 0 ? width : 640, height > 0 ? height : 480)) {
@@ -1989,6 +2845,7 @@ typedef NS_ENUM(NSInteger, OSLRMenuAction) {
                     loaded = NO;
                 }
             }
+            if (loaded && gHasDisk && gDisk.get_num_images) atomic_store(&gDiskCount, gDisk.get_num_images());
         }
         if (loaded) {
             gFPS = av.timing.fps > 1 ? av.timing.fps : 60.0;
@@ -2015,6 +2872,7 @@ typedef NS_ENUM(NSInteger, OSLRMenuAction) {
     if (!loaded) {
         gCore.deinit();
         OSLRDestroyGL();
+        OSLRDestroyVulkan();
         [self finishSession];
         return;
     }
@@ -2039,6 +2897,8 @@ typedef NS_ENUM(NSInteger, OSLRMenuAction) {
                 [self showStatus:ok ? OSLRText(_language, @"Estado cargado", @"State loaded") : OSLRText(_language, @"No hay estado guardado", @"No saved state")];
             } else if (action == OSLRMenuActionReset) {
                 gCore.reset();
+            } else if (action == OSLRMenuActionDisc) {
+                [self changeDisc];
             }
             if (atomic_load(&gPaused) || atomic_load(&gBackground)) {
                 [NSThread sleepForTimeInterval:0.02];
@@ -2075,10 +2935,11 @@ typedef NS_ENUM(NSInteger, OSLRMenuAction) {
     }
     [self writeSaveRAMIfChanged:lastSave];
     // Como RetroArch: primero se avisa al núcleo de que se va el contexto y luego se cierra el juego.
-    if (gGLContext != nil && gHWCallback.context_destroy) gHWCallback.context_destroy();
+    if ((gGLContext != nil || gVKDevice != VK_NULL_HANDLE) && gHWCallback.context_destroy) gHWCallback.context_destroy();
     gCore.unloadGame();
     gCore.deinit();
     OSLRDestroyGL();
+    OSLRDestroyVulkan();
     [self finishSession];
 }
 
@@ -2097,7 +2958,7 @@ typedef NS_ENUM(NSInteger, OSLRMenuAction) {
         atomic_store(&gTouchStickActive, false);
         atomic_store(&gPointerDown, false);
         gGLLayer = nil;
-        OSLRRemoveTrapGuard();
+        gMetalLayer = nil;
         OSLRGameViewController *controller = self.gameController;
         self.gameController = nil;
         controller.closing = YES;
@@ -2165,10 +3026,14 @@ typedef NS_ENUM(NSInteger, OSLRMenuAction) {
     gHasFrameTimeCallback = NO;
     // JIT: solo si se pidió y OmniStation lo tiene de verdad ahora.
     gJITCapable = [hostOptions[@"jit"] isEqualToString:@"true"] && [OSLibretroEngine jitActive];
-    if (!OSLRIsTraced()) OSLRInstallTrapGuard();
+    OSLRInstallTrapGuard(NO);
     // Imagen por GPU y proporción.
     memset(&gHWCallback, 0, sizeof(gHWCallback));
     gHWRequested = false;
+    gVKNegotiation = NULL;
+    memset(&gDisk, 0, sizeof(gDisk));
+    gHasDisk = false;
+    atomic_store(&gDiskCount, 0);
     gGLSmooth = [hostOptions[@"filter"] isEqualToString:@"linear"];
     atomic_store(&gGLLayerShown, false);
     atomic_store(&gGLLayerChanged, true);
@@ -2216,7 +3081,20 @@ typedef NS_ENUM(NSInteger, OSLRMenuAction) {
     controller.touchHaptics = [hostOptions[@"touchHaptics"] boolValue];
     controller.stretch = [hostOptions[@"aspect"] isEqualToString:@"stretch"];
     controller.smooth = [hostOptions[@"filter"] isEqualToString:@"linear"];
-    controller.pointer = [layout isEqualToString:@"nds"] && ![hostOptions[@"touchPointer"] isEqualToString:@"false"];
+    controller.pointer = ([layout isEqualToString:@"nds"] || [layout isEqualToString:@"3ds"]) && ![hostOptions[@"touchPointer"] isEqualToString:@"false"];
+    // Si el núcleo puede ir con o sin JIT, el menú dice cómo arrancó.
+    if ([hostOptions[@"jitOption"] isEqualToString:@"true"]) {
+        controller.jitOn = gJITCapable;
+        if (gJITCapable) {
+            controller.jitText = OSLRText(language, @"Con JIT", @"Running with JIT");
+        } else if (![hostOptions[@"jit"] isEqualToString:@"true"]) {
+            controller.jitText = OSLRText(language, @"Sin JIT: desactivado en sus ajustes", @"No JIT: turned off in its settings");
+        } else if (OSLRUsesJITScript() && OSLRIsDebugged() && !OSLRIsTraced()) {
+            controller.jitText = OSLRText(language, @"Sin JIT: hay JIT pero el depurador ya no está enganchado (iOS 26 lo necesita)", @"No JIT: JIT was enabled but the debugger is no longer attached (iOS 26 needs it)");
+        } else {
+            controller.jitText = OSLRText(language, @"Sin JIT (modo intérprete)", @"No JIT (interpreter mode)");
+        }
+    }
     NSMutableDictionary<NSNumber *, NSNumber *> *map = [NSMutableDictionary new];
     for (NSString *key in hostOptions) {
         if (![key hasPrefix:@"map."]) continue;
@@ -2257,11 +3135,14 @@ typedef NS_ENUM(NSInteger, OSLRMenuAction) {
         [weakController showStatus:message];
     };
     [controller loadViewIfNeeded];
+    gGLLayer = nil;
+    gMetalLayer = nil;
     if ([hostOptions[@"gpu"] isEqualToString:@"true"]) {
         [controller.videoView enableGLLayer];
         gGLLayer = controller.videoView.glLayer;
-    } else {
-        gGLLayer = nil;
+    } else if ([hostOptions[@"gpu"] isEqualToString:@"vulkan"]) {
+        [controller.videoView enableMetalLayer];
+        gMetalLayer = controller.videoView.metalLayer;
     }
     [root presentViewController:controller animated:NO completion:nil];
     self.gameController = controller;
