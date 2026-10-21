@@ -999,6 +999,7 @@ struct HomeView: View {
         if armsx2Integrated { scanCoreGames(silent: true) }
         if melonxIntegrated { scanMeloNXGames(silent: true) }
         scanRetroGames(silent: true)
+        warnMeloNXKeysIfNeeded()
         downloadMissingCovers()
         for emulator in Emulator.allCases where EmulatorStore.isEnabled(emulator) {
             // Con el núcleo integrado, la app aparte no se toca.
@@ -2493,13 +2494,18 @@ struct HomeView: View {
     /// integrado (SideStore), si está listo para dárselo a los juegos (OmniStation no lo necesita).
     private var jitIndicatorOn: Bool {
         if usesBuiltInJIT { return jitStatus.isReady }
-        return jitEnabled
+        // En iOS 26 el JIT solo vale si el depurador sigue enganchado (no basta con que se activara).
+        return jitEnabled && OSLibretroEngine.jitActive
     }
 
     private func explainJITIndicator() {
         refreshJITStatus(announce: false)
         guard usesBuiltInJIT else {
-            showToast(jitEnabled ? tr("JIT activo en esta app") : tr("JIT no activo en esta app"), seconds: 3)
+            if jitEnabled && !OSLibretroEngine.jitActive {
+                showToast(tr("Se activó el JIT, pero el depurador ya no está enganchado y en iOS 26 hace falta. En StikDebug, pon el script «universal» a LiveContainer y vuelve a activar el JIT."), seconds: 7)
+            } else {
+                showToast(jitEnabled ? tr("JIT activo en esta app") : tr("JIT no activo en esta app"), seconds: 3)
+            }
             return
         }
         let text: String
@@ -2583,7 +2589,7 @@ struct HomeView: View {
         guard EmulatorStore.isEnabled(.melonx),
               EmulatorStore.location(.melonx, installMethod: installMethodRaw) == .native else { return false }
         let pending: [String] = libraryGames
-            .filter { $0.source == "emu:" + Emulator.melonx.rawValue && gameMeta[$0.id]?.emulatorGameID == nil }
+            .filter { $0.source == "emu:" + Emulator.melonx.rawValue && gameMeta[$0.id]?.emulatorGameID == nil && MeloNXIdentity.link(for: $0.id) == nil }
             .map(\.id)
             .sorted()
         return scheduleLibraryRequest(pending: pending, key: "melonxLibraryAskedFor", perform: {
@@ -2985,6 +2991,9 @@ struct HomeView: View {
         // (instalada con SideStore). En LiveContainer vale el JIT con el que se abrió OmniStation.
         let wantsJIT: Bool = chosen.jit && RetroConfig.wantsJIT(system, gameID: game.id)
         if wantsJIT && !OSLibretroEngine.jitActive && canAskSelfJIT, let pairing = PairingFile.data() {
+            // Al engancharse el depurador la app se para un instante: la música se quita antes
+            // para que no se oiga entrecortada.
+            SoundManager.shared.updateAmbient(volume: 0)
             showToast(tr("Activando el JIT…"), seconds: 60)
             OSMeloNXEngine.shared.prepareSharedJIT(withPairing: pairing) { success, message in
                 if success {
@@ -3002,7 +3011,8 @@ struct HomeView: View {
 
     private func startRetro(_ game: Game, item: LibraryGame, system: RetroSystem) {
         guard !OSLibretroEngine.shared.busy else { return }
-        let jit: Bool = OSLibretroEngine.jitActive
+        // JIT de verdad ahora y el juego lo quiere (si no, el núcleo que solo va con JIT no vale).
+        let jit: Bool = OSLibretroEngine.jitActive && RetroConfig.wantsJIT(system, gameID: game.id)
         guard let file = item.fileName, let core = RetroConfig.playableCore(for: system, gameID: game.id, jit: jit) else {
             showToast(tr("Este núcleo necesita JIT. Elige otro núcleo en los ajustes de %@.", system.title), seconds: 5)
             releaseRetroJIT()
@@ -3057,11 +3067,29 @@ struct HomeView: View {
         return true
     }
 
+    /// MeloNX como app aparte con SideStore: sin las claves en OmniStation no se reconocen sus juegos
+    /// (en LiveContainer se cogen solas de la carpeta de MeloNX). Se avisa al abrir la app.
+    private func warnMeloNXKeysIfNeeded() {
+        guard !melonxIntegrated, EmulatorStore.isEnabled(.melonx),
+              EmulatorStore.location(.melonx, installMethod: installMethodRaw) == .native,
+              OSMeloNXEngine.runtimeBundled, !OSMeloNXEngine.keysInstalled else { return }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 2.5) {
+            showToast(tr("MeloNX: importa tus claves (prod.keys) para que OmniStation reconozca y abra sus juegos solo."), seconds: 7, actionTitle: tr("Importar"), action: {
+                openCoreImporter(.melonxKeys)
+            })
+        }
+    }
+
     /// Suelta el depurador que OmniStation se pidió para un núcleo libretro.
     private func releaseRetroJIT() {
         guard RetroJIT.holding else { return }
         RetroJIT.holding = false
-        OSMeloNXEngine.shared.releaseSharedJIT()
+        // Se suelta el depurador con su propio comando (si no, la próxima vez no se puede volver a
+        // enganchar y la app se queda colgada) y después se cierra la extensión.
+        OSLibretroEngine.detachJITDebugger()
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
+            OSMeloNXEngine.shared.releaseSharedJIT()
+        }
     }
 
     /// Ajustes → Emuladores → Núcleos clásicos: un elemento por sistema.
@@ -3296,6 +3324,8 @@ struct HomeView: View {
                 showToast(tr("Guardado. Falta prod.keys (title.keys es opcional)"), seconds: 3.5)
             }
             if ok { refreshMeloNXFirmware() }
+            // MeloNX como app aparte: con las claves se reconocen sus juegos.
+            if ok && !melonxIntegrated && EmulatorStore.isEnabled(.melonx) { scanEmulator(.melonx, silent: true) }
         }
     }
 
@@ -3884,7 +3914,13 @@ struct HomeView: View {
             // El título y el planeta se desvanecen al deslizar; solo ellos se repintan.
             HeaderTitle(progress: scrollProgress, size: 20)
             Spacer(minLength: 6)
-            HeaderPlanet(progress: scrollProgress, size: compact ? 30 : 34)
+            if isLandscapeNow {
+                HeaderPlanet(progress: scrollProgress, size: compact ? 30 : 34)
+            } else {
+                // En vertical, en el centro, el indicador de JIT (en horizontal va junto a las pestañas).
+                JITIndicatorDot(active: jitIndicatorOn)
+                    .onTapGesture { explainJITIndicator() }
+            }
             Spacer(minLength: 6)
             if isLandscapeNow {
                 JITIndicatorDot(active: jitIndicatorOn)
@@ -4828,6 +4864,13 @@ struct HomeView: View {
             items.append(SettingItem(id: key + "Bundle", title: tr("Bundle ID"), subtitle: EmulatorStore.bundleID(emulator), symbol: "number", tint: SettingTint.blue, control: .symbol("pencil"), action: {
                 activeEmulator = emulator
                 dialog = .emulatorBundle
+            }))
+        }
+        if emulator == .melonx && location == .native {
+            // Con las claves, OmniStation reconoce y abre solos los juegos de la app MeloNX.
+            let keys: Bool = OSMeloNXEngine.keysInstalled
+            items.append(SettingItem(id: key + "Keys", title: tr("Claves"), subtitle: keys ? tr("Los juegos se reconocen solos") : tr("Importa prod.keys para que los juegos se reconozcan solos"), symbol: "key.fill", tint: SettingTint.blue, control: keys ? .badge("OK", Color.green) : .badge(tr("FALTA"), Color.orange), action: {
+                openCoreImporter(.melonxKeys)
             }))
         }
         if emulator == .melonx {

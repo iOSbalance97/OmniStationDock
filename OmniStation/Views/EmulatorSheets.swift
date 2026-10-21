@@ -156,8 +156,11 @@ struct EmulatorSetupSheet: View {
                 SheetActionButton(title: isOn ? tr("Lo tengo: SÍ") : tr("Lo tengo: NO"), tint: Color.white.opacity(0.85), selected: pad.gamepadConnected && selected == index * 2) {
                     toggle(emulator)
                 }
-                SheetActionButton(title: direct ? tr("Buscar sus juegos") : (folder.isEmpty ? tr("Elegir carpeta") : tr("Cambiar carpeta")), selected: pad.gamepadConnected && selected == index * 2 + 1, enabled: isOn && (!direct || found)) {
-                    pick(emulator)
+                // En LiveContainer sus juegos se leen solos de su carpeta: no hay nada que elegir.
+                if !direct {
+                    SheetActionButton(title: folder.isEmpty ? tr("Elegir carpeta") : tr("Cambiar carpeta"), selected: pad.gamepadConnected && selected == index * 2 + 1, enabled: isOn) {
+                        pick(emulator)
+                    }
                 }
             }
             Text(emulator.setupHint(liveContainer: direct, lang: lang))
@@ -167,6 +170,11 @@ struct EmulatorSetupSheet: View {
         }
         .padding(13)
         .glassCard()
+    }
+
+    /// Dentro de LiveContainer, con el emulador también allí: sus juegos se leen solos.
+    private func readsFolderDirectly(_ emulator: Emulator) -> Bool {
+        DebugSupport.isInsideLiveContainer && EmulatorStore.location(emulator, installMethod: installMethod) == .liveContainer
     }
 
     private func toggle(_ emulator: Emulator) {
@@ -204,17 +212,19 @@ struct EmulatorSetupSheet: View {
         case .left:
             if selected < doneIndex && selected % 2 == 1 { selected -= 1 }
         case .right:
-            if selected < doneIndex && selected % 2 == 0 { selected += 1 }
+            if selected < doneIndex && selected % 2 == 0 && !readsFolderDirectly(emulators[selected / 2]) { selected += 1 }
         case .up:
             if selected == doneIndex {
                 selected = doneIndex - 2
             } else if selected >= 2 {
                 selected -= 2
             }
+            if selected < doneIndex && selected % 2 == 1 && readsFolderDirectly(emulators[selected / 2]) { selected -= 1 }
         case .down:
             if selected < doneIndex {
                 selected = selected + 2 >= doneIndex ? doneIndex : selected + 2
             }
+            if selected < doneIndex && selected % 2 == 1 && readsFolderDirectly(emulators[selected / 2]) { selected -= 1 }
         case .accept:
             if selected == doneIndex {
                 finish()

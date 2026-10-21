@@ -24,10 +24,14 @@ struct RetroCore: Hashable {
     var requiresJIT: Bool = false
     /// Pinta con la GPU (OpenGL ES).
     var gpu: Bool = false
+    /// Pinta con la GPU por Vulkan (MoltenVK): 3DS, GameCube y Wii.
+    var vulkan: Bool = false
 }
 
 enum RetroSystem: String, CaseIterable, Identifiable {
     case nes, snes, gb, gba, nds, ps1, n64, psp, dc
+    case n3ds = "3ds"
+    case gc, wii
 
     var id: String { rawValue }
 
@@ -43,6 +47,9 @@ enum RetroSystem: String, CaseIterable, Identifiable {
         case .n64: return "Nintendo 64"
         case .psp: return "PSP"
         case .dc: return "Dreamcast"
+        case .n3ds: return "Nintendo 3DS"
+        case .gc: return "GameCube"
+        case .wii: return "Wii"
         }
     }
 
@@ -58,6 +65,9 @@ enum RetroSystem: String, CaseIterable, Identifiable {
         case .n64: return "N64"
         case .psp: return "PSP"
         case .dc: return "Dreamcast"
+        case .n3ds: return "3DS"
+        case .gc: return "GameCube"
+        case .wii: return "Wii"
         }
     }
 
@@ -72,6 +82,9 @@ enum RetroSystem: String, CaseIterable, Identifiable {
         case .n64: return ["z64", "n64", "v64"]
         case .psp: return ["iso", "cso", "pbp", "chd"]
         case .dc: return ["gdi", "cdi", "chd", "cue", "m3u"]
+        case .n3ds: return ["3ds", "cci", "cxi", "3dsx", "cia"]
+        case .gc: return ["iso", "gcm", "gcz", "rvz", "ciso", "dol", "m3u"]
+        case .wii: return ["iso", "wbfs", "rvz", "gcz", "wad", "ciso", "m3u"]
         }
     }
 
@@ -95,6 +108,9 @@ enum RetroSystem: String, CaseIterable, Identifiable {
         case .n64: return "N64"
         case .psp: return "PSP"
         case .dc: return "Dreamcast"
+        case .n3ds: return "3DS"
+        case .gc: return "GameCube"
+        case .wii: return "Wii"
         }
     }
 
@@ -125,6 +141,10 @@ enum RetroSystem: String, CaseIterable, Identifiable {
         case .dc:
             return [RetroCore(id: "flycast", name: "Flycast (JIT)", framework: "flycast.libretro.framework", jit: true, requiresJIT: true, gpu: true),
                     RetroCore(id: "flycast_jitless", name: "Flycast (sin JIT)", framework: "flycast-jitless.libretro.framework", jit: false, gpu: true)]
+        case .n3ds:
+            return [RetroCore(id: "azahar", name: "Azahar", framework: "azahar.libretro.framework", jit: true, gpu: true, vulkan: true)]
+        case .gc, .wii:
+            return [RetroCore(id: "dolphin", name: "Dolphin", framework: "dolphin.libretro.framework", jit: true, gpu: true, vulkan: true)]
         }
     }
 
@@ -156,6 +176,7 @@ enum RetroSystem: String, CaseIterable, Identifiable {
         case .nds: return "Opcional: bios7.bin, bios9.bin y firmware.bin (melonDS DS va sin ellas)."
         case .ps1: return "PCSX ReARMed va sin BIOS. Beetle PSX HW la necesita: scph5501.bin (o scph5500.bin / scph5502.bin)."
         case .dc: return "Opcional: dc_boot.bin y dc_flash.bin dentro de BIOS → dc (sin ellas, Flycast usa su BIOS interna)."
+        case .n3ds: return "Los juegos tienen que estar descifrados (.3ds, .cci, .cxi o .3dsx)."
         default: return ""
         }
     }
@@ -243,11 +264,16 @@ enum RetroFolders {
     /// Lo que necesita el núcleo en su carpeta de sistema y va dentro de la app
     /// (PSP: los archivos de PPSSPP, en BIOS/PPSSPP). Se copia la primera vez y al actualizar.
     static func prepareSystemFiles(_ system: RetroSystem) {
-        guard system == .psp else { return }
-        let source: URL = Bundle.main.bundleURL.appendingPathComponent("RetroSystem/PPSSPP", isDirectory: true)
+        let folder: String
+        switch system {
+        case .psp: folder = "PPSSPP"
+        case .gc, .wii: folder = "dolphin-emu"
+        default: return
+        }
+        let source: URL = Bundle.main.bundleURL.appendingPathComponent("RetroSystem/" + folder, isDirectory: true)
         let manager = FileManager.default
         guard manager.fileExists(atPath: source.path) else { return }
-        let target: URL = bios(system).appendingPathComponent("PPSSPP", isDirectory: true)
+        let target: URL = bios(system).appendingPathComponent(folder, isDirectory: true)
         let marker: URL = target.appendingPathComponent(".omnistation")
         let version: String = (Bundle.main.infoDictionary?["CFBundleVersion"] as? String) ?? "0"
         if let current = try? String(contentsOf: marker, encoding: .utf8), current == version { return }
@@ -351,8 +377,9 @@ enum RetroConfig {
     }
 
     /// Opciones del núcleo («opt.<clave>» → clave) y de OmniStation para la partida.
-    /// `jit`: si la partida va a tener JIT de verdad.
+    /// `jit`: si la partida va a tener JIT de verdad (y el juego lo quiere).
     static func launchOptions(_ system: RetroSystem, core: RetroCore, gameID: String?, jit: Bool) -> (core: [String: String], host: [String: String]) {
+        let wants: Bool = wantsJIT(system, gameID: gameID)
         let values: [String: String] = EmulatorConfig.effective(.retro(system), gameID: gameID)
         var coreOptions: [String: String] = [:]
         var host: [String: String] = [:]
@@ -363,9 +390,11 @@ enum RetroConfig {
                 host[key] = value
             }
         }
-        let useJIT: Bool = jit && core.jit
-        host["jit"] = useJIT ? "true" : "false"
-        host["gpu"] = core.gpu ? "true" : "false"
+        let useJIT: Bool = jit && core.jit && wants
+        // «jit»: si el juego lo quiere (el motor mira si de verdad lo hay); «jitOption»: el menú lo enseña.
+        host["jit"] = (core.jit && wants) ? "true" : "false"
+        host["jitOption"] = core.jit ? "true" : "false"
+        host["gpu"] = core.vulkan ? "vulkan" : (core.gpu ? "true" : "false")
         // Lo que cada núcleo necesita para ir bien aquí (como lo deja ManicEMU), con o sin JIT.
         switch core.id {
         case "melondsds":
@@ -401,11 +430,32 @@ enum RetroConfig {
             coreOptions["reicast_dynamic_cpu_ratio"] = "disabled"
             coreOptions["reicast_sh4clock"] = jitless ? "300" : "200"
             if !RetroFolders.hasDreamcastBIOS() { coreOptions["reicast_hle_bios"] = "enabled" }
+        case "azahar":
+            coreOptions["citra_use_cpu_jit"] = useJIT ? "enabled" : "disabled"
+            coreOptions["citra_use_shader_jit"] = useJIT ? "enabled" : "disabled"
+            coreOptions["citra_input_type"] = "frontend"
+            coreOptions["citra_enable_touch_touchscreen"] = "enabled"
+            coreOptions["citra_enable_mouse_touchscreen"] = "disabled"
+            coreOptions["citra_use_default_aes_key"] = "disabled"
+            host["orient.key"] = "citra_layout_option"
+            host["orient.portrait"] = "default"
+            host["orient.landscape"] = "side_by_side"
+        case "dolphin":
+            // Lo mismo que deja ManicEMU con y sin JIT (4: JIT ARM64; 6: su intérprete rápido).
+            coreOptions["dolphin_cpu_core"] = useJIT ? "4" : "6"
+            coreOptions["dolphin_cpu_clock_rate"] = useJIT ? "1.00" : "0.40"
+            coreOptions["dolphin_osd_enabled"] = "disabled"
+            coreOptions["dolphin_fast_disc_speed"] = useJIT ? "disabled" : "enabled"
+            coreOptions["dolphin_gpu_texture_decoding"] = useJIT ? "disabled" : "enabled"
+            coreOptions["dolphin_shader_compilation_mode"] = useJIT ? "0" : "3"
+            coreOptions["dolphin_vi_skip"] = useJIT ? "disabled" : "enabled"
+            coreOptions["dolphin_skip_gc_bios"] = "disabled"
+            coreOptions["dolphin_log_level"] = "1"
         default:
             break
         }
-        // NDS: la proporción sale del fotograma (cambia al poner las pantallas al lado).
-        if system == .nds { host["frameAspect"] = "true" }
+        // NDS y 3DS: la proporción sale del fotograma (cambia al poner las pantallas al lado).
+        if system == .nds || system == .n3ds { host["frameAspect"] = "true" }
         return (coreOptions, host)
     }
 }

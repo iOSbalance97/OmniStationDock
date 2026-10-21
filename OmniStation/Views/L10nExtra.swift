@@ -349,6 +349,12 @@ extension L10n {
         "Original (640×480)": "Original (640×480)",
         "PCSX ReARMed va sin BIOS. Beetle PSX HW la necesita: scph5501.bin (o scph5500.bin / scph5502.bin).": "PCSX ReARMed works without a BIOS. Beetle PSX HW needs one: scph5501.bin (or scph5500.bin / scph5502.bin).",
         "Opcional: dc_boot.bin y dc_flash.bin dentro de BIOS → dc (sin ellas, Flycast usa su BIOS interna).": "Optional: dc_boot.bin and dc_flash.bin inside BIOS → dc (without them, Flycast uses its built-in BIOS).",
-        "Flycast (sin JIT)": "Flycast (no JIT)"
+        "Flycast (sin JIT)": "Flycast (no JIT)",
+        "Se activó el JIT, pero el depurador ya no está enganchado y en iOS 26 hace falta. En StikDebug, pon el script «universal» a LiveContainer y vuelve a activar el JIT.": "JIT was enabled, but the debugger is no longer attached and iOS 26 needs it. In StikDebug, assign the “universal” script to LiveContainer and enable JIT again.",
+        "Los juegos se reconocen solos": "Games are recognised automatically",
+        "Importa prod.keys para que los juegos se reconozcan solos": "Import prod.keys so games are recognised automatically",
+        "MeloNX: importa tus claves (prod.keys) para que OmniStation reconozca y abra sus juegos solo.": "MeloNX: import your keys (prod.keys) so OmniStation recognises and opens its games by itself.",
+        "Importar": "Import",
+        "Los juegos tienen que estar descifrados (.3ds, .cci, .cxi o .3dsx).": "Games must be decrypted (.3ds, .cci, .cxi or .3dsx)."
     ]
 }
