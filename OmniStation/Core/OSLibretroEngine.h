@@ -20,6 +20,11 @@ NS_ASSUME_NONNULL_BEGIN
 /// que la próxima vez se pueda volver a enganchar sin que se cuelgue.
 + (void)detachJITDebugger;
 
+/// Opciones que declara un núcleo, sin abrir ningún juego (para sus ajustes). Cada una: «key»,
+/// «title», «info», «category», «categoryTitle», «default» y «values» ([valor, etiqueta]).
+/// nil si hay una partida abierta o el núcleo no carga. Llamar en el hilo principal.
+- (nullable NSArray<NSDictionary<NSString *, id> *> *)optionsForCore:(NSString *)framework language:(NSString *)language;
+
 /// Hay una partida abierta.
 @property (nonatomic, readonly) BOOL busy;
 

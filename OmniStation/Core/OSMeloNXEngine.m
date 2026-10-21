@@ -1398,6 +1398,10 @@ static void OSNXTeardownDonor(const OSNXCoreAPI *api) {
     dispatch_queue_t _queue;
     NSMutableArray<id> *_observers;
     BOOL _menuOpen;
+    /// La partida ya se cerró (para no cerrarla dos veces).
+    BOOL _finishing;
+    /// El núcleo no terminó al salir: hasta reiniciar la app no se puede abrir otro juego.
+    BOOL _stuck;
     /// Ajustes de la partida en marcha (los de Ajustes → MeloNX y los del juego).
     NSDictionary<NSString *, NSString *> *_settings;
     /// Teclado del juego abierto: id con el que hay que contestar al núcleo.
@@ -2147,6 +2151,8 @@ static BOOL OSNXNeedsExtendedVirtualAddressing(void) {
 - (void)finishSessionWithMessage:(nullable NSString *)message
                       completion:(nullable void (^)(BOOL, NSString *))completion {
     dispatch_async(dispatch_get_main_queue(), ^{
+        if (self->_finishing) return;
+        self->_finishing = YES;
         for (OSNXPad *pad in self.pads) [pad detach];
         [self.pads removeAllObjects];
         [self stopWatching];
@@ -2218,6 +2224,12 @@ static BOOL OSNXNeedsExtendedVirtualAddressing(void) {
         completion(NO, loadError ?: @"No se pudo cargar MeloNX.");
         return;
     }
+    if (_stuck) {
+        completion(NO, OSNXText(language, @"MeloNX no terminó de cerrar el juego anterior. Cierra OmniStation del todo y vuelve a abrirla para jugar otra vez.",
+                                @"MeloNX did not finish closing the previous game. Fully close OmniStation and open it again to play again."));
+        return;
+    }
+    _finishing = NO;
     self.busy = YES;
     self.endedHandler = ended;
     _menuOpen = NO;
@@ -2317,7 +2329,25 @@ static BOOL OSNXNeedsExtendedVirtualAddressing(void) {
                 // Un teclado sin contestar deja al núcleo esperando: se cancela antes de salir.
                 NSString *pending = strongSelf->_pendingTextInput;
                 if (pending) [strongSelf finishTextInput:pending text:nil];
-                strongSelf->_api.stopEmulation();
+                // Con el menú abierto el núcleo está en pausa: si se para así, espera a un fotograma
+                // que nunca llega y la app se queda colgada. Se quita la pausa y se para desde otro
+                // hilo (stop_emulation espera a que acabe la partida; el hilo principal tiene que
+                // seguir libre para lo que el núcleo le pida mientras tanto).
+                strongSelf->_menuOpen = NO;
+                for (OSNXPad *pad in strongSelf.pads) pad.suspended = YES;
+                if (strongSelf->_api.togglePause) strongSelf->_api.togglePause(false);
+                void (*stopEmulation)(void) = strongSelf->_api.stopEmulation;
+                dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
+                    [NSThread sleepForTimeInterval:0.15];
+                    if (stopEmulation) stopEmulation();
+                });
+                // Si el núcleo no termina, se vuelve al menú igualmente (sin colgar la app).
+                dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(12 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+                    OSMeloNXEngine *engine = weakSelf;
+                    if (engine == nil || engine->_finishing || !engine.busy) return;
+                    engine->_stuck = YES;
+                    [engine finishSessionWithMessage:nil completion:nil];
+                });
             };
             [self preparePlayerPad];
             [controller loadViewIfNeeded];
@@ -2379,6 +2409,8 @@ static BOOL OSNXNeedsExtendedVirtualAddressing(void) {
                 });
                 [NSThread sleepForTimeInterval:3.0];
             }
+            // Terminó (aunque fuera tarde): ya se puede volver a jugar.
+            dispatch_async(dispatch_get_main_queue(), ^{ self->_stuck = NO; });
             [self finishSessionWithMessage:nil completion:nil];
         }];
         thread.name = @"OmniStation MeloNX";

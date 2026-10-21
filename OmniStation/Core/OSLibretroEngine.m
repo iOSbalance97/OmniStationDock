@@ -134,6 +134,9 @@ static size_t gAudioCapacity; // en fotogramas de audio (pares L/R)
 static _Atomic size_t gAudioWrite;
 static _Atomic size_t gAudioRead;
 static _Atomic float gVolume = 1.0f;
+// Sonido «cebado»: empieza a sonar con un poco de margen y, si se vacía (el juego va lento o se
+// para un instante al pedir JIT), vuelve a esperar ese margen en vez de sonar a trompicones.
+static _Atomic bool gAudioPrimed;
 
 // Mando: bits RETRO_DEVICE_ID_JOYPAD_* del físico y del táctil; sticks; puntero (pantalla táctil).
 static _Atomic uint32_t gPadBits;
@@ -324,6 +327,122 @@ static const char *OSLROptionValue(const char *key) {
         gOptionStrings[name] = stored;
     }
     return stored.bytes;
+}
+
+
+// MARK: Opciones que declara el núcleo (para los ajustes de cada núcleo)
+//
+// Para enseñar las opciones de un núcleo sin abrir ningún juego se le llama a
+// retro_set_environment y se apunta lo que declara (claves, nombres, valores y categorías, en
+// español si el núcleo lo trae traducido).
+
+static BOOL gCapturing;
+static NSMutableArray<NSMutableDictionary<NSString *, id> *> *gCaptured;
+static NSMutableDictionary<NSString *, NSString *> *gCapturedCategories;
+
+static NSString *OSLRString(const char *text) {
+    if (text == NULL) return @"";
+    return [NSString stringWithUTF8String:text] ?: @"";
+}
+
+static NSArray<NSArray<NSString *> *> *OSLRCaptureValues(const struct retro_core_option_value *values) {
+    NSMutableArray<NSArray<NSString *> *> *list = [NSMutableArray new];
+    for (int index = 0; index < RETRO_NUM_CORE_OPTION_VALUES_MAX && values[index].value != NULL; index++) {
+        NSString *value = OSLRString(values[index].value);
+        NSString *label = values[index].label ? OSLRString(values[index].label) : value;
+        if (value.length) [list addObject:@[value, label.length ? label : value]];
+    }
+    return list;
+}
+
+static NSMutableDictionary<NSString *, id> *OSLRCapturedEntry(NSString *key) {
+    for (NSMutableDictionary<NSString *, id> *entry in gCaptured) {
+        if ([entry[@"key"] isEqualToString:key]) return entry;
+    }
+    return nil;
+}
+
+/// Traducción («local»): cambia nombre, explicación y etiquetas de lo ya apuntado.
+static void OSLRCaptureLocal(NSString *key, NSString *title, NSString *info, NSArray<NSArray<NSString *> *> *values) {
+    NSMutableDictionary<NSString *, id> *entry = OSLRCapturedEntry(key);
+    if (entry == nil) return;
+    if (title.length) entry[@"title"] = title;
+    if (info.length) entry[@"info"] = info;
+    if (values.count == 0) return;
+    NSMutableArray<NSArray<NSString *> *> *merged = [NSMutableArray new];
+    for (NSArray<NSString *> *pair in entry[@"values"]) {
+        NSString *label = pair[1];
+        for (NSArray<NSString *> *local in values) {
+            if ([local[0] isEqualToString:pair[0]]) { label = local[1]; break; }
+        }
+        [merged addObject:@[pair[0], label]];
+    }
+    entry[@"values"] = merged;
+}
+
+static void OSLRCaptureV2(const struct retro_core_options_v2 *options, BOOL local) {
+    if (options == NULL) return;
+    if (options->categories) {
+        for (const struct retro_core_option_v2_category *item = options->categories; item->key != NULL; item++) {
+            NSString *desc = OSLRString(item->desc);
+            if (desc.length) gCapturedCategories[OSLRString(item->key)] = desc;
+        }
+    }
+    if (options->definitions == NULL) return;
+    for (const struct retro_core_option_v2_definition *item = options->definitions; item->key != NULL; item++) {
+        NSString *key = OSLRString(item->key);
+        NSString *title = OSLRString(item->desc_categorized ? item->desc_categorized : item->desc);
+        if (title.length == 0) title = OSLRString(item->desc);
+        NSString *info = OSLRString(item->info_categorized ? item->info_categorized : item->info);
+        if (info.length == 0) info = OSLRString(item->info);
+        NSArray<NSArray<NSString *> *> *values = OSLRCaptureValues(item->values);
+        if (local) {
+            OSLRCaptureLocal(key, title, info, values);
+            continue;
+        }
+        if (key.length == 0 || values.count == 0 || OSLRCapturedEntry(key)) continue;
+        [gCaptured addObject:[@{@"key": key, @"title": title.length ? title : key, @"info": info,
+                                @"category": OSLRString(item->category_key),
+                                @"default": item->default_value ? OSLRString(item->default_value) : values[0][0],
+                                @"values": values} mutableCopy]];
+    }
+}
+
+static void OSLRCaptureV1(const struct retro_core_option_definition *definitions, BOOL local) {
+    if (definitions == NULL) return;
+    for (const struct retro_core_option_definition *item = definitions; item->key != NULL; item++) {
+        NSString *key = OSLRString(item->key);
+        NSArray<NSArray<NSString *> *> *values = OSLRCaptureValues(item->values);
+        if (local) {
+            OSLRCaptureLocal(key, OSLRString(item->desc), OSLRString(item->info), values);
+            continue;
+        }
+        if (key.length == 0 || values.count == 0 || OSLRCapturedEntry(key)) continue;
+        [gCaptured addObject:[@{@"key": key, @"title": OSLRString(item->desc).length ? OSLRString(item->desc) : key,
+                                @"info": OSLRString(item->info), @"category": @"",
+                                @"default": item->default_value ? OSLRString(item->default_value) : values[0][0],
+                                @"values": values} mutableCopy]];
+    }
+}
+
+/// «Descripción; a|b|c» (SET_VARIABLES): el primero es el de por defecto.
+static void OSLRCaptureVariables(const struct retro_variable *variables) {
+    if (variables == NULL) return;
+    for (const struct retro_variable *item = variables; item->key != NULL; item++) {
+        if (item->value == NULL) continue;
+        NSString *key = OSLRString(item->key);
+        NSString *text = OSLRString(item->value);
+        NSRange separator = [text rangeOfString:@"; "];
+        NSString *title = separator.location == NSNotFound ? key : [text substringToIndex:separator.location];
+        NSString *list = separator.location == NSNotFound ? text : [text substringFromIndex:NSMaxRange(separator)];
+        NSMutableArray<NSArray<NSString *> *> *values = [NSMutableArray new];
+        for (NSString *value in [list componentsSeparatedByString:@"|"]) {
+            if (value.length) [values addObject:@[value, value]];
+        }
+        if (key.length == 0 || values.count == 0 || OSLRCapturedEntry(key)) continue;
+        [gCaptured addObject:[@{@"key": key, @"title": title, @"info": @"", @"category": @"",
+                                @"default": values[0][0], @"values": values} mutableCopy]];
+    }
 }
 
 // MARK: Llamadas del núcleo
@@ -1298,6 +1417,7 @@ static bool OSLREnvironment(unsigned command, void *data) {
             return variable->value != NULL;
         }
         case RETRO_ENVIRONMENT_SET_VARIABLES:
+            if (gCapturing) { OSLRCaptureVariables(data); return true; }
             OSLRRegisterVariables(data);
             return true;
         case RETRO_ENVIRONMENT_SET_VARIABLE: {
@@ -1317,18 +1437,28 @@ static bool OSLREnvironment(unsigned command, void *data) {
             if (data) *(unsigned *)data = 2;
             return true;
         case RETRO_ENVIRONMENT_SET_CORE_OPTIONS:
+            if (gCapturing) { OSLRCaptureV1(data, NO); return true; }
             OSLRRegisterV1(data);
             return true;
         case RETRO_ENVIRONMENT_SET_CORE_OPTIONS_INTL: {
             const struct retro_core_options_intl *options = data;
+            if (gCapturing) {
+                if (options) { OSLRCaptureV1(options->us, NO); OSLRCaptureV1(options->local, YES); }
+                return true;
+            }
             if (options) OSLRRegisterV1(options->us);
             return true;
         }
         case RETRO_ENVIRONMENT_SET_CORE_OPTIONS_V2:
+            if (gCapturing) { OSLRCaptureV2(data, NO); return true; }
             OSLRRegisterV2(data);
             return true;
         case RETRO_ENVIRONMENT_SET_CORE_OPTIONS_V2_INTL: {
             const struct retro_core_options_v2_intl *options = data;
+            if (gCapturing) {
+                if (options) { OSLRCaptureV2(options->us, NO); OSLRCaptureV2(options->local, YES); }
+                return true;
+            }
             if (options) OSLRRegisterV2(options->us);
             return true;
         }
@@ -2549,7 +2679,8 @@ typedef NS_ENUM(NSInteger, OSLRMenuAction) {
 - (BOOL)startWithSampleRate:(double)rate {
     AVAudioSession *session = AVAudioSession.sharedInstance;
     [session setCategory:AVAudioSessionCategoryPlayback withOptions:AVAudioSessionCategoryOptionMixWithOthers error:nil];
-    [session setPreferredIOBufferDuration:0.01 error:nil];
+    [session setPreferredIOBufferDuration:0.02 error:nil];
+    atomic_store(&gAudioPrimed, false);
     [session setActive:YES error:nil];
     AVAudioFormat *format = [[AVAudioFormat alloc] initStandardFormatWithSampleRate:rate channels:2];
     if (format == nil) return NO;
@@ -2562,6 +2693,16 @@ typedef NS_ENUM(NSInteger, OSLRMenuAction) {
         size_t write = atomic_load_explicit(&gAudioWrite, memory_order_acquire);
         size_t available = write - read;
         size_t count = MIN((size_t)frameCount, available);
+        size_t margin = (size_t)(gSampleRate * 0.06);
+        if (!atomic_load_explicit(&gAudioPrimed, memory_order_relaxed)) {
+            if (available >= margin + frameCount) {
+                atomic_store_explicit(&gAudioPrimed, true, memory_order_relaxed);
+            } else {
+                count = 0;
+            }
+        } else if (available < frameCount) {
+            atomic_store_explicit(&gAudioPrimed, false, memory_order_relaxed);
+        }
         float volume = atomic_load(&gVolume) / 32768.0f;
         for (size_t index = 0; index < count; index++) {
             size_t slot = (read + index) % gAudioCapacity;
@@ -2652,6 +2793,33 @@ typedef NS_ENUM(NSInteger, OSLRMenuAction) {
     if (!OSLRUsesJITScript() || !OSLRIsTraced()) return;
     OSLRInstallTrapGuard(YES);
     OSLRUniversalDetach();
+}
+
+- (NSArray<NSDictionary<NSString *, id> *> *)optionsForCore:(NSString *)framework language:(NSString *)language {
+    if (self.busy || ![OSLibretroEngine coreAvailable:framework]) return nil;
+    NSString *error = nil;
+    if (![self loadCore:framework error:&error]) return nil;
+    gLanguage = [language isEqualToString:@"en"] ? RETRO_LANGUAGE_ENGLISH : RETRO_LANGUAGE_SPANISH;
+    gCaptured = [NSMutableArray new];
+    gCapturedCategories = [NSMutableDictionary new];
+    gCapturing = YES;
+    gCore.setEnvironment(OSLREnvironment);
+    // Alguno las declara al prepararse (retro_init) y no antes.
+    if (gCaptured.count == 0) {
+        gCore.init();
+        gCore.deinit();
+    }
+    gCapturing = NO;
+    NSMutableArray<NSDictionary<NSString *, id> *> *result = [NSMutableArray new];
+    for (NSMutableDictionary<NSString *, id> *entry in gCaptured) {
+        NSMutableDictionary<NSString *, id> *item = [entry mutableCopy];
+        NSString *category = item[@"category"];
+        item[@"categoryTitle"] = category.length ? (gCapturedCategories[category] ?: @"") : @"";
+        [result addObject:item];
+    }
+    gCaptured = nil;
+    gCapturedCategories = nil;
+    return result;
 }
 
 + (BOOL)coreAvailable:(NSString *)framework {
