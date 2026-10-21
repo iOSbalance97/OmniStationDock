@@ -1569,6 +1569,9 @@ static NSString *gLoadedFlavor = nil;
             // El sonido del juego no se calla con el interruptor de silencio.
             AVAudioSession *session = AVAudioSession.sharedInstance;
             [session setCategory:AVAudioSessionCategoryPlayback withOptions:AVAudioSessionCategoryOptionMixWithOthers error:nil];
+            // Bloques de sonido algo más grandes: al arrancar, PCSX2 compila mucho y con bloques
+            // pequeños el sonido se queda sin datos a ratos (cortes justo al empezar).
+            [session setPreferredIOBufferDuration:0.046 error:nil];
             [session setActive:YES error:nil];
             controller.coreView = (__bridge UIView *)raw;
             controller.title = title;

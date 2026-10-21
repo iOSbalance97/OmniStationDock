@@ -1718,13 +1718,22 @@ static void OSNXTeardownDonor(const OSNXCoreAPI *api) {
 // MARK: JIT para los núcleos libretro
 
 - (void)prepareSharedJITWithPairing:(NSData *)pairingData completion:(void (^)(BOOL, NSString *))completion {
+    [self prepareSharedJITWithPairing:pairingData progress:nil completion:completion];
+}
+
+- (void)prepareSharedJITWithPairing:(NSData *)pairingData
+                           progress:(nullable void (^)(NSString *))progress
+                         completion:(void (^)(BOOL, NSString *))completion {
     if (self.busy) {
         completion(NO, @"Hay una partida de MeloNX abierta.");
         return;
     }
+    void (^report)(NSString *) = progress ? ^(NSString *message) {
+        dispatch_async(dispatch_get_main_queue(), ^{ progress(message); });
+    } : nil;
     dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
         NSString *error = nil;
-        BOOL ok = [self prepareJITWithPairing:pairingData progress:nil error:&error];
+        BOOL ok = [self prepareJITWithPairing:pairingData progress:report error:&error];
         dispatch_async(dispatch_get_main_queue(), ^{
             completion(ok, ok ? @"" : (error ?: @"No se pudo activar el JIT."));
         });

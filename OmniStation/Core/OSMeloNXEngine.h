@@ -75,6 +75,12 @@ NS_ASSUME_NONNULL_BEGIN
 - (void)prepareSharedJITWithPairing:(NSData *)pairingData
                          completion:(void (^)(BOOL success, NSString *message))completion;
 
+/// Igual, contando cómo va (los mensajes de StikJIT, en el hilo principal).
+- (void)prepareSharedJITWithPairing:(NSData *)pairingData
+                           progress:(nullable void (^)(NSString *message))progress
+                         completion:(void (^)(BOOL success, NSString *message))completion
+    NS_SWIFT_NAME(prepareSharedJIT(withPairing:progress:completion:));
+
 /// Suelta el depurador enganchado con `prepareSharedJITWithPairing:completion:`.
 - (void)releaseSharedJIT;
 
