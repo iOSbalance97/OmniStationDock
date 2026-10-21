@@ -199,6 +199,11 @@ struct HomeView: View {
     @State private var dialog: SettingsDialog?
     /// Sistema libretro del menú abierto (Ajustes → Emuladores → el sistema).
     @State private var activeRetroSystem: RetroSystem = .nes
+    /// Pantalla de transición mientras se prepara el JIT (juego que se va a abrir y lo que pasa ahora).
+    @State private var jitTransitionGame: String?
+    @State private var jitTransitionDetail: String = ""
+    /// Último aviso de poca memoria (si se vuelve a pulsar Jugar enseguida, se juega igualmente).
+    @State private var lowMemoryWarnedAt: Date = .distantPast
     @AppStorage("retroTouchAlways") private var retroTouchAlways = false
     @State private var toast: Toast?
     @State private var hdmiForced = false
@@ -495,6 +500,7 @@ struct HomeView: View {
         view
             .overlay { optionsDismissLayer(dock) }
             .overlay(alignment: .bottom) { dockBottomOverlay(dock) }
+            .overlay { jitTransitionOverlay }
             .overlay(alignment: .bottom) { toastOverlay }
             .onPreferenceChange(FramesKey.self) { value in handleFrames(value) }
     }
@@ -1203,6 +1209,58 @@ struct HomeView: View {
             if toast?.id == item.id {
                 withAnimation(.easeInOut(duration: 0.25)) { toast = nil }
             }
+        }
+    }
+
+    /// Mientras se engancha el depurador (StikDebug o la extensión): una pantalla tranquila con el
+    /// juego que se va a abrir, en vez de avisos sueltos y la biblioteca parpadeando.
+    @ViewBuilder
+    private var jitTransitionOverlay: some View {
+        if let name = jitTransitionGame {
+            ZStack {
+                Rectangle().fill(.ultraThinMaterial).ignoresSafeArea()
+                AppPanelBackground().opacity(0.9)
+                VStack(spacing: 14) {
+                    ZStack {
+                        Circle()
+                            .fill(Color.cyan.opacity(0.14))
+                            .frame(width: 74, height: 74)
+                            .shadow(color: Color.cyan.opacity(0.5), radius: 18)
+                        Image(systemName: "bolt.fill")
+                            .font(.system(size: 28, weight: .bold))
+                            .foregroundStyle(Color.cyan)
+                    }
+                    Text(name)
+                        .font(AppFont.text(17, .bold))
+                        .foregroundStyle(.white)
+                        .multilineTextAlignment(.center)
+                        .lineLimit(2)
+                    ProgressView()
+                        .tint(Color.cyan)
+                    Text(jitTransitionDetail)
+                        .font(AppFont.text(11, .medium))
+                        .foregroundStyle(.white.opacity(0.6))
+                        .multilineTextAlignment(.center)
+                        .lineLimit(3)
+                        .animation(.easeInOut(duration: 0.2), value: jitTransitionDetail)
+                }
+                .padding(32)
+            }
+            .transition(.opacity)
+        }
+    }
+
+    private func showJITTransition(_ name: String, detail: String) {
+        toast = nil
+        jitTransitionDetail = detail
+        withAnimation(.easeInOut(duration: 0.3)) { jitTransitionGame = name }
+    }
+
+    /// Se quita un poco después de abrir la pantalla del juego (que ya está encima).
+    private func hideJITTransition(after delay: Double = 0.8) {
+        guard jitTransitionGame != nil else { return }
+        DispatchQueue.main.asyncAfter(deadline: .now() + delay) {
+            withAnimation(.easeInOut(duration: 0.35)) { jitTransitionGame = nil }
         }
     }
 
@@ -3008,6 +3066,16 @@ struct HomeView: View {
             showToast(tr("Vuelve a escanear las carpetas de los núcleos."), seconds: 3)
             return
         }
+        // Poca memoria libre (después de varios juegos): iOS cerraría la app al abrir este. Se avisa
+        // y, si se vuelve a pulsar Jugar enseguida, se intenta igualmente.
+        let freeMB: Int = Int(OSMeloNXEngine.availableMemory / 1_048_576)
+        if freeMB > 0 && freeMB < RetroConfig.memoryNeededMB(system) && Date().timeIntervalSince(lowMemoryWarnedAt) > 20 {
+            lowMemoryWarnedAt = Date()
+            showToast(tr("Queda poca memoria (%ld MB libres) y %@ podría cerrarse. Reabre OmniStation para jugar sin cierres, o pulsa Jugar otra vez para intentarlo.", freeMB, system.title),
+                      seconds: 9, actionTitle: tr("Cerrar app"), action: { closeAppForRelaunch() })
+            return
+        }
+        lowMemoryWarnedAt = .distantPast
         // JIT: si el núcleo puede usarlo y OmniStation aún no lo tiene, se lo pide a su extensión
         // (instalada con SideStore). En LiveContainer vale el JIT con el que se abrió OmniStation.
         let wantsJIT: Bool = chosen.jit && RetroConfig.wantsJIT(system, gameID: game.id)
@@ -3018,7 +3086,7 @@ struct HomeView: View {
             // Al engancharse el depurador la app se para un instante: la música se quita antes y se
             // espera a que acabe el sonido del botón, para que no se oiga entrecortado.
             SoundManager.shared.updateAmbient(volume: 0)
-            showToast(tr("Activando el JIT…"), seconds: 60)
+            showJITTransition(game.name, detail: tr("Activando el JIT…"))
             var wait: Double = 0.4
             if staleJIT {
                 OSLibretroEngine.detachJITDebugger()
@@ -3027,12 +3095,15 @@ struct HomeView: View {
                 wait = 1.2
             }
             DispatchQueue.main.asyncAfter(deadline: .now() + wait) {
-                OSMeloNXEngine.shared.prepareSharedJIT(withPairing: pairing) { success, message in
+                OSMeloNXEngine.shared.prepareSharedJIT(withPairing: pairing, progress: { message in
+                    jitTransitionDetail = message
+                }) { success, message in
                     if success {
                         RetroJIT.holding = true
                         RetroJIT.fresh = true
-                        showToast(tr("JIT activo"), seconds: 2)
+                        jitTransitionDetail = tr("JIT activo")
                     } else {
+                        hideJITTransition(after: 0)
                         showToast(tr("Sin JIT (%@). El juego va en modo intérprete.", message), seconds: 5)
                     }
                     startRetro(game, item: item, system: system)
@@ -3046,12 +3117,14 @@ struct HomeView: View {
         if wantsJIT && (!OSLibretroEngine.jitActive || staleJIT) && DebugSupport.isInsideLiveContainer && DebugSupport.isJITEnabled,
            let url = DebugSupport.enableJITURL {
             SoundManager.shared.updateAmbient(volume: 0)
-            showToast(tr("Reactivando el JIT con StikDebug… Vuelve aquí cuando termine."), seconds: 8)
+            // Primero la pantalla de transición (que se vea antes de saltar a StikDebug).
+            showJITTransition(game.name, detail: tr("Preparando el JIT con StikDebug. Si no vuelve solo, vuelve a OmniStation."))
             // El que quedó de otra partida se suelta antes (si no, StikDebug no puede engancharse).
             if staleJIT { OSLibretroEngine.detachJITDebugger() }
-            DispatchQueue.main.asyncAfter(deadline: .now() + (staleJIT ? 0.6 : 0)) {
+            DispatchQueue.main.asyncAfter(deadline: .now() + (staleJIT ? 0.6 : 0.4)) {
                 UIApplication.shared.open(url) { opened in
                     guard opened else {
+                        hideJITTransition(after: 0)
                         showToast(tr("No se pudo abrir StikDebug: el juego va sin JIT."), seconds: 4)
                         startRetro(game, item: item, system: system)
                         return
@@ -3063,10 +3136,27 @@ struct HomeView: View {
             }
             return
         }
+        // Quiere JIT y no se puede pedir: se dice por qué (si no, parecería que va con JIT).
+        if wantsJIT && !OSLibretroEngine.jitActive && !DebugSupport.isInsideLiveContainer {
+            let problem: String = selfJITProblem
+            showToast(problem.isEmpty ? tr("Sin JIT: el juego va en modo intérprete.") : tr("Sin JIT (%@). El juego va en modo intérprete.", problem), seconds: 4.5)
+        }
         startRetro(game, item: item, system: system)
     }
 
+    /// Por qué no se puede pedir el JIT para la propia OmniStation (vacío si sí se puede).
+    private var selfJITProblem: String {
+        if !usesBuiltInJIT { return tr("el JIT integrado no está elegido en Ajustes → Depuración") }
+        if !OSArmsx2Engine.helperBundled { return tr("falta la extensión de JIT") }
+        if let problem = BuiltInJIT.preflightProblem(lang: appLanguage) { return problem }
+        if case .unreachable = jitStatus.state { return tr("la VPN no responde") }
+        if PairingFile.data() == nil { return tr("falta el archivo de emparejamiento") }
+        return ""
+    }
+
     private func startRetro(_ game: Game, item: LibraryGame, system: RetroSystem) {
+        // La pantalla del juego se abre encima; la de transición se quita detrás.
+        hideJITTransition()
         guard !OSLibretroEngine.shared.busy else { return }
         // JIT de verdad ahora y el juego lo quiere (si no, el núcleo que solo va con JIT no vale).
         let jit: Bool = OSLibretroEngine.jitActive && RetroConfig.wantsJIT(system, gameID: game.id)
@@ -3124,6 +3214,13 @@ struct HomeView: View {
         )
     }
 
+    /// Cierra OmniStation como al deslizarla hacia arriba (va a la pantalla de inicio y se cierra),
+    /// para volver a abrirla con toda la memoria libre.
+    private func closeAppForRelaunch() {
+        UIControl().sendAction(NSSelectorFromString("suspend"), to: UIApplication.shared, for: nil)
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) { exit(0) }
+    }
+
     /// ¿Se puede pedir el JIT para la propia OmniStation ahora? (SideStore con el JIT integrado,
     /// emparejamiento importado y sin saber ya que el VPN no responde.)
     private var canAskSelfJIT: Bool {
@@ -3150,13 +3247,13 @@ struct HomeView: View {
         let active: Bool = UIApplication.shared.applicationState == .active
         if active && OSLibretroEngine.jitActive {
             RetroJIT.fresh = true
-            showToast(tr("JIT activo"), seconds: 2)
+            jitTransitionDetail = tr("JIT activo")
             then()
             return
         }
         let since: Date? = active ? (activeSince ?? Date()) : nil
         if Date() > deadline || (since.map { Date().timeIntervalSince($0) > 4 } ?? false) {
-            showToast(tr("No llegó el JIT: el juego va en modo intérprete."), seconds: 4)
+            jitTransitionDetail = tr("No llegó el JIT: el juego va en modo intérprete.")
             then()
             return
         }
@@ -4141,7 +4238,7 @@ struct HomeView: View {
     /// La fila de la tarjeta marcada siempre queda a la vista: la primera fila sube hasta
     /// arriba del todo y la última baja hasta el final.
     private func scrollToSetting(_ proxy: ScrollViewProxy) {
-        let columns: Int = isLandscapeNow ? 3 : 2
+        let columns: Int = settingsColumns
         let index: Int = controllerSelectedSettingIndex
         if index < columns {
             scrollToTop(proxy)
@@ -4731,13 +4828,19 @@ struct HomeView: View {
 
     /// Solo los grupos de la parte elegida de Ajustes (así cada pantalla es corta y clara).
     private var settingGroups: [SettingGroup] {
+        let groups: [SettingGroup]
         switch settingsCategory {
-        case .general: return [generalSettings, screenSettings, appearanceSettings]
-        case .library: return [gameSettings, artworkSettings]
-        case .emulators: return emulatorGroups
-        case .system: return [debugSettings, liveContainerSettings]
+        case .general: groups = [generalSettings, screenSettings, appearanceSettings]
+        case .library: groups = [gameSettings, artworkSettings]
+        case .emulators: groups = emulatorGroups
+        case .system: groups = [debugSettings, liveContainerSettings]
         }
+        // Un grupo vacío (un emulador sin nada que enseñar) dejaba el mando atascado al bajar.
+        return groups.filter { !$0.items.isEmpty }
     }
+
+    /// Columnas de Ajustes: las mismas para dibujar y para mover el mando.
+    private var settingsColumns: Int { isLandscapeNow ? 3 : 2 }
 
     private func selectSettingsCategory(_ category: SettingsCategory) {
         guard category != settingsCategory else { return }
@@ -5119,7 +5222,7 @@ struct HomeView: View {
         let starts: [Int] = settingStarts(groups)
         let count: Int = groups.reduce(0) { total, group in total + group.items.count }
         guard count > 0, !starts.isEmpty else { return }
-        let columns: Int = isLandscapeNow ? 3 : 2
+        let columns: Int = settingsColumns
         let current: Int = min(max(controllerSelectedSettingIndex, 0), count - 1)
         let section: Int = starts.lastIndex(where: { $0 <= current }) ?? 0
         let start: Int = starts[section]
@@ -5130,9 +5233,11 @@ struct HomeView: View {
         var target: Int = current
         switch direction {
         case .left:
-            if column > 0 { target = current - 1 }
+            // En la primera tarjeta de un grupo, ← va a la última del grupo anterior.
+            if column > 0 { target = current - 1 } else if local == 0 && current > 0 { target = current - 1 }
         case .right:
-            if column < columns - 1, current + 1 < end { target = current + 1 }
+            // En la última tarjeta de un grupo (fila incompleta), → pasa al grupo siguiente.
+            if column < columns - 1, current + 1 < end { target = current + 1 } else if current + 1 == end && end < count { target = end }
         case .up:
             if local >= columns {
                 target = current - columns
@@ -5186,7 +5291,7 @@ struct HomeView: View {
     }
 
     private func settingsSection(_ group: SettingGroup, start: Int, landscape: Bool) -> some View {
-        let columns: Int = landscape ? 3 : 2
+        let columns: Int = settingsColumns
         let rows: [[Int]] = settingRows(count: group.items.count, columns: columns)
         return VStack(alignment: .leading, spacing: 12) {
             settingsHeader(group.title, subsection: group.isSubsection)

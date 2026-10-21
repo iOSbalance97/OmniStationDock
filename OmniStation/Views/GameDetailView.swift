@@ -55,9 +55,10 @@ struct GameDetailView: View {
 
     private func tr(_ key: String) -> String { L10n.tr(key, lang) }
 
+    /// Los azules de la app (como el botón «Jugar» de la portada): azul intenso a cian.
     private static let playGradient: [Color] = [
-        Color(red: 0.36, green: 0.42, blue: 1.0),
-        Color(red: 0.56, green: 0.46, blue: 0.98)
+        Color(red: 0.10, green: 0.42, blue: 1.0),
+        Color(red: 0.0, green: 0.78, blue: 1.0)
     ]
 
     var body: some View {

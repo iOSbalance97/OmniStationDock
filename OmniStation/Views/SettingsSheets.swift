@@ -131,7 +131,7 @@ struct ControllersSheet: View {
             .navigationBarTitleDisplayMode(.inline)
         }
         .presentationDetents([.medium, .large])
-        .presentationBackground(.ultraThinMaterial)
+        .appSheetBackground()
         .preferredColorScheme(.dark)
         .onAppear {
             pad.handler = { action in
@@ -255,7 +255,7 @@ struct PlatformOrderSheet: View {
             .navigationBarTitleDisplayMode(.inline)
         }
         .presentationDetents([.medium, .large])
-        .presentationBackground(.ultraThinMaterial)
+        .appSheetBackground()
         .preferredColorScheme(.dark)
         .onAppear {
             items = Platforms.ordered(orderRaw)

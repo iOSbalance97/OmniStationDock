@@ -380,6 +380,14 @@ extension L10n {
         "Margen del sonido": "Sound buffer",
         "Más margen: menos cortes y un poco más de retraso.": "More buffer: fewer cuts and slightly more delay.",
         "Latencia de salida": "Output latency",
-        "Sin cortes": "No cuts"
+        "Sin cortes": "No cuts",
+        "Queda poca memoria (%ld MB libres) y %@ podría cerrarse. Reabre OmniStation para jugar sin cierres, o pulsa Jugar otra vez para intentarlo.": "Memory is low (%ld MB free) and %@ might close. Reopen OmniStation to play without crashes, or tap Play again to try anyway.",
+        "Cerrar app": "Close app",
+        "Sin JIT: el juego va en modo intérprete.": "No JIT: the game runs in interpreter mode.",
+        "el JIT integrado no está elegido en Ajustes → Depuración": "built-in JIT is not selected in Settings → Debugging",
+        "falta la extensión de JIT": "the JIT extension is missing",
+        "la VPN no responde": "the VPN is not responding",
+        "falta el archivo de emparejamiento": "the pairing file is missing",
+        "Preparando el JIT con StikDebug. Si no vuelve solo, vuelve a OmniStation.": "Preparing JIT with StikDebug. If it doesn't come back on its own, return to OmniStation."
     ]
 }

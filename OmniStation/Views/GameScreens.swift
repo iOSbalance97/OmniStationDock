@@ -9,8 +9,19 @@ extension View {
         let detents: Set<PresentationDetent> = large ? [.large] : [.medium, .large]
         return self
             .presentationDetents(detents)
-            .presentationBackground(.ultraThinMaterial)
+            .appSheetBackground()
             .preferredColorScheme(.dark)
+    }
+
+    /// Fondo de las ventanas: cristal con el azul noche y los brillos de la app (como en los
+    /// ajustes de emulación).
+    func appSheetBackground() -> some View {
+        presentationBackground {
+            ZStack {
+                Rectangle().fill(.ultraThinMaterial)
+                AppPanelBackground().opacity(0.9)
+            }
+        }
     }
 }
 

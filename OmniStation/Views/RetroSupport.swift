@@ -353,6 +353,20 @@ enum RetroConfig {
         return system.availableCores.first { !$0.requiresJIT }
     }
 
+    /// Memoria libre (MB) que conviene tener para abrir un juego del sistema sin que iOS cierre la
+    /// app. Los núcleos se quedan cargados y algunos (GameCube/Wii, 3DS) no devuelven toda la
+    /// memoria al salir: después de varios juegos puede no quedar bastante.
+    static func memoryNeededMB(_ system: RetroSystem) -> Int {
+        switch system {
+        case .gc, .wii: return 1600
+        case .n3ds: return 1400
+        case .psp, .dc: return 700
+        case .n64: return 500
+        case .ps1, .nds: return 400
+        default: return 200
+        }
+    }
+
     /// ¿Quiere este juego usar el JIT? (Ajuste «Usar JIT»; por defecto sí.)
     static func wantsJIT(_ system: RetroSystem, gameID: String?) -> Bool {
         guard system.usesJIT else { return false }

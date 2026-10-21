@@ -134,12 +134,7 @@ struct EmulatorConfigSheet: View {
             }
         }
         .presentationDetents([.large])
-        .presentationBackground {
-            ZStack {
-                Rectangle().fill(.ultraThinMaterial)
-                AppPanelBackground().opacity(0.92)
-            }
-        }
+        .appSheetBackground()
         .preferredColorScheme(.dark)
         .onAppear {
             // Núcleos libretro: sus opciones se leen ahora si aún no se tenían.
