@@ -46,6 +46,8 @@
 #import <sys/utsname.h>
 #import <unistd.h>
 #import <pthread.h>
+#import <os/proc.h>
+#import <malloc/malloc.h>
 
 extern int csops(pid_t pid, unsigned int ops, void *useraddr, size_t usersize);
 
@@ -140,6 +142,12 @@ static _Atomic float gVolume = 1.0f;
 // Sonido «cebado»: empieza a sonar con un poco de margen y, si se vacía (el juego va lento o se
 // para un instante al pedir JIT), vuelve a esperar ese margen en vez de sonar a trompicones.
 static _Atomic bool gAudioPrimed;
+// Última vez que el sonido pidió muestras: si no pide (sistema parado o sin salida), el bucle no
+// espera a que haya sitio (si no, el juego se quedaría casi parado).
+static _Atomic double gLastAudioPull;
+// Memoria: lo mínimo libre durante la partida (para saber cuánto gasta cada sistema).
+static size_t gSessionStartFree;
+static size_t gSessionMinFree;
 
 // Mando: bits RETRO_DEVICE_ID_JOYPAD_* del físico y del táctil; sticks; puntero (pantalla táctil).
 static _Atomic uint32_t gPadBits;
@@ -2626,6 +2634,13 @@ typedef NS_ENUM(NSInteger, OSLRMenuAction) {
     [_observers addObject:[center addObserverForName:UIApplicationWillEnterForegroundNotification object:nil queue:NSOperationQueue.mainQueue usingBlock:^(NSNotification *note) {
         atomic_store(&gBackground, false);
     }]];
+    // Muy caliente: iOS baja la potencia y el juego puede ir lento o cerrarse; se avisa.
+    [_observers addObject:[center addObserverForName:NSProcessInfoThermalStateDidChangeNotification object:nil queue:NSOperationQueue.mainQueue usingBlock:^(NSNotification *note) {
+        NSProcessInfoThermalState state = NSProcessInfo.processInfo.thermalState;
+        if (state >= NSProcessInfoThermalStateSerious) {
+            [weakSelf showStatus:[weakSelf t:@"El iPhone está muy caliente: el juego puede ir más lento o cerrarse" en:@"The iPhone is very hot: the game may slow down or close"]];
+        }
+    }]];
     [_observers addObject:[center addObserverForName:UIApplicationWillResignActiveNotification object:nil queue:NSOperationQueue.mainQueue usingBlock:^(NSNotification *note) {
         OSLRGameViewController *strongSelf = weakSelf;
         if (strongSelf && !strongSelf.closing && !strongSelf->_menuVisible) [strongSelf openMenu];
@@ -2925,6 +2940,7 @@ typedef NS_ENUM(NSInteger, OSLRMenuAction) {
 @implementation OSLRAudio {
     AVAudioEngine *_engine;
     AVAudioSourceNode *_source;
+    NSMutableArray<id> *_observers;
 }
 
 - (BOOL)startWithSampleRate:(double)rate {
@@ -2940,6 +2956,7 @@ typedef NS_ENUM(NSInteger, OSLRMenuAction) {
         float *left = outputData->mNumberBuffers > 0 ? (float *)outputData->mBuffers[0].mData : NULL;
         float *right = outputData->mNumberBuffers > 1 ? (float *)outputData->mBuffers[1].mData : left;
         if (left == NULL) return noErr;
+        atomic_store_explicit(&gLastAudioPull, OSLRNow(), memory_order_relaxed);
         size_t read = atomic_load_explicit(&gAudioRead, memory_order_relaxed);
         size_t write = atomic_load_explicit(&gAudioWrite, memory_order_acquire);
         size_t available = write - read;
@@ -2974,10 +2991,32 @@ typedef NS_ENUM(NSInteger, OSLRMenuAction) {
         printf("[OmniStation] libretro: no se pudo arrancar el sonido: %s\n", error.localizedDescription.UTF8String);
         return NO;
     }
+    // Si iOS para el sonido (cambio de salida, una llamada…), se vuelve a arrancar: si no, el juego
+    // seguiría mudo y esperando a que suene.
+    _observers = [NSMutableArray new];
+    __weak AVAudioEngine *weakEngine = _engine;
+    void (^restart)(NSNotification *) = ^(NSNotification *note) {
+        AVAudioEngine *engine = weakEngine;
+        if (engine == nil || engine.isRunning) return;
+        atomic_store(&gAudioPrimed, false);
+        [AVAudioSession.sharedInstance setActive:YES error:nil];
+        [engine prepare];
+        [engine startAndReturnError:nil];
+    };
+    NSNotificationCenter *center = NSNotificationCenter.defaultCenter;
+    [_observers addObject:[center addObserverForName:AVAudioEngineConfigurationChangeNotification object:_engine
+                                               queue:NSOperationQueue.mainQueue usingBlock:restart]];
+    [_observers addObject:[center addObserverForName:AVAudioSessionInterruptionNotification object:nil
+                                               queue:NSOperationQueue.mainQueue usingBlock:^(NSNotification *note) {
+        NSNumber *type = note.userInfo[AVAudioSessionInterruptionTypeKey];
+        if (type.unsignedIntegerValue == AVAudioSessionInterruptionTypeEnded) restart(note);
+    }]];
     return YES;
 }
 
 - (void)stop {
+    for (id observer in _observers) [NSNotificationCenter.defaultCenter removeObserver:observer];
+    _observers = nil;
     [_engine stop];
     if (_source) [_engine detachNode:_source];
     _source = nil;
@@ -2990,6 +3029,7 @@ typedef NS_ENUM(NSInteger, OSLRMenuAction) {
 
 @interface OSLibretroEngine ()
 @property (nonatomic, assign) BOOL busy;
+@property (atomic, assign) NSUInteger lastSessionPeakMB;
 @property (nonatomic, strong, nullable) OSLRGameViewController *gameController;
 @property (nonatomic, copy, nullable) void (^endedHandler)(void);
 @end
@@ -3305,6 +3345,7 @@ typedef NS_ENUM(NSInteger, OSLRMenuAction) {
     double frameTime = 1.0 / gFPS;
     double next = OSLRNow();
     double lastAutosave = next;
+    double lastMemoryCheck = 0;
     while (atomic_load(&gRunning) && !atomic_load(&gShutdownRequested)) {
         @autoreleasepool {
             int action = atomic_exchange(&gPendingAction, -1);
@@ -3363,13 +3404,19 @@ typedef NS_ENUM(NSInteger, OSLRMenuAction) {
             }
             // El sonido manda: si el núcleo va más deprisa que lo que suena (algunos, como el de
             // 3DS, entregan el sonido a ráfagas), se espera a que haya sitio en vez de tirarlo.
-            for (int wait = 0; wait < 25 && OSLRAudioFill() > 0.75 && atomic_load(&gRunning); wait++) {
+            BOOL audioAlive = OSLRNow() - atomic_load(&gLastAudioPull) < 0.15;
+            for (int wait = 0; audioAlive && wait < 25 && OSLRAudioFill() > 0.75 && atomic_load(&gRunning); wait++) {
                 [NSThread sleepForTimeInterval:0.002];
                 next = OSLRNow();
             }
             if (now - lastAutosave > 10) {
                 lastAutosave = now;
                 [self writeSaveRAMIfChanged:lastSave];
+            }
+            if (now - lastMemoryCheck > 1.0) {
+                lastMemoryCheck = now;
+                size_t freeNow = os_proc_available_memory();
+                if (freeNow > 0 && (gSessionMinFree == 0 || freeNow < gSessionMinFree)) gSessionMinFree = freeNow;
             }
         }
     }
@@ -3380,6 +3427,14 @@ typedef NS_ENUM(NSInteger, OSLRMenuAction) {
     gCore.deinit();
     OSLRDestroyGL();
     OSLRDestroyVulkan();
+    // Cuánta memoria llegó a gastar la partida (para avisar antes de la próxima si no cabe).
+    if (gSessionStartFree > 0 && gSessionMinFree > 0 && gSessionStartFree > gSessionMinFree) {
+        self.lastSessionPeakMB = (NSUInteger)((gSessionStartFree - gSessionMinFree) / (1024 * 1024));
+    } else {
+        self.lastSessionPeakMB = 0;
+    }
+    // Lo que el núcleo liberó se le devuelve a iOS ya (si no, el sistema lo sigue contando).
+    malloc_zone_pressure_relief(NULL, 0);
     [self finishSession];
 }
 
@@ -3467,6 +3522,8 @@ typedef NS_ENUM(NSInteger, OSLRMenuAction) {
     // JIT: solo si se pidió y OmniStation lo tiene de verdad ahora.
     gJITCapable = [hostOptions[@"jit"] isEqualToString:@"true"] && [OSLibretroEngine jitActive];
     gJITUnanswered = 0;
+    gSessionStartFree = os_proc_available_memory();
+    gSessionMinFree = 0;
     os_unfair_lock_lock(&gPendingLock);
     [gPendingOptions removeAllObjects];
     os_unfair_lock_unlock(&gPendingLock);

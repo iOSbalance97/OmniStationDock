@@ -1435,10 +1435,16 @@ static void OSNXTeardownDonor(const OSNXCoreAPI *api) {
 // MARK: Información
 
 + (NSDictionary *)manifest {
-    NSURL *url = [NSBundle.mainBundle URLForResource:@"MeloNXRuntime" withExtension:@"json"];
-    NSData *data = url ? [NSData dataWithContentsOfURL:url] : nil;
-    id object = data ? [NSJSONSerialization JSONObjectWithData:data options:0 error:nil] : nil;
-    return [object isKindOfClass:NSDictionary.class] ? (NSDictionary *)object : @{};
+    // Va dentro de la app y no cambia: se lee una vez (Ajustes lo pide en cada repintado).
+    static NSDictionary *cached;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        NSURL *url = [NSBundle.mainBundle URLForResource:@"MeloNXRuntime" withExtension:@"json"];
+        NSData *data = url ? [NSData dataWithContentsOfURL:url] : nil;
+        id object = data ? [NSJSONSerialization JSONObjectWithData:data options:0 error:nil] : nil;
+        cached = [object isKindOfClass:NSDictionary.class] ? (NSDictionary *)object : @{};
+    });
+    return cached;
 }
 
 + (NSString *)frameworksPath {

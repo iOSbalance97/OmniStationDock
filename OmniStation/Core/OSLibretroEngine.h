@@ -28,6 +28,9 @@ NS_ASSUME_NONNULL_BEGIN
 /// Hay una partida abierta.
 @property (nonatomic, readonly) BOOL busy;
 
+/// Memoria (MB) que llegó a gastar la última partida, contada desde que empezó (0 si no se supo).
+@property (atomic, readonly) NSUInteger lastSessionPeakMB;
+
 /// Opciones del núcleo que se pueden cambiar desde el menú de la partida (se ponen antes de
 /// launchGame). Cada una: «key», «title», «group», «values» ([[valor, etiqueta]]) y «value».
 @property (nonatomic, copy, nullable) NSArray<NSDictionary<NSString *, id> *> *menuOptions;
