@@ -49,7 +49,7 @@ enum SwitchContent {
         }
         if titleID == nil { titleID = Emulator.titleID(in: name) }
         let version: Int? = versionTag(in: name)
-        var kind: SwitchContentKind = titleID.map { kind(of: $0) } ?? .game
+        var kind: SwitchContentKind = titleID.map { SwitchContent.kind(of: $0) } ?? .game
         if titleID == nil {
             // Sin Title ID: solo el nombre del archivo.
             let lower: String = name.lowercased()

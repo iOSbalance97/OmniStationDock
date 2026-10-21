@@ -499,7 +499,7 @@ enum LiveContainerStorage {
 
     /// Carpeta de datos de la app de LiveContainer `appFolder` («<Bundle ID>.app»).
     static func dataContainer(appFolder: String, bundleID: String) -> URL? {
-        guard let root else { return nil }
+        guard let root = Self.root else { return nil }
         let manager = FileManager.default
         let data: URL = root.appendingPathComponent("Data/Application", isDirectory: true)
         // 1) LCAppInfo.plist de la app dice cuál es su carpeta de datos.
