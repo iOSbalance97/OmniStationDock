@@ -15,6 +15,7 @@ jobs:
       NEOSTATION_TAG: "0.0.8"
       MANIC_TAG: v2.0.1
       XCODEGEN_VERSION: "2.42.0"
+      VULKAN_HEADERS_TAG: v1.3.296
 
     steps:
       - name: Checkout repository
@@ -182,7 +183,30 @@ jobs:
           fi
           python3 -I tools/fetch_melonx_runtime.py Vendor/MeloNX "$LOCAL"
 
-      # Núcleos libretro de ManicEMU (NES, SNES, Game Boy, GBA, NDS, PS1, N64, PSP y Dreamcast)
+      # Cabeceras de Vulkan (Khronos, Apache-2.0/MIT) para compilar la imagen por Vulkan de los
+      # núcleos de 3DS y GameCube/Wii. Solo cabeceras: Vulkan lo pone MoltenVK al jugar.
+      - name: Cache Vulkan headers
+        id: vulkan-cache
+        uses: actions/cache@v4
+        with:
+          path: Vendor/Vulkan-Headers
+          key: vulkan-headers-${{ env.VULKAN_HEADERS_TAG }}
+
+      - name: Fetch Vulkan headers
+        if: steps.vulkan-cache.outputs.cache-hit != 'true'
+        run: |
+          set -e
+          rm -rf Vendor/Vulkan-Headers "$RUNNER_TEMP/vkh"
+          for attempt in 1 2 3; do
+            if git clone -q --depth 1 --branch "$VULKAN_HEADERS_TAG" https://github.com/KhronosGroup/Vulkan-Headers.git "$RUNNER_TEMP/vkh"; then break; fi
+            rm -rf "$RUNNER_TEMP/vkh"; sleep 5
+          done
+          mkdir -p Vendor/Vulkan-Headers
+          cp -R "$RUNNER_TEMP/vkh/include" Vendor/Vulkan-Headers/include
+          test -f Vendor/Vulkan-Headers/include/vulkan/vulkan.h
+          test -f Vendor/Vulkan-Headers/include/vulkan/vulkan_metal.h
+
+      # Núcleos libretro de ManicEMU (NES, SNES, Game Boy, GBA, NDS, PS1, N64, PSP, Dreamcast, 3DS y GameCube/Wii)
       # sacados de su IPA pública. Opcionales: si no se consiguen, la app va sin ellos. En caché por
       # versión de ManicEMU y por la lista de núcleos (tools/fetch_manic_cores.py).
       - name: Cache ManicEMU cores
@@ -208,16 +232,16 @@ jobs:
           python3 -I tools/fetch_manic_cores.py Vendor/Libretro "$RUNNER_TEMP/manic"
           rm -rf "$RUNNER_TEMP/manic"
 
-      # Archivos que necesita PPSSPP (PSP) en su carpeta de sistema: los de PPSSPP (assets) y las
-      # tablas VFPU de ManicEMU (las mismas que usa su núcleo). Opcionales y en caché.
-      - name: Cache PPSSPP assets
+      # Archivos de sistema de los núcleos: los de PPSSPP (assets) más las tablas VFPU de ManicEMU, y
+      # la carpeta Sys de Dolphin de ManicEMU (la de su núcleo). Opcionales y en caché.
+      - name: Cache core system files
         id: ppsspp-cache
         uses: actions/cache@v4
         with:
           path: Vendor/LibretroSystem
-          key: libretro-system-ppsspp-v1
+          key: libretro-system-v2
 
-      - name: Fetch PPSSPP assets (optional)
+      - name: Fetch core system files (optional)
         if: steps.ppsspp-cache.outputs.cache-hit != 'true'
         run: |
           set -uo pipefail
@@ -235,11 +259,20 @@ jobs:
           else
             echo "::warning::No se pudieron descargar los archivos de PPSSPP: la PSP irá sin ellos."
           fi
-          if [ -d Vendor/LibretroSystem/PPSSPP ] \
-             && GIT_LFS_SKIP_SMUDGE=1 git clone --depth 1 --filter=blob:none --sparse https://github.com/Manic-EMU/ManicEMU.git "$RUNNER_TEMP/manic-src" \
-             && git -C "$RUNNER_TEMP/manic-src" sparse-checkout set System.core/Libretro/system/PPSSPP/vfpu; then
-            mkdir -p Vendor/LibretroSystem/PPSSPP/vfpu
-            cp "$RUNNER_TEMP"/manic-src/System.core/Libretro/system/PPSSPP/vfpu/*.dat Vendor/LibretroSystem/PPSSPP/vfpu/ || true
+          if GIT_LFS_SKIP_SMUDGE=1 git clone --depth 1 --filter=blob:none --sparse https://github.com/Manic-EMU/ManicEMU.git "$RUNNER_TEMP/manic-src" \
+             && git -C "$RUNNER_TEMP/manic-src" sparse-checkout set System.core/Libretro/system/PPSSPP/vfpu System.core/Libretro/system/dolphin-emu; then
+            if [ -d Vendor/LibretroSystem/PPSSPP ]; then
+              mkdir -p Vendor/LibretroSystem/PPSSPP/vfpu
+              cp "$RUNNER_TEMP"/manic-src/System.core/Libretro/system/PPSSPP/vfpu/*.dat Vendor/LibretroSystem/PPSSPP/vfpu/ || true
+            fi
+            if [ -d "$RUNNER_TEMP/manic-src/System.core/Libretro/system/dolphin-emu/Sys" ]; then
+              mkdir -p Vendor/LibretroSystem
+              cp -R "$RUNNER_TEMP/manic-src/System.core/Libretro/system/dolphin-emu" Vendor/LibretroSystem/dolphin-emu
+            else
+              echo "::warning::No se encontró la carpeta Sys de Dolphin: GameCube y Wii irán sin ella."
+            fi
+          else
+            echo "::warning::No se pudo descargar lo de ManicEMU (VFPU y Sys de Dolphin)."
           fi
           rm -rf "$RUNNER_TEMP/ppsspp" "$RUNNER_TEMP/manic-src"
           du -sh Vendor/LibretroSystem 2>/dev/null || true
@@ -303,11 +336,13 @@ jobs:
             done
             cp Vendor/Libretro/cores.json Payload/OmniStationDock.app/LibretroCores.json
           fi
-          # Archivos de sistema de los núcleos (PPSSPP); la app los copia a PSP/BIOS al jugar.
-          if [ -d Vendor/LibretroSystem/PPSSPP ]; then
-            mkdir -p Payload/OmniStationDock.app/RetroSystem
-            cp -R Vendor/LibretroSystem/PPSSPP Payload/OmniStationDock.app/RetroSystem/PPSSPP
-          fi
+          # Archivos de sistema de los núcleos (PPSSPP y Dolphin); la app los copia a su BIOS al jugar.
+          for item in PPSSPP dolphin-emu; do
+            if [ -d "Vendor/LibretroSystem/$item" ]; then
+              mkdir -p Payload/OmniStationDock.app/RetroSystem
+              cp -R "Vendor/LibretroSystem/$item" "Payload/OmniStationDock.app/RetroSystem/$item"
+            fi
+          done
           # Permisos de la app (get-task-allow y más memoria). SideStore los conserva al firmar
           # si el perfil los permite; «Increased Memory Limit» se añade al App ID con GetMoreRam.
           if command -v ldid >/dev/null 2>&1 || HOMEBREW_NO_AUTO_UPDATE=1 brew install ldid >/dev/null 2>&1; then
