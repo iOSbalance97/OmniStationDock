@@ -95,6 +95,21 @@ enum Emulator: String, CaseIterable, Identifiable {
         }
     }
 
+    /// Explicación corta de cómo se añaden los juegos de este emulador cuando va como app aparte.
+    /// Lo mismo, más largo, está en Ajustes → el emulador → «Cómo funciona».
+    func setupHint(liveContainer: Bool, lang: String) -> String {
+        switch (self, liveContainer) {
+        case (.armsx2, true):
+            return L10n.tr("Pon los juegos en ARMSX2 como siempre (su carpeta iso). OmniStation los ve solos y los abre en ARMSX2.", lang)
+        case (.armsx2, false):
+            return L10n.tr("Elige en Archivos la carpeta donde tienes los juegos de ARMSX2.", lang)
+        case (.melonx, true):
+            return L10n.tr("Añade los juegos en MeloNX como siempre. OmniStation los ve solos; las actualizaciones y DLC salen dentro de cada juego y se instalan desde MeloNX.", lang)
+        case (.melonx, false):
+            return L10n.tr("Elige en Archivos la carpeta de juegos de MeloNX. Las actualizaciones y DLC salen dentro de cada juego y se instalan desde MeloNX.", lang)
+        }
+    }
+
     static func isTitleID(_ text: String) -> Bool {
         let hex = CharacterSet(charactersIn: "0123456789abcdefABCDEF")
         return text.count == 16 && text.unicodeScalars.allSatisfy { hex.contains($0) }

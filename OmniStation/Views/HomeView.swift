@@ -26,7 +26,8 @@ private enum HomeSheet: Identifiable, Hashable {
     case installMethod, pairing, bundleID
     case jitSetup, installedApps, emulatorSetup
     case textEntry(TextEntryTarget)
-    case emulatorConfig(Emulator, String?)
+    case emulatorConfig(EmuConfigTarget, String?)
+    case switchAddons(String)
     var id: Int { hashValue }
 }
 
@@ -96,6 +97,7 @@ private enum SettingsDialog {
     case coverOptions
     case armsx2Mode, armsx2CoreGames, armsx2CoreHelp, armsx2CoreFlavor
     case melonxMode, melonxCoreGames, melonxCoreHelp, memoryHelp
+    case retroSystem
 }
 
 private struct Toast: Identifiable {
@@ -195,6 +197,9 @@ struct HomeView: View {
     @State private var showAbout = false
     @State private var sheet: HomeSheet?
     @State private var dialog: SettingsDialog?
+    /// Sistema libretro del menú abierto (Ajustes → Emuladores → el sistema).
+    @State private var activeRetroSystem: RetroSystem = .nes
+    @AppStorage("retroTouchAlways") private var retroTouchAlways = false
     @State private var toast: Toast?
     @State private var hdmiForced = false
     @State private var hdmiPending = false
@@ -515,6 +520,14 @@ struct HomeView: View {
             addShortcutSheet()
         case .renameGame:
             renameSheet()
+        case .switchAddons(let gameID):
+            SwitchAddonsSheet(
+                lang: appLanguage,
+                pad: sheetPad,
+                gameName: games.first(where: { $0.id == gameID })?.name ?? "",
+                baseTitleID: switchTitleID(gameID),
+                integrated: libraryGames.first(where: { $0.id == gameID })?.source == MeloNXCoreFolders.source
+            )
         case .achievements:
             achievementsSheet()
         case .buttonMap:
@@ -551,7 +564,9 @@ struct HomeView: View {
                                 pad: sheetPad)
                 .onDisappear { emulatorRevision += 1 }
         case .emulatorSetup:
-            EmulatorSetupSheet(lang: appLanguage, pad: sheetPad, installMethod: installMethodRaw, integrated: integratedEmulators, onFolder: { emulator, url in
+            EmulatorSetupSheet(lang: appLanguage, pad: sheetPad, installMethod: installMethodRaw, integrated: integratedEmulators, retroFolders: retroSystems.map(\.folderName), onScanLiveContainer: { emulator in
+                scanEmulator(emulator, silent: false)
+            }, onFolder: { emulator, url in
                 linkEmulatorFolder(emulator, url: url)
             }, onFinish: {
                 emulatorSetupDone = true
@@ -849,7 +864,8 @@ struct HomeView: View {
         let file: String = libraryGames.first(where: { $0.id == id })?.fileName ?? ""
         if let titleID = Emulator.titleID(in: file) { return titleID }
         if let saved = gameMeta[id]?.emulatorGameID, Emulator.isTitleID(saved) { return saved }
-        return nil
+        // El que se leyó del propio archivo al escanear (ticket del .nsp).
+        return SwitchAddonStore.shared.titleID(for: id)
     }
 
     /// «Descargar» en Cambiar carátula: busca la carátula de ese juego ahora mismo.
@@ -982,6 +998,7 @@ struct HomeView: View {
         }
         if armsx2Integrated { scanCoreGames(silent: true) }
         if melonxIntegrated { scanMeloNXGames(silent: true) }
+        scanRetroGames(silent: true)
         downloadMissingCovers()
         for emulator in Emulator.allCases where EmulatorStore.isEnabled(emulator) {
             // Con el núcleo integrado, la app aparte no se toca.
@@ -1289,6 +1306,8 @@ struct HomeView: View {
             return (tr("MeloNX integrado"), tr("Necesita:\n• OmniStation instalada con SideStore o AltStore (no en LiveContainer), sin quitarle su extensión de JIT.\n• iOS 18 o posterior y Modo desarrollador.\n• Archivo de emparejamiento RPPairing y la VPN LocalDevVPN conectada.\n• Tus claves (prod.keys) y el firmware de tu Switch.\n• Un mando conectado.\nLos juegos van en Archivos → OmniStation Dock → MeloNX → Juegos. Ryujinx guarda claves, firmware y partidas en la raíz de OmniStation Dock (carpetas system, bis, sdcard…).\nCon mando: Home o SELECT+START abre el menú del juego."), [
                 PadMenuItem(title: tr("Entendido"), kind: .cancel) { closePadMenu() }
             ])
+        case .retroSystem:
+            return retroSystemMenu(cancel)
         case .memoryHelp:
             return (tr("Más memoria para MeloNX"), tr("Esta versión de OmniStation pide el permiso «Increased Memory Limit». Para que iOS lo conceda:\n1. Abre la app GetMoreRam, inicia sesión con la cuenta con la que firmas OmniStation y añade «Increased Memory Limit» al App ID de OmniStation.\n2. En SideStore, refresca o reinstala OmniStation.\n3. Vuelve aquí: la tarjeta «Memoria» se pondrá en verde."), [
                 PadMenuItem(title: tr("Entendido"), kind: .cancel) { closePadMenu() }
@@ -1306,7 +1325,7 @@ struct HomeView: View {
         case .emulatorFolder:
             return emulatorFolderMenu(cancel)
         case .emulatorHelp:
-            return (tr("Emparejar juegos de MeloNX"), tr("1. Abre MeloNX y mira el título exacto de cada juego (o su Title ID en la información del juego).\n2. En OmniStation, abre las opciones del juego (△) → «Nombre en MeloNX» y escríbelo tal cual, con tildes y signos.\n3. Ya está: OmniStation usará ese nombre para el juego y para abrirlo. Si el archivo lleva el Title ID entre corchetes [0100…], no hace falta."), [
+            return (tr("Juegos de MeloNX"), tr("OmniStation abre cada juego en MeloNX por su Title ID, y lo lee solo del archivo (el ticket de los .nsp o el [0100…] del nombre).\nSi un juego no abre: en sus Opciones (△) → «Nombre en MeloNX», escribe el título exacto que sale en MeloNX.\nLas actualizaciones y DLC no salen como juegos: están en Opciones → «Actualizaciones y DLC» de cada juego, y se activan en la app MeloNX."), [
                 PadMenuItem(title: tr("Entendido"), kind: .cancel) { closePadMenu() }
             ])
         }
@@ -1392,12 +1411,27 @@ struct HomeView: View {
         let emulator: Emulator = activeEmulator
         let name: String = EmulatorStore.folderName(emulator)
         var items: [PadMenuItem] = []
-        if directLCFolder(emulator) != nil {
-            // Dentro de LiveContainer no hace falta elegir carpeta: se lee la del emulador.
-            items.append(PadMenuItem(title: tr("Escanear su carpeta de LiveContainer")) {
-                closePadMenu()
-                scanEmulator(emulator, silent: false)
-            })
+        if usesLiveContainerFolder(emulator) {
+            // Dentro de LiveContainer no se elige carpeta: el selector copiaría los juegos a la
+            // carpeta Inbox de OmniStation. Se lee la carpeta del emulador directamente.
+            let found: Bool = directLCFolder(emulator) != nil
+            if found {
+                items.append(PadMenuItem(title: tr("Escanear su carpeta de LiveContainer")) {
+                    closePadMenu()
+                    scanEmulator(emulator, silent: false)
+                })
+            }
+            if !name.isEmpty {
+                items.append(PadMenuItem(title: tr("Olvidar la carpeta elegida antes"), kind: .destructive) {
+                    closePadMenu()
+                    unlinkEmulatorFolder(emulator)
+                })
+            }
+            items.append(cancel)
+            let message: String = found
+                ? tr("OmniStation lee los juegos de la carpeta de %@ en LiveContainer: no se copia nada.", emulator.name)
+                : tr("No se encuentra la carpeta de %@ en LiveContainer. Revisa «Carpeta en LiveContainer» (el nombre de su .app).", emulator.name)
+            return (tr("Juegos de %@", emulator.name), message, items)
         }
         items.append(PadMenuItem(title: name.isEmpty ? tr("Elegir carpeta") : tr("Cambiar carpeta")) {
             closePadMenu()
@@ -1550,10 +1584,16 @@ struct HomeView: View {
             closePadMenu()
         })
         if let emulator = integratedEmulator(for: id) {
-            let own: Bool = EmulatorConfig.hasGameSettings(emulator, id)
+            let own: Bool = EmulatorConfig.hasGameSettings(.app(emulator), id)
             items.insert(PadMenuItem(title: own ? "✓ " + tr("Configuración del emulador") : tr("Configuración del emulador")) {
                 closePadMenu()
                 openEmulatorConfig(emulator, gameID: id)
+            }, at: 0)
+        } else if let system = retroSystem(for: id) {
+            let own: Bool = EmulatorConfig.hasGameSettings(.retro(system), id)
+            items.insert(PadMenuItem(title: own ? "✓ " + tr("Configuración del emulador") : tr("Configuración del emulador")) {
+                closePadMenu()
+                openRetroConfig(system, gameID: id)
             }, at: 0)
         }
         let jitOn: Bool = wantsJIT(game)
@@ -1563,6 +1603,13 @@ struct HomeView: View {
             closePadMenu()
             showToast(jitOn ? tr("Se abrirá sin JIT") : tr("Se abrirá con JIT"))
         })
+        if game.platform == Emulator.melonx.platform {
+            let addonCount: Int = switchTitleID(id).map { SwitchAddonStore.shared.addons(baseTitleID: $0).count } ?? 0
+            items.append(PadMenuItem(title: addonCount > 0 ? tr("Actualizaciones y DLC (%ld)", addonCount) : tr("Actualizaciones y DLC")) {
+                closePadMenu()
+                sheet = .switchAddons(id)
+            })
+        }
         if let emulator = emulatorFor(game), emulator == .melonx {
             items.append(PadMenuItem(title: tr("Nombre en %@", emulator.name)) {
                 closePadMenu()
@@ -1669,7 +1716,7 @@ struct HomeView: View {
                 titleID: game.platform == Emulator.melonx.platform ? switchTitleID(game.id) : nil,
                 filePath: detailFilePath(game.id),
                 emulatorLabel: detailEmulatorLabel(game),
-                hasOwnSettings: integratedEmulator(for: game.id).map { EmulatorConfig.hasGameSettings($0, game.id) },
+                hasOwnSettings: integratedConfigTarget(for: game.id).map { EmulatorConfig.hasGameSettings($0, game.id) },
                 onPlay: { launch(game) },
                 onOptions: { openGameOptions(game.id) },
                 onFavorite: { toggleFavorite(game.id) },
@@ -1687,12 +1734,16 @@ struct HomeView: View {
         guard let item = libraryGames.first(where: { $0.id == id }), let file = item.fileName else { return nil }
         if item.source == ARMSX2CoreFolders.source { return ARMSX2CoreFolders.path(for: file) }
         if item.source == MeloNXCoreFolders.source { return MeloNXCoreFolders.path(for: file) }
+        if let system = RetroSystem.from(source: item.source) { return RetroFolders.path(system, fileName: file) }
         return nil
     }
 
     private func detailEmulatorLabel(_ game: Game) -> String? {
         if let emulator = integratedEmulator(for: game.id) {
             return tr("%@ integrado", emulator.name)
+        }
+        if let system = retroSystem(for: game.id), let core = RetroConfig.core(for: system, gameID: game.id) {
+            return tr("%@ integrado", core.name)
         }
         return emulatorFor(game)?.name
     }
@@ -2297,6 +2348,12 @@ struct HomeView: View {
     /// Abre el juego en su emulador o app.
     private func launch(_ game: Game) {
         feedback()
+        if let item = libraryGames.first(where: { $0.id == game.id }), let system = RetroSystem.from(source: item.source) {
+            playCounts[game.id, default: 0] += 1
+            UserDefaults.standard.set(playCounts, forKey: "playCounts")
+            launchRetro(game, item: item, system: system)
+            return
+        }
         if let item = libraryGames.first(where: { $0.id == game.id }), item.source == ARMSX2CoreFolders.source {
             playCounts[game.id, default: 0] += 1
             UserDefaults.standard.set(playCounts, forKey: "playCounts")
@@ -2639,11 +2696,13 @@ struct HomeView: View {
 
     /// Ajustes de ARMSX2 según el modo: los de la app aparte o los del núcleo integrado.
     private var emulatorGroups: [SettingGroup] {
-        Emulator.allCases.map { (emulator: Emulator) -> SettingGroup in
+        var groups: [SettingGroup] = Emulator.allCases.map { (emulator: Emulator) -> SettingGroup in
             if emulator == .armsx2 && armsx2Integrated { return armsx2CoreSettings }
             if emulator == .melonx && melonxIntegrated { return melonxCoreSettings }
             return emulatorSettings(emulator)
         }
+        if let retro = retroSettings { groups.append(retro) }
+        return groups
     }
 
     private var armsx2ModeItem: SettingItem {
@@ -2694,7 +2753,7 @@ struct HomeView: View {
 
     /// Ajustes generales de emulación del núcleo integrado (cada juego puede tener los suyos).
     private func emulatorConfigItem(_ emulator: Emulator) -> SettingItem {
-        let changed: Int = EmulatorConfig.global(emulator).count
+        let changed: Int = EmulatorConfig.global(.app(emulator)).count
         let subtitle: String = changed == 0 ? tr("Gráficos, sistema, sonido y HUD") : tr("%ld cambiados", changed)
         return SettingItem(id: emulator.rawValue + "Config", title: tr("Ajustes de emulación"), subtitle: subtitle, symbol: "slider.horizontal.3", tint: SettingTint.violet, control: .symbol("chevron.right"), action: {
             openEmulatorConfig(emulator, gameID: nil)
@@ -2702,7 +2761,11 @@ struct HomeView: View {
     }
 
     private func openEmulatorConfig(_ emulator: Emulator, gameID: String?) {
-        sheet = .emulatorConfig(emulator, gameID)
+        sheet = .emulatorConfig(.app(emulator), gameID)
+    }
+
+    private func openRetroConfig(_ system: RetroSystem, gameID: String?) {
+        sheet = .emulatorConfig(.retro(system), gameID)
     }
 
     /// Núcleo integrado con el que se juega este juego (nil si se abre con una app aparte).
@@ -2866,6 +2929,136 @@ struct HomeView: View {
     }
 
     /// Al cerrar la partida, la interfaz vuelve a responder al mando.
+    /// Ajustes de emulación de un juego de un núcleo integrado (ARMSX2, MeloNX o libretro).
+    private func integratedConfigTarget(for id: String) -> EmuConfigTarget? {
+        if let emulator = integratedEmulator(for: id) { return .app(emulator) }
+        if let system = retroSystem(for: id) { return .retro(system) }
+        return nil
+    }
+
+    // MARK: - Núcleos libretro (NES, SNES, Game Boy, GBA, NDS)
+
+    /// Sistema libretro de un juego de la biblioteca (nil si no es de sus carpetas).
+    private func retroSystem(for id: String) -> RetroSystem? {
+        guard let item = libraryGames.first(where: { $0.id == id }) else { return nil }
+        return RetroSystem.from(source: item.source)
+    }
+
+    /// Sistemas con algún núcleo en esta compilación.
+    private var retroSystems: [RetroSystem] {
+        RetroSystem.allCases.filter { $0.isAvailable }
+    }
+
+    private func scanRetroGames(silent: Bool) {
+        let systems: [RetroSystem] = retroSystems
+        guard !systems.isEmpty else { return }
+        Task {
+            let found: [LibraryGame] = await Task.detached(priority: .utility) { () -> [LibraryGame] in
+                var all: [LibraryGame] = []
+                for system in systems {
+                    RetroFolders.ensure(system)
+                    all += RetroFolders.scanGames(system)
+                }
+                return all
+            }.value
+            let kept: [LibraryGame] = libraryGames.filter { !$0.source.hasPrefix(RetroFolders.sourcePrefix) }
+            setLibrary(kept + found)
+            emulatorRevision += 1
+            if !silent {
+                showToast(tr("Núcleos clásicos: %ld juegos", found.count), seconds: 3)
+            }
+            downloadMissingCovers()
+        }
+    }
+
+    private func launchRetro(_ game: Game, item: LibraryGame, system: RetroSystem) {
+        guard !OSLibretroEngine.shared.busy, !OSArmsx2Engine.shared.busy, !OSMeloNXEngine.shared.busy else { return }
+        guard let core = RetroConfig.core(for: system, gameID: game.id) else {
+            showToast(tr("Esta compilación no incluye un núcleo para %@.", system.title), seconds: 4)
+            return
+        }
+        guard let file = item.fileName else {
+            showToast(tr("Vuelve a escanear las carpetas de los núcleos."), seconds: 3)
+            return
+        }
+        RetroFolders.ensure(system)
+        let options = RetroConfig.launchOptions(system, gameID: game.id)
+        var host: [String: String] = options.host
+        host["touchHaptics"] = hapticsEnabled ? "true" : "false"
+        host["touchAlways"] = retroTouchAlways ? "true" : "false"
+        // Mapa de botones del juego (Opciones → Mapear botones).
+        for (physical, target) in gameMeta[game.id]?.buttonMap ?? [:] where physical != target {
+            host["map." + physical] = target
+        }
+        let language: String = L10n.resolve(appLanguage)
+        controllers.navigationEnabled = false
+        SoundManager.shared.updateAmbient(volume: 0)
+        EmulationActivity.shared.begin(gameID: game.id)
+        OSLibretroEngine.shared.launchGame(
+            atPath: RetroFolders.path(system, fileName: file),
+            title: game.name,
+            framework: core.framework,
+            layout: system.touchLayout,
+            systemDirectory: RetroFolders.bios(system).path,
+            saveDirectory: RetroFolders.saves(system).path,
+            coreOptions: options.core,
+            hostOptions: host,
+            language: language,
+            completion: { success, message in
+                if !success {
+                    endIntegratedSession()
+                    showToast(message.isEmpty ? tr("No se pudo arrancar el juego.") : message, seconds: 6)
+                }
+            },
+            ended: {
+                endIntegratedSession()
+            }
+        )
+    }
+
+    /// Ajustes → Emuladores → Núcleos clásicos: un elemento por sistema.
+    private var retroSettings: SettingGroup? {
+        _ = emulatorRevision
+        let systems: [RetroSystem] = retroSystems
+        guard !systems.isEmpty else { return nil }
+        var items: [SettingItem] = []
+        for system in systems {
+            let count: Int = libraryGames.filter { $0.source == system.source }.count
+            let core: String = RetroConfig.core(for: system, gameID: nil)?.name ?? ""
+            items.append(SettingItem(id: "retro." + system.rawValue, title: system.title, subtitle: tr("%@ · %@/Juegos", core, system.folderName), symbol: "gamecontroller.fill", tint: SettingTint.aqua, control: .badge("\(count)", count > 0 ? Color.green : Color.gray), action: {
+                activeRetroSystem = system
+                dialog = .retroSystem
+            }))
+        }
+        items.append(toggleSetting("retroTouchAlways", tr("Mando táctil siempre"), tr("Si no, se oculta al conectar un mando"), "hand.tap.fill", SettingTint.aqua, $retroTouchAlways))
+        return SettingGroup(id: "retro", title: tr("Núcleos clásicos (integrados)"), isSubsection: true, items: items)
+    }
+
+    private func retroSystemMenu(_ cancel: PadMenuItem) -> PadMenuContent {
+        let system: RetroSystem = activeRetroSystem
+        var items: [PadMenuItem] = []
+        items.append(PadMenuItem(title: tr("Ajustes de emulación")) {
+            closePadMenu()
+            openRetroConfig(system, gameID: nil)
+        })
+        items.append(PadMenuItem(title: tr("Abrir su carpeta en Archivos")) {
+            closePadMenu()
+            RetroFolders.ensure(system)
+            if let url = RetroFolders.filesAppURL(system) { UIApplication.shared.open(url) }
+        })
+        items.append(PadMenuItem(title: tr("Volver a escanear")) {
+            closePadMenu()
+            scanRetroGames(silent: false)
+        })
+        items.append(cancel)
+        let cores: String = system.availableCores.map(\.name).joined(separator: ", ")
+        var message: String = tr("Núcleos: %@.", cores) + "\n" + tr("Pon los juegos en Archivos → OmniStation Dock → %@ → Juegos. Las partidas y estados van en %@ → Partidas.", system.folderName, system.folderName)
+        if !system.biosHint.isEmpty {
+            message += "\n" + tr("BIOS en %@ → BIOS. %@", system.folderName, tr(system.biosHint))
+        }
+        return (system.title, message, items)
+    }
+
     private func endIntegratedSession() {
         EmulationActivity.shared.end()
         SoundManager.shared.restoreSession()
@@ -3266,7 +3459,9 @@ struct HomeView: View {
             showToast(tr("Vuelve a escanear la carpeta para abrir este juego en %@", emulator.name), seconds: 4)
             return
         }
-        let link: String = emulator.gameLink(fileName: file, title: game.name, override: gameMeta[game.id]?.emulatorGameID)
+        // MeloNX abre los juegos por su Title ID: el guardado a mano o, si no, el leído del archivo.
+        let detected: String? = emulator == .melonx ? SwitchAddonStore.shared.titleID(for: game.id) : nil
+        let link: String = emulator.gameLink(fileName: file, title: game.name, override: gameMeta[game.id]?.emulatorGameID ?? detected)
         switch EmulatorStore.location(emulator, installMethod: installMethodRaw) {
         case .liveContainer:
             let folder: String = EmulatorStore.lcFolder(emulator)
@@ -3349,10 +3544,16 @@ struct HomeView: View {
         setLibrary(libraryGames.filter { $0.source != "emu:" + emulator.rawValue })
     }
 
+    /// Dentro de LiveContainer, con el emulador también en LiveContainer: sus juegos se leen de su
+    /// carpeta por la ruta, nunca con el selector (que copia lo elegido a Inbox).
+    private func usesLiveContainerFolder(_ emulator: Emulator) -> Bool {
+        DebugSupport.isInsideLiveContainer
+            && EmulatorStore.location(emulator, installMethod: installMethodRaw) == .liveContainer
+    }
+
     /// Dentro de LiveContainer, carpeta de datos del emulador leída por su ruta (sin copias en Inbox).
     private func directLCFolder(_ emulator: Emulator) -> URL? {
-        guard DebugSupport.isInsideLiveContainer,
-              EmulatorStore.location(emulator, installMethod: installMethodRaw) == .liveContainer else { return nil }
+        guard usesLiveContainerFolder(emulator) else { return nil }
         return LiveContainerStorage.gamesFolder(emulator)
     }
 
@@ -3360,9 +3561,14 @@ struct HomeView: View {
         // Dentro de LiveContainer se lee la carpeta del emulador directamente; si no se encuentra,
         // la carpeta vinculada (con el selector, que LiveContainer copia a Inbox).
         let direct: URL? = directLCFolder(emulator)
-        let picked: URL? = EmulatorStore.folderBookmark(emulator).flatMap { LibraryFolder.resolve($0) }
+        // En LiveContainer nunca la carpeta elegida con el selector (es una copia en Inbox).
+        let picked: URL? = usesLiveContainerFolder(emulator) ? nil : EmulatorStore.folderBookmark(emulator).flatMap { LibraryFolder.resolve($0) }
         guard let url = direct ?? picked else {
-            if !silent { showToast(tr("Primero vincula una carpeta de juegos")) }
+            if !silent {
+                showToast(usesLiveContainerFolder(emulator)
+                          ? tr("No se encuentra la carpeta de %@ en LiveContainer. Revisa «Carpeta en LiveContainer».", emulator.name)
+                          : tr("Primero vincula una carpeta de juegos"), seconds: 4)
+            }
             return
         }
         Task {
@@ -4571,8 +4777,8 @@ struct HomeView: View {
                 dialog = .emulatorBundle
             }))
         }
-        if emulator == .melonx && location == .liveContainer {
-            items.append(SettingItem(id: key + "Help", title: tr("Cómo emparejar los juegos"), subtitle: tr("Dentro de LiveContainer, en 3 pasos"), symbol: "questionmark.circle.fill", tint: SettingTint.blue, control: .symbol("chevron.right"), action: {
+        if emulator == .melonx {
+            items.append(SettingItem(id: key + "Help", title: tr("Cómo funciona"), subtitle: tr("Juegos, actualizaciones y DLC"), symbol: "questionmark.circle.fill", tint: SettingTint.blue, control: .symbol("chevron.right"), action: {
                 activeEmulator = emulator
                 dialog = .emulatorHelp
             }))
@@ -4594,6 +4800,13 @@ struct HomeView: View {
     private func emulatorFolderItem(_ emulator: Emulator) -> SettingItem {
         let name: String = EmulatorStore.folderName(emulator)
         let count: Int = libraryGames.filter { $0.source == "emu:" + emulator.rawValue }.count
+        if usesLiveContainerFolder(emulator) {
+            let found: Bool = directLCFolder(emulator) != nil
+            return SettingItem(id: emulator.rawValue + "Games", title: tr("Juegos"), subtitle: found ? tr("Su carpeta de LiveContainer") : tr("No se encuentra su carpeta en LiveContainer"), symbol: "externaldrive.fill", tint: SettingTint.blue, control: found ? .badge("\(count)", Color.green) : .badge("!", Color.orange), action: {
+                activeEmulator = emulator
+                dialog = .emulatorFolder
+            })
+        }
         let control: SettingControl = name.isEmpty ? SettingControl.symbol("plus") : SettingControl.badge("\(count)", Color.green)
         let subtitle: String = name.isEmpty ? tr("La misma que uses en el emulador") : name
         return SettingItem(id: emulator.rawValue + "Games", title: tr("Carpeta de juegos"), subtitle: subtitle, symbol: "externaldrive.fill", tint: SettingTint.blue, control: control, action: {

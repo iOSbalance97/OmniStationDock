@@ -11,6 +11,10 @@ struct EmulatorSetupSheet: View {
     let installMethod: String
     /// Emuladores que se usan con su núcleo integrado: no hace falta su app ni su carpeta.
     var integrated: [Emulator] = []
+    /// Carpetas de los núcleos clásicos que trae la app (NES, SNES…).
+    var retroFolders: [String] = []
+    /// Dentro de LiveContainer: los juegos se leen de la carpeta del emulador (sin elegir carpeta).
+    var onScanLiveContainer: (Emulator) -> Void = { _ in }
     var onFolder: (Emulator, URL) -> Void
     var onFinish: () -> Void
     @Environment(\.dismiss) private var dismiss
@@ -34,14 +38,16 @@ struct EmulatorSetupSheet: View {
         NavigationStack {
             PadScrollView(selection: selected, anchor: selected / 2) {
                 VStack(spacing: 14) {
-                    if !integrated.isEmpty {
+                    if !integrated.isEmpty || !retroFolders.isEmpty {
                         integratedNotice
                     }
                     if !emulators.isEmpty {
                     Text(tr("¿Qué emuladores tienes instalados?"))
                         .font(AppFont.text(16, .bold))
                         .multilineTextAlignment(.center)
-                    Text(tr("Elige la carpeta de juegos de cada uno: la misma que uses dentro del emulador. Así los juegos se ven en OmniStation y se abren directamente en su emulador con JIT."))
+                    Text(DebugSupport.isInsideLiveContainer
+                         ? tr("Dentro de LiveContainer no hace falta elegir carpetas: OmniStation lee los juegos de la carpeta de cada emulador y los abre en él con JIT.")
+                         : tr("Elige la carpeta de juegos de cada uno: la misma que uses dentro del emulador. Así los juegos se ven en OmniStation y se abren directamente en su emulador con JIT."))
                         .font(AppFont.text(11))
                         .foregroundStyle(.white.opacity(0.65))
                         .multilineTextAlignment(.center)
@@ -86,9 +92,17 @@ struct EmulatorSetupSheet: View {
                     .foregroundStyle(.white.opacity(0.75))
                     .fixedSize(horizontal: false, vertical: true)
             }
-            Text(tr("Para usar su app aparte, cambia el modo en Ajustes → Emuladores."))
-                .font(AppFont.text(11))
-                .foregroundStyle(.white.opacity(0.5))
+            if !retroFolders.isEmpty {
+                Text(tr("Clásicos (%@): cada uno en su carpeta → Juegos, en Archivos → OmniStation Dock.", retroFolders.joined(separator: ", ")))
+                    .font(AppFont.text(12))
+                    .foregroundStyle(.white.opacity(0.75))
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            if !integrated.isEmpty {
+                Text(tr("Para usar su app aparte, cambia el modo en Ajustes → Emuladores."))
+                    .font(AppFont.text(11))
+                    .foregroundStyle(.white.opacity(0.5))
+            }
         }
         .padding(14)
         .frame(maxWidth: .infinity, alignment: .leading)
@@ -111,6 +125,13 @@ struct EmulatorSetupSheet: View {
         let folder: String = folders[emulator.rawValue] ?? ""
         let location: Emulator.Location = EmulatorStore.location(emulator, installMethod: installMethod)
         let whereText: String = location == .liveContainer ? "LiveContainer" : tr("SideStore / AltStore")
+        // Dentro de LiveContainer se lee su carpeta directamente (el selector haría copias en Inbox).
+        let direct: Bool = DebugSupport.isInsideLiveContainer && location == .liveContainer
+        let found: Bool = direct && LiveContainerStorage.gamesFolder(emulator) != nil
+        let status: String = direct
+            ? (found ? tr("Carpeta de LiveContainer encontrada") : tr("No se encuentra su carpeta en LiveContainer"))
+            : (folder.isEmpty ? tr("Sin carpeta de juegos") : tr("Carpeta: %@", folder))
+        let statusOK: Bool = direct ? found : !folder.isEmpty
         return VStack(alignment: .leading, spacing: 10) {
             HStack(spacing: 10) {
                 Image(systemName: emulator.symbol)
@@ -121,9 +142,9 @@ struct EmulatorSetupSheet: View {
                 VStack(alignment: .leading, spacing: 2) {
                     Text(emulator.name + " · " + emulator.platform)
                         .font(AppFont.text(14, .bold))
-                    Text(folder.isEmpty ? tr("Sin carpeta de juegos") : tr("Carpeta: %@", folder))
+                    Text(status)
                         .font(AppFont.text(10, .medium))
-                        .foregroundStyle(folder.isEmpty ? Color.orange : Color.green)
+                        .foregroundStyle(statusOK ? Color.green : Color.orange)
                         .lineLimit(1)
                     Text(whereText)
                         .font(AppFont.text(10, .medium))
@@ -135,10 +156,14 @@ struct EmulatorSetupSheet: View {
                 SheetActionButton(title: isOn ? tr("Lo tengo: SÍ") : tr("Lo tengo: NO"), tint: Color.white.opacity(0.85), selected: pad.gamepadConnected && selected == index * 2) {
                     toggle(emulator)
                 }
-                SheetActionButton(title: folder.isEmpty ? tr("Elegir carpeta") : tr("Cambiar carpeta"), selected: pad.gamepadConnected && selected == index * 2 + 1, enabled: isOn) {
+                SheetActionButton(title: direct ? tr("Buscar sus juegos") : (folder.isEmpty ? tr("Elegir carpeta") : tr("Cambiar carpeta")), selected: pad.gamepadConnected && selected == index * 2 + 1, enabled: isOn && (!direct || found)) {
                     pick(emulator)
                 }
             }
+            Text(emulator.setupHint(liveContainer: direct, lang: lang))
+                .font(AppFont.text(10))
+                .foregroundStyle(.white.opacity(0.6))
+                .fixedSize(horizontal: false, vertical: true)
         }
         .padding(13)
         .glassCard()
@@ -152,6 +177,10 @@ struct EmulatorSetupSheet: View {
 
     private func pick(_ emulator: Emulator) {
         guard enabled[emulator.rawValue] ?? true else { return }
+        if DebugSupport.isInsideLiveContainer && EmulatorStore.location(emulator, installMethod: installMethod) == .liveContainer {
+            onScanLiveContainer(emulator)
+            return
+        }
         pickingFor = emulator
         showImporter = true
     }

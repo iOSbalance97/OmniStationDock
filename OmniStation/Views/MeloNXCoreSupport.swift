@@ -56,6 +56,8 @@ enum MeloNXCoreFolders {
         let baseCount: Int = base.pathComponents.count
         var found: [String: LibraryGame] = [:]
         var visited: Int = 0
+        // Las actualizaciones y DLC no son juegos: van dentro de su juego (Opciones → Actualizaciones y DLC).
+        var switchFiles = SwitchScanCollector(source: source)
         for case let url as URL in enumerator {
             visited += 1
             if visited > limit { break }
@@ -65,9 +67,11 @@ enum MeloNXCoreFolders {
             let relative: String = parts.joined(separator: "/")
             let name: String = url.deletingPathExtension().lastPathComponent
             let id: String = idPrefix + relative
+            guard switchFiles.accept(url, gameID: id) else { continue }
             found[id] = LibraryGame(id: id, name: name, platform: Emulator.melonx.platform, launchURL: nil,
                                     source: source, fileName: relative)
         }
+        switchFiles.save()
         return found.values.sorted { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
     }
 

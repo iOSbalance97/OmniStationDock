@@ -370,19 +370,26 @@ enum LibraryScanner {
         ) else { return [] }
 
         let extensions: Set<String> = Set(emulator.extensions)
+        let source: String = "emu:" + emulator.rawValue
         var found: [String: LibraryGame] = [:]
         var visited: Int = 0
+        // Switch: las actualizaciones y DLC no son juegos; van dentro de su juego.
+        var switchFiles: SwitchScanCollector? = emulator == .melonx ? SwitchScanCollector(source: source) : nil
         for case let url as URL in enumerator {
             visited += 1
             if visited > limit { break }
+            // Las copias que hace iOS al abrir archivos con la app no son juegos nuevos.
+            if url.lastPathComponent == "Inbox" { enumerator.skipDescendants(); continue }
             guard extensions.contains(url.pathExtension.lowercased()) else { continue }
             let name: String = url.deletingPathExtension().lastPathComponent
             let id = "\(emulator.platform)/\(name)"
+            if switchFiles != nil, switchFiles?.accept(url, gameID: id) == false { continue }
             if found[id] == nil {
                 found[id] = LibraryGame(id: id, name: name, platform: emulator.platform, launchURL: nil,
-                                        source: "emu:" + emulator.rawValue, fileName: url.lastPathComponent)
+                                        source: source, fileName: url.lastPathComponent)
             }
         }
+        switchFiles?.save()
         return found.values.sorted { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
     }
 

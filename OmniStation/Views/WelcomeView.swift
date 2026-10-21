@@ -243,7 +243,7 @@ struct WelcomeView: View {
     private func title(_ f: Frame, width: CGFloat) -> some View {
         let brandSize: CGFloat = min(width * 0.075, 31)
         let dockSize: CGFloat = min(width * 0.09, 38)
-        return VStack(spacing: 3) {
+        return VStack(spacing: 0) {
             Text("OMNISTATION")
                 .font(AppFont.brand(brandSize, .semibold))
                 .tracking(width < 400 ? 3.5 : 5.5)
@@ -277,44 +277,45 @@ struct WelcomeView: View {
                     .allowsHitTesting(false)
                 }
 
-            ZStack {
-                // Luz del destello: halo grande, núcleo blanco y una raya horizontal como de lente.
-                Ellipse()
-                    .fill(RadialGradient(colors: [Self.cyan.opacity(0.55), Self.blue.opacity(0.25), Color.clear],
-                                         center: .center, startRadius: 4, endRadius: 190))
-                    .frame(width: 380, height: 170)
-                    .scaleEffect(0.7 + f.flash * 0.6)
-                    .opacity(f.flash)
-                    .blendMode(.screen)
-                Ellipse()
-                    .fill(RadialGradient(colors: [Color.white, Color.white.opacity(0.5), Color.clear],
-                                         center: .center, startRadius: 1, endRadius: 70))
-                    .frame(width: 190, height: 70)
-                    .opacity(f.flash)
-                    .blendMode(.screen)
-                Capsule()
-                    .fill(LinearGradient(colors: [Color.clear, Self.cyan.opacity(0.8), Color.white, Self.cyan.opacity(0.8), Color.clear],
-                                         startPoint: .leading, endPoint: .trailing))
-                    .frame(width: width * (0.5 + 0.5 * f.flash), height: 2.5)
-                    .blur(radius: 0.6)
-                    .opacity(f.flash)
-                    .blendMode(.screen)
-                Text("DOCK")
-                    .font(AppFont.brand(dockSize, .heavy))
-                    .tracking(width < 400 ? 7 : 10)
-                    .foregroundStyle(LinearGradient(colors: [Self.blue, Self.cyan], startPoint: .leading, endPoint: .trailing))
-                    .overlay {
-                        // Sale blanco por la luz y se templa hasta su color.
-                        Text("DOCK")
-                            .font(AppFont.brand(dockSize, .heavy))
-                            .tracking(width < 400 ? 7 : 10)
-                            .foregroundStyle(Color.white)
-                            .opacity(min(1, f.flash * 1.2))
+            // «DOCK» justo debajo, como la línea siguiente del nombre. La luz del destello va de
+            // fondo y no ocupa sitio (si no, separa las dos palabras).
+            Text("DOCK")
+                .font(AppFont.brand(dockSize, .heavy))
+                .tracking(width < 400 ? 7 : 10)
+                .foregroundStyle(LinearGradient(colors: [Self.blue, Self.cyan], startPoint: .leading, endPoint: .trailing))
+                .overlay {
+                    // Sale blanco por la luz y se templa hasta su color.
+                    Text("DOCK")
+                        .font(AppFont.brand(dockSize, .heavy))
+                        .tracking(width < 400 ? 7 : 10)
+                        .foregroundStyle(Color.white)
+                        .opacity(min(1, f.flash * 1.2))
+                }
+                .shadow(color: Self.cyan.opacity(0.25 + 0.7 * f.flash), radius: 6 + 14 * f.flash)
+                .scaleEffect(1.25 - 0.25 * f.dock)
+                .opacity(f.dock)
+                .background {
+                    // Luz del destello: halo grande, núcleo blanco y una raya horizontal como de lente.
+                    ZStack {
+                        Ellipse()
+                            .fill(RadialGradient(colors: [Self.cyan.opacity(0.55), Self.blue.opacity(0.25), Color.clear],
+                                                 center: .center, startRadius: 4, endRadius: 190))
+                            .frame(width: 380, height: 170)
+                            .scaleEffect(0.7 + f.flash * 0.6)
+                        Ellipse()
+                            .fill(RadialGradient(colors: [Color.white, Color.white.opacity(0.5), Color.clear],
+                                                 center: .center, startRadius: 1, endRadius: 70))
+                            .frame(width: 190, height: 70)
+                        Capsule()
+                            .fill(LinearGradient(colors: [Color.clear, Self.cyan.opacity(0.8), Color.white, Self.cyan.opacity(0.8), Color.clear],
+                                                 startPoint: .leading, endPoint: .trailing))
+                            .frame(width: width * (0.5 + 0.5 * f.flash), height: 2.5)
+                            .blur(radius: 0.6)
                     }
-                    .shadow(color: Self.cyan.opacity(0.25 + 0.7 * f.flash), radius: 6 + 14 * f.flash)
-                    .scaleEffect(1.25 - 0.25 * f.dock)
-                    .opacity(f.dock)
-            }
+                    .opacity(f.flash)
+                    .blendMode(.screen)
+                    .allowsHitTesting(false)
+                }
         }
     }
 }

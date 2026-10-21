@@ -73,6 +73,31 @@ struct EmuOption: Identifiable {
     }
 }
 
+/// De quién son unos ajustes de emulación: un núcleo integrado con app aparte (ARMSX2, MeloNX) o
+/// un sistema de los núcleos libretro (NES, SNES…). `.armsx2` y `.melonx` siguen funcionando igual.
+enum EmuConfigTarget: Hashable {
+    case app(Emulator)
+    case retro(RetroSystem)
+
+    static let armsx2 = EmuConfigTarget.app(.armsx2)
+    static let melonx = EmuConfigTarget.app(.melonx)
+
+    /// Clave en UserDefaults (la de ARMSX2 y MeloNX no cambia).
+    var storageKey: String {
+        switch self {
+        case .app(let app): return app.rawValue
+        case .retro(let system): return "retro." + system.rawValue
+        }
+    }
+
+    var name: String {
+        switch self {
+        case .app(let app): return app.name
+        case .retro(let system): return system.title
+        }
+    }
+}
+
 enum EmulatorConfig {
     // MARK: Definiciones
 
@@ -247,42 +272,45 @@ enum EmulatorConfig {
         ]
     }()
 
-    static func options(_ emulator: Emulator) -> [EmuOption] {
-        emulator == .melonx ? melonx : armsx2
+    static func options(_ emulator: EmuConfigTarget) -> [EmuOption] {
+        switch emulator {
+        case .app(let app): return app == .melonx ? melonx : armsx2
+        case .retro(let system): return RetroConfig.options(system)
+        }
     }
 
-    static func tabs(_ emulator: Emulator) -> [EmuTab] {
+    static func tabs(_ emulator: EmuConfigTarget) -> [EmuTab] {
         let used: Set<EmuTab> = Set(options(emulator).map(\.tab))
         return EmuTab.allCases.filter { used.contains($0) }
     }
 
     // MARK: Guardado
 
-    private static func globalKey(_ emulator: Emulator) -> String {
-        "emuConfig." + emulator.rawValue
+    private static func globalKey(_ emulator: EmuConfigTarget) -> String {
+        "emuConfig." + emulator.storageKey
     }
 
-    private static func gameKey(_ emulator: Emulator, _ gameID: String) -> String {
-        "emuConfig." + emulator.rawValue + ".game." + gameID
+    private static func gameKey(_ emulator: EmuConfigTarget, _ gameID: String) -> String {
+        "emuConfig." + emulator.storageKey + ".game." + gameID
     }
 
-    static func global(_ emulator: Emulator) -> [String: String] {
+    static func global(_ emulator: EmuConfigTarget) -> [String: String] {
         (UserDefaults.standard.dictionary(forKey: globalKey(emulator)) as? [String: String]) ?? [:]
     }
 
-    static func game(_ emulator: Emulator, _ gameID: String) -> [String: String] {
+    static func game(_ emulator: EmuConfigTarget, _ gameID: String) -> [String: String] {
         (UserDefaults.standard.dictionary(forKey: gameKey(emulator, gameID)) as? [String: String]) ?? [:]
     }
 
     /// Cambia un ajuste general (nil: vuelve al valor por defecto).
-    static func setGlobal(_ emulator: Emulator, _ id: String, _ value: String?) {
+    static func setGlobal(_ emulator: EmuConfigTarget, _ id: String, _ value: String?) {
         var values: [String: String] = global(emulator)
         values[id] = value
         UserDefaults.standard.set(values, forKey: globalKey(emulator))
     }
 
     /// Cambia un ajuste de un juego (nil: usa el general).
-    static func setGame(_ emulator: Emulator, _ gameID: String, _ id: String, _ value: String?) {
+    static func setGame(_ emulator: EmuConfigTarget, _ gameID: String, _ id: String, _ value: String?) {
         var values: [String: String] = game(emulator, gameID)
         values[id] = value
         if values.isEmpty {
@@ -293,7 +321,7 @@ enum EmulatorConfig {
     }
 
     /// Deja los ajustes generales (o los de un juego) tal como estaban (○: salir sin guardar).
-    static func restore(_ emulator: Emulator, gameID: String?, values: [String: String]) {
+    static func restore(_ emulator: EmuConfigTarget, gameID: String?, values: [String: String]) {
         let key: String = gameID.map { gameKey(emulator, $0) } ?? globalKey(emulator)
         if values.isEmpty {
             UserDefaults.standard.removeObject(forKey: key)
@@ -302,25 +330,25 @@ enum EmulatorConfig {
         }
     }
 
-    static func resetGlobal(_ emulator: Emulator) {
+    static func resetGlobal(_ emulator: EmuConfigTarget) {
         UserDefaults.standard.removeObject(forKey: globalKey(emulator))
     }
 
-    static func resetGame(_ emulator: Emulator, _ gameID: String) {
+    static func resetGame(_ emulator: EmuConfigTarget, _ gameID: String) {
         UserDefaults.standard.removeObject(forKey: gameKey(emulator, gameID))
     }
 
-    static func hasGameSettings(_ emulator: Emulator, _ gameID: String) -> Bool {
+    static func hasGameSettings(_ emulator: EmuConfigTarget, _ gameID: String) -> Bool {
         !game(emulator, gameID).isEmpty
     }
 
     /// Valor general: el guardado o el de por defecto.
-    static func globalValue(_ option: EmuOption, _ emulator: Emulator) -> String {
+    static func globalValue(_ option: EmuOption, _ emulator: EmuConfigTarget) -> String {
         global(emulator)[option.id] ?? option.defaultValue
     }
 
     /// Lo que se usa al jugar: por defecto, encima los generales y encima los del juego.
-    static func effective(_ emulator: Emulator, gameID: String?) -> [String: String] {
+    static func effective(_ emulator: EmuConfigTarget, gameID: String?) -> [String: String] {
         let general: [String: String] = global(emulator)
         let own: [String: String] = gameID.map { game(emulator, $0) } ?? [:]
         var result: [String: String] = [:]

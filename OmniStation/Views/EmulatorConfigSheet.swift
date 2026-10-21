@@ -9,7 +9,7 @@ import SwiftUI
 /// ○ sale sin guardar (deja los ajustes como estaban al abrir).
 struct EmulatorConfigSheet: View {
     let lang: String
-    let emulator: Emulator
+    let emulator: EmuConfigTarget
     var gameID: String? = nil
     var gameName: String? = nil
     @ObservedObject var pad: SheetPad
