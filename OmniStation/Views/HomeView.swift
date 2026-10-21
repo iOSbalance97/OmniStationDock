@@ -1823,7 +1823,7 @@ struct HomeView: View {
                 VStack(spacing: 10) {
                     VStack(spacing: 4) {
                         Text(menu.title)
-                            .font(.system(size: 15, weight: .semibold))
+                            .font(AppFont.text(13, .bold))
                             .foregroundStyle(.white.opacity(0.9))
                             .multilineTextAlignment(.center)
                         if let message = menu.message {
@@ -1840,8 +1840,17 @@ struct HomeView: View {
                 }
                 .padding(14)
                 .frame(maxWidth: isLandscapeNow ? 460 : 360)
-                .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 22, style: .continuous))
-                .overlay(RoundedRectangle(cornerRadius: 22, style: .continuous).strokeBorder(Color.white.opacity(0.1), lineWidth: 0.5))
+                .background {
+                    ZStack {
+                        Rectangle().fill(.regularMaterial)
+                        AppPanelBackground().opacity(0.85)
+                    }
+                    .clipShape(RoundedRectangle(cornerRadius: 22, style: .continuous))
+                    .shadow(color: Color.cyan.opacity(0.22), radius: 22)
+                }
+                .overlay(RoundedRectangle(cornerRadius: 22, style: .continuous)
+                    .strokeBorder(LinearGradient(colors: [Color.cyan.opacity(0.5), Color.white.opacity(0.08), Color(red: 0.55, green: 0.42, blue: 1.0).opacity(0.35)],
+                                                 startPoint: .topLeading, endPoint: .bottomTrailing), lineWidth: 0.8))
                 .padding(24)
             }
             .transition(.opacity)
@@ -1893,8 +1902,7 @@ struct HomeView: View {
                             .id(index)
                     }
                 }
-                .background(Color.white.opacity(0.08), in: RoundedRectangle(cornerRadius: 14, style: .continuous))
-                .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+                .appSectionCard(cornerRadius: 14)
             }
         }
     }
@@ -1907,7 +1915,7 @@ struct HomeView: View {
             item.action()
         } label: {
             Text(item.title)
-                .font(.system(size: 17, weight: cancel ? .semibold : .regular))
+                .font(AppFont.text(14, cancel ? .bold : .semibold))
                 .foregroundStyle(color)
                 .multilineTextAlignment(.center)
                 .lineLimit(2)
@@ -2918,6 +2926,8 @@ struct HomeView: View {
         controllers.navigationEnabled = false
         SoundManager.shared.updateAmbient(volume: 0)
         EmulationActivity.shared.begin(gameID: gameID)
+        // ARMSX2 engancha y suelta su propio depurador: el de los núcleos libretro ya no vale.
+        RetroJIT.fresh = false
         showToast(tr("Activando el JIT…"), seconds: 60)
         OSArmsx2Engine.shared.launchGame(
             atPath: gamePath,
@@ -3001,15 +3011,26 @@ struct HomeView: View {
         // JIT: si el núcleo puede usarlo y OmniStation aún no lo tiene, se lo pide a su extensión
         // (instalada con SideStore). En LiveContainer vale el JIT con el que se abrió OmniStation.
         let wantsJIT: Bool = chosen.jit && RetroConfig.wantsJIT(system, gameID: game.id)
-        if wantsJIT && !OSLibretroEngine.jitActive && canAskSelfJIT, let pairing = PairingFile.data() {
+        // Depurador enganchado pero ya usado por otra partida u otro emulador: no vale para preparar
+        // la memoria de JIT de esta; se suelta y se engancha otra vez.
+        let staleJIT: Bool = OSLibretroEngine.jitActive && !RetroJIT.fresh
+        if wantsJIT && (!OSLibretroEngine.jitActive || staleJIT) && canAskSelfJIT, let pairing = PairingFile.data() {
             // Al engancharse el depurador la app se para un instante: la música se quita antes y se
             // espera a que acabe el sonido del botón, para que no se oiga entrecortado.
             SoundManager.shared.updateAmbient(volume: 0)
             showToast(tr("Activando el JIT…"), seconds: 60)
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) {
+            var wait: Double = 0.4
+            if staleJIT {
+                OSLibretroEngine.detachJITDebugger()
+                OSMeloNXEngine.shared.releaseSharedJIT()
+                RetroJIT.holding = false
+                wait = 1.2
+            }
+            DispatchQueue.main.asyncAfter(deadline: .now() + wait) {
                 OSMeloNXEngine.shared.prepareSharedJIT(withPairing: pairing) { success, message in
                     if success {
                         RetroJIT.holding = true
+                        RetroJIT.fresh = true
                         showToast(tr("JIT activo"), seconds: 2)
                     } else {
                         showToast(tr("Sin JIT (%@). El juego va en modo intérprete.", message), seconds: 5)
@@ -3022,18 +3043,22 @@ struct HomeView: View {
         // LiveContainer: los núcleos sueltan el depurador al preparar su memoria de JIT, así que en
         // cada juego hay que volver a engancharlo. StikDebug lo hace sobre la app abierta (sin
         // reiniciarla) y se vuelve aquí; si no vuelve con JIT, el juego arranca sin él.
-        if wantsJIT && !OSLibretroEngine.jitActive && DebugSupport.isInsideLiveContainer && DebugSupport.isJITEnabled,
+        if wantsJIT && (!OSLibretroEngine.jitActive || staleJIT) && DebugSupport.isInsideLiveContainer && DebugSupport.isJITEnabled,
            let url = DebugSupport.enableJITURL {
             SoundManager.shared.updateAmbient(volume: 0)
             showToast(tr("Reactivando el JIT con StikDebug… Vuelve aquí cuando termine."), seconds: 8)
-            UIApplication.shared.open(url) { opened in
-                guard opened else {
-                    showToast(tr("No se pudo abrir StikDebug: el juego va sin JIT."), seconds: 4)
-                    startRetro(game, item: item, system: system)
-                    return
-                }
-                waitForSelfJIT(deadline: Date().addingTimeInterval(90), activeSince: nil) {
-                    startRetro(game, item: item, system: system)
+            // El que quedó de otra partida se suelta antes (si no, StikDebug no puede engancharse).
+            if staleJIT { OSLibretroEngine.detachJITDebugger() }
+            DispatchQueue.main.asyncAfter(deadline: .now() + (staleJIT ? 0.6 : 0)) {
+                UIApplication.shared.open(url) { opened in
+                    guard opened else {
+                        showToast(tr("No se pudo abrir StikDebug: el juego va sin JIT."), seconds: 4)
+                        startRetro(game, item: item, system: system)
+                        return
+                    }
+                    waitForSelfJIT(deadline: Date().addingTimeInterval(90), activeSince: nil) {
+                        startRetro(game, item: item, system: system)
+                    }
                 }
             }
             return
@@ -3056,6 +3081,8 @@ struct HomeView: View {
         RetroFolders.ensure(system)
         RetroFolders.prepareSystemFiles(system)
         let options = RetroConfig.launchOptions(system, core: core, gameID: game.id, jit: jit)
+        // Esta partida estrena el depurador (prepara con él su memoria de JIT).
+        if jit && core.jit { RetroJIT.fresh = false }
         var host: [String: String] = options.host
         host["touchHaptics"] = hapticsEnabled ? "true" : "false"
         host["touchAlways"] = retroTouchAlways ? "true" : "false"
@@ -3064,6 +3091,12 @@ struct HomeView: View {
             host["map." + physical] = target
         }
         let language: String = L10n.resolve(appLanguage)
+        // Opciones del núcleo en el menú de la partida: lo que se cambie ahí se guarda para este juego.
+        OSLibretroEngine.shared.menuOptions = RetroCoreOptions.menuOptions(for: core, current: options.core, language: language)
+        let gameID: String = game.id
+        OSLibretroEngine.shared.menuOptionChanged = { key, value in
+            EmulatorConfig.setGame(.retro(system), gameID, "opt." + key, value)
+        }
         controllers.navigationEnabled = false
         SoundManager.shared.updateAmbient(volume: 0)
         EmulationActivity.shared.begin(gameID: game.id)
@@ -3116,6 +3149,7 @@ struct HomeView: View {
     private func waitForSelfJIT(deadline: Date, activeSince: Date?, then: @escaping () -> Void) {
         let active: Bool = UIApplication.shared.applicationState == .active
         if active && OSLibretroEngine.jitActive {
+            RetroJIT.fresh = true
             showToast(tr("JIT activo"), seconds: 2)
             then()
             return
@@ -3442,6 +3476,11 @@ struct HomeView: View {
             return
         }
         let language: String = L10n.resolve(appLanguage)
+        // El núcleo de MeloNX solo abre un juego por cada vez que se abre la app.
+        if OSMeloNXEngine.shared.needsRelaunch {
+            OSMeloNXEngine.shared.offerRelaunch(language: language)
+            return
+        }
         let path: String = MeloNXCoreFolders.path(for: file)
         // Ajustes de emulación: los generales y, encima, los de este juego.
         var settings: [String: String] = EmulatorConfig.effective(.melonx, gameID: game.id)
@@ -3452,6 +3491,8 @@ struct HomeView: View {
         controllers.navigationEnabled = false
         SoundManager.shared.updateAmbient(volume: 0)
         EmulationActivity.shared.begin(gameID: game.id)
+        // MeloNX engancha su propio depurador: el de los núcleos libretro ya no vale.
+        RetroJIT.fresh = false
         // La Switch es horizontal: se gira antes de abrir el juego.
         OrientationController.apply(landscape: true)
         showToast(tr("Activando el JIT…"), seconds: 60)

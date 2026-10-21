@@ -177,6 +177,12 @@ enum EmulatorConfig {
 
             EmulatorConfig.pick("StandardVolume", .audio, "Volumen", "",
                  [("100", "100 %"), ("75", "75 %"), ("50", "50 %"), ("25", "25 %"), ("0", "Silencio")], "100", ini: ("SPU2/Output", "StandardVolume")).grouped("Volumen"),
+            EmulatorConfig.pick("SyncMode", .audio, "Sincronización", "Estirar el sonido evita los cortes cuando el juego va un poco lento.",
+                 [("TimeStretch", "Estirar el sonido"), ("Disabled", "No")], "TimeStretch", ini: ("SPU2/Output", "SyncMode")).grouped("Sin cortes"),
+            EmulatorConfig.pick("BufferMS", .audio, "Margen del sonido", "Más margen: menos cortes y un poco más de retraso.",
+                 [("50", "50 ms"), ("80", "80 ms"), ("100", "100 ms"), ("150", "150 ms")], "100", ini: ("SPU2/Output", "BufferMS")).grouped("Sin cortes"),
+            EmulatorConfig.pick("OutputLatencyMS", .audio, "Latencia de salida", "",
+                 [("20", "20 ms"), ("40", "40 ms"), ("60", "60 ms")], "40", ini: ("SPU2/Output", "OutputLatencyMS")).grouped("Sin cortes"),
 
             EmulatorConfig.toggle("OsdShowFPS", .hud, "FPS", "HUD propio de ARMSX2, arriba a la derecha.", false, ini: (gs, "OsdShowFPS")).grouped("Indicador de ARMSX2"),
             EmulatorConfig.toggle("OsdShowSpeed", .hud, "Velocidad", "", false, ini: (gs, "OsdShowSpeed")).grouped("Indicador de ARMSX2"),
@@ -377,6 +383,8 @@ enum EmulatorConfig {
         entries.append(("GameISO", "FastBoot", values["EnableFastBoot"] ?? "true"))
         // HUD propio de ARMSX2 arriba a la derecha (el de OmniStation va a la izquierda).
         entries.append(("EmuCore/GS", "OsdPerformancePos", "3"))
+        // Sonido sin cortes: la latencia es la elegida (no la mínima del sistema).
+        entries.append(("SPU2/Output", "OutputLatencyMinimal", "false"))
         // Mapa de botones del juego (lo lee el núcleo al prepararse). Sin mapa: los de siempre.
         for (index, value) in armsx2GamepadMapping(buttonMap).enumerated() {
             entries.append(("ARMSX2iOS/GamepadMapping", "Button\(index)", String(value)))

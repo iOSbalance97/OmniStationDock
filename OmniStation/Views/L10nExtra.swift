@@ -373,6 +373,13 @@ extension L10n {
         "Compatibilidad": "Compatibility",
         "Parches y trucos": "Patches & cheats",
         "Indicador de ARMSX2": "ARMSX2 overlay",
-        "Indicador de OmniStation": "OmniStation overlay"
+        "Indicador de OmniStation": "OmniStation overlay",
+        "Sincronización": "Sync",
+        "Estirar el sonido evita los cortes cuando el juego va un poco lento.": "Stretching the sound avoids cuts when the game runs a bit slow.",
+        "Estirar el sonido": "Stretch the sound",
+        "Margen del sonido": "Sound buffer",
+        "Más margen: menos cortes y un poco más de retraso.": "More buffer: fewer cuts and slightly more delay.",
+        "Latencia de salida": "Output latency",
+        "Sin cortes": "No cuts"
     ]
 }

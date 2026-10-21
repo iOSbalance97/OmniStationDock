@@ -296,6 +296,17 @@ enum RetroCoreOptions {
         return result
     }
 
+    /// Las del núcleo para el menú de la partida (clave, nombre, grupo, valores y el de ahora).
+    static func menuOptions(for core: RetroCore, current: [String: String], language: String) -> [[String: Any]] {
+        options(for: core).map { option -> [String: Any] in
+            let key: String = String(option.id.dropFirst(4))
+            let group: String = option.tab == .advanced ? option.group : L10n.tr(option.tab.title, language)
+            let values: [[String]] = option.choices.map { [$0.value, L10n.tr($0.label, language)] }
+            return ["key": key, "title": L10n.tr(option.title, language), "group": group,
+                    "values": values, "value": current[key] ?? option.defaultValue]
+        }
+    }
+
     /// Las de todos los núcleos del sistema que ya se conocen (sin abrir ninguno).
     static func cachedOptions(_ system: RetroSystem) -> [EmuOption] {
         system.availableCores.flatMap { options(for: $0) }

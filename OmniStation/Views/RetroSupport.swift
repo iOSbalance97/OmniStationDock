@@ -449,4 +449,9 @@ enum RetroConfig {
 /// al salir del juego.
 enum RetroJIT {
     static var holding: Bool = false
+    /// El depurador enganchado ahora está sin estrenar: se enganchó para un núcleo libretro (o con
+    /// él se abrió la app) y ninguna partida lo ha usado aún. Los núcleos preparan su memoria de JIT
+    /// al empezar cada partida y necesitan un depurador que la atienda; si ya lo usó otra partida
+    /// (u otro emulador: ARMSX2, MeloNX), se suelta y se vuelve a enganchar antes de jugar.
+    static var fresh: Bool = true
 }

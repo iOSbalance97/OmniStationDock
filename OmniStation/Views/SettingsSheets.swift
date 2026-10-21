@@ -800,26 +800,68 @@ struct IOSSection<Content: View>: View {
     }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 6) {
+        VStack(alignment: .leading, spacing: 7) {
             if !header.isEmpty {
-                Text(header.uppercased())
-                    .font(.system(size: 12, weight: .regular))
-                    .foregroundStyle(.white.opacity(0.5))
-                    .padding(.horizontal, 16)
+                // Título de la sección con el acento cian de la app.
+                HStack(spacing: 7) {
+                    Capsule()
+                        .fill(LinearGradient(colors: [Color.cyan, Color(red: 0.30, green: 0.60, blue: 1.0)], startPoint: .top, endPoint: .bottom))
+                        .frame(width: 3, height: 11)
+                        .shadow(color: Color.cyan.opacity(0.7), radius: 4)
+                    Text(header.uppercased())
+                        .font(AppFont.text(10, .bold))
+                        .tracking(1.0)
+                        .foregroundStyle(Color.cyan.opacity(0.85))
+                        .lineLimit(1)
+                        .minimumScaleFactor(0.7)
+                }
+                .padding(.horizontal, 12)
             }
             VStack(spacing: 0) {
                 content
             }
-            .background(Color.white.opacity(0.075), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
-            .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+            .appSectionCard(cornerRadius: 14)
             if !footer.isEmpty {
                 Text(footer)
-                    .font(.system(size: 12))
+                    .font(AppFont.text(11))
                     .foregroundStyle(.white.opacity(0.45))
                     .fixedSize(horizontal: false, vertical: true)
-                    .padding(.horizontal, 16)
+                    .padding(.horizontal, 14)
             }
         }
+    }
+}
+
+/// Fondo de los paneles de ajustes: el azul noche de la app con su brillo cian y violeta.
+struct AppPanelBackground: View {
+    var body: some View {
+        ZStack {
+            LinearGradient(colors: [Color(red: 0.03, green: 0.06, blue: 0.13), Color(red: 0.01, green: 0.02, blue: 0.05)],
+                           startPoint: .top, endPoint: .bottom)
+            RadialGradient(colors: [Color.cyan.opacity(0.20), .clear], center: .topLeading, startRadius: 10, endRadius: 420)
+            RadialGradient(colors: [Color(red: 0.55, green: 0.42, blue: 1.0).opacity(0.16), .clear], center: .bottomTrailing, startRadius: 10, endRadius: 460)
+        }
+        .ignoresSafeArea()
+    }
+}
+
+extension View {
+    /// Tarjeta de una sección: cristal oscuro con borde de luz cian (como las tarjetas de la app).
+    func appSectionCard(cornerRadius: CGFloat = 14) -> some View {
+        let shape = RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
+        return clipShape(shape)
+            .background {
+                shape
+                    .fill(LinearGradient(colors: [Color.white.opacity(0.10), Color.white.opacity(0.045)], startPoint: .top, endPoint: .bottom))
+                    .shadow(color: Color.cyan.opacity(0.14), radius: 12, y: 4)
+            }
+            .overlay(
+                shape.strokeBorder(
+                    LinearGradient(colors: [Color.cyan.opacity(0.45), Color.white.opacity(0.08), Color(red: 0.55, green: 0.42, blue: 1.0).opacity(0.30)],
+                                   startPoint: .topLeading, endPoint: .bottomTrailing),
+                    lineWidth: 0.8
+                )
+            )
     }
 }
 
@@ -838,11 +880,19 @@ struct IOSRowDivider: View {
 extension View {
     /// Fila marcada con el mando: se ilumina el fondo de la fila (como la selección de iOS).
     func iosRowHighlight(_ active: Bool) -> some View {
-        background(active ? Color.cyan.opacity(0.22) : Color.clear)
-            .overlay(alignment: .leading) {
-                if active {
-                    Rectangle().fill(Color.cyan).frame(width: 3)
-                }
+        background {
+            if active {
+                LinearGradient(colors: [Color.cyan.opacity(0.30), Color.cyan.opacity(0.08)], startPoint: .leading, endPoint: .trailing)
             }
+        }
+        .overlay(alignment: .leading) {
+            if active {
+                Rectangle()
+                    .fill(Color.cyan)
+                    .frame(width: 3)
+                    .shadow(color: Color.cyan.opacity(0.9), radius: 5)
+            }
+        }
+        .animation(.easeOut(duration: 0.15), value: active)
     }
 }

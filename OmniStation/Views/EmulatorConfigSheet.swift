@@ -97,7 +97,7 @@ struct EmulatorConfigSheet: View {
                     VStack(alignment: .leading, spacing: 22) {
                         if gameID != nil {
                             Text(tr("Lo que no cambies aquí usa los ajustes generales de %@ (Ajustes).", emulator.name))
-                                .font(.system(size: 13))
+                                .font(AppFont.text(11))
                                 .foregroundStyle(.white.opacity(0.55))
                                 .padding(.horizontal, 16)
                         }
@@ -112,7 +112,7 @@ struct EmulatorConfigSheet: View {
                         }
                         if options.isEmpty && isRetro {
                             Text(tr("Las opciones de este núcleo salen aquí en cuanto se puedan leer."))
-                                .font(.system(size: 13))
+                                .font(AppFont.text(11))
                                 .foregroundStyle(.white.opacity(0.5))
                                 .padding(.horizontal, 16)
                         }
@@ -134,7 +134,12 @@ struct EmulatorConfigSheet: View {
             }
         }
         .presentationDetents([.large])
-        .presentationBackground(.regularMaterial)
+        .presentationBackground {
+            ZStack {
+                Rectangle().fill(.ultraThinMaterial)
+                AppPanelBackground().opacity(0.92)
+            }
+        }
         .preferredColorScheme(.dark)
         .onAppear {
             // Núcleos libretro: sus opciones se leen ahora si aún no se tenían.
@@ -198,22 +203,26 @@ struct EmulatorConfigSheet: View {
                 Button {
                     switchTab(item)
                 } label: {
-                    VStack(spacing: 2) {
+                    VStack(spacing: 3) {
                         Image(systemName: item.symbol)
                             .font(.system(size: 12, weight: .semibold))
+                            .foregroundStyle(active ? Color.cyan : Color.white.opacity(0.55))
+                            .shadow(color: active ? Color.cyan.opacity(0.8) : .clear, radius: 4)
                         Text(tr(item.title))
-                            .font(.system(size: 11, weight: active ? .semibold : .medium))
+                            .font(AppFont.text(9, active ? .bold : .medium))
                             .lineLimit(1)
                             .minimumScaleFactor(0.6)
                     }
-                    .foregroundStyle(active ? Color.white : Color.white.opacity(0.65))
+                    .foregroundStyle(active ? Color.white : Color.white.opacity(0.6))
                     .frame(maxWidth: .infinity)
-                    .padding(.vertical, 6)
+                    .padding(.vertical, 7)
                     .background {
                         if active {
                             RoundedRectangle(cornerRadius: 9, style: .continuous)
-                                .fill(Color.white.opacity(0.22))
-                                .shadow(color: .black.opacity(0.25), radius: 3, y: 1)
+                                .fill(LinearGradient(colors: [Color.cyan.opacity(0.32), Color(red: 0.30, green: 0.60, blue: 1.0).opacity(0.18)],
+                                                     startPoint: .top, endPoint: .bottom))
+                                .overlay(RoundedRectangle(cornerRadius: 9, style: .continuous).strokeBorder(Color.cyan.opacity(0.55), lineWidth: 0.8))
+                                .shadow(color: Color.cyan.opacity(0.35), radius: 6)
                         }
                     }
                     .contentShape(Rectangle())
@@ -222,7 +231,7 @@ struct EmulatorConfigSheet: View {
             }
         }
         .padding(2)
-        .background(Color.white.opacity(0.09), in: RoundedRectangle(cornerRadius: 11, style: .continuous))
+        .appSectionCard(cornerRadius: 11)
         .padRing(pad.gamepadConnected && selected == 0, cornerRadius: 12)
         .animation(.easeInOut(duration: 0.18), value: tab)
     }
@@ -261,11 +270,11 @@ struct EmulatorConfigSheet: View {
         return HStack(alignment: .center, spacing: 12) {
             VStack(alignment: .leading, spacing: 2) {
                 Text(tr(option.title))
-                    .font(.system(size: 16))
+                    .font(AppFont.text(13, .semibold))
                     .foregroundStyle(.white)
                 if !option.detail.isEmpty {
                     Text(tr(option.detail))
-                        .font(.system(size: 12))
+                        .font(AppFont.text(10))
                         .foregroundStyle(.white.opacity(0.5))
                         .fixedSize(horizontal: false, vertical: true)
                 }
@@ -299,12 +308,13 @@ struct EmulatorConfigSheet: View {
                     HStack(spacing: 4) {
                         VStack(alignment: .trailing, spacing: 1) {
                             Text(tr(option.label(for: value)))
-                                .font(.system(size: 15))
-                                .foregroundStyle(changed ? Color.cyan : Color.white.opacity(0.5))
+                                .font(AppFont.text(12, changed ? .bold : .medium))
+                                .foregroundStyle(changed ? Color.cyan : Color.white.opacity(0.55))
+                                .shadow(color: changed ? Color.cyan.opacity(0.5) : .clear, radius: 3)
                                 .lineLimit(1)
                             if inherited {
                                 Text(tr("general"))
-                                    .font(.system(size: 10, weight: .medium))
+                                    .font(AppFont.text(8, .medium))
                                     .foregroundStyle(.white.opacity(0.35))
                             }
                         }
