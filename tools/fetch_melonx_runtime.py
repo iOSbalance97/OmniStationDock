@@ -228,6 +228,13 @@ def main():
 
 
 if __name__ == '__main__':
+    # --latest-tag: solo dice qué versión se bajaría (para la clave de la caché del workflow).
+    if len(sys.argv) > 1 and sys.argv[1] == '--latest-tag':
+        try:
+            print(pick_release()[0])
+        except Exception:  # noqa: BLE001
+            print('')
+        sys.exit(0)
     try:
         main()
     except Exception as failure:  # noqa: BLE001 - nunca rompe la compilación de la app
