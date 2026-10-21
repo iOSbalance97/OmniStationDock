@@ -15,11 +15,12 @@ import zipfile
 
 # Fase 1: NES, SNES, Game Boy, GBA y NDS (imagen por CPU).
 # Fase 2: PS1, N64, PSP y Dreamcast (imagen por GPU con OpenGL ES; JIT si OmniStation lo tiene),
-# 3DS (Azahar) y GameCube/Wii (Dolphin), con Vulkan por MoltenVK.
+# 3DS (Azahar), con Vulkan por MoltenVK. GameCube/Wii va con el Dolphin de OmniStation
+# (Cores/Libretro), no con el de ManicEMU.
 WANTED = [
     'nestopia', 'snes9x', 'gambatte', 'mgba', 'gpsp', 'vbam', 'melondsds', 'desmume',
     'pcsx.rearmed', 'mednafen.psx.hw', 'mupen64plus.next', 'ppsspp', 'flycast', 'flycast-jitless',
-    'azahar', 'dolphin',
+    'azahar',
 ]
 # Lo que no es un núcleo pero necesitan (MoltenVK: Vulkan sobre Metal, Apache-2.0).
 EXTRAS = ['MoltenVK.framework']
