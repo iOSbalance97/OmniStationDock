@@ -226,7 +226,7 @@ enum RetroCoreOptions {
     static func prepare(_ core: RetroCore) {
         guard Thread.isMainThread, cached(core) == nil, OSLibretroEngine.coreAvailable(core.framework) else { return }
         let language: String = L10n.resolve(UserDefaults.standard.string(forKey: "appLanguage") ?? "system")
-        guard let list = OSLibretroEngine.shared.optionsForCore(core.framework, language: language) else { return }
+        guard let list = OSLibretroEngine.shared.options(forCore: core.framework, language: language) else { return }
         let clean: [[String: Any]] = list
         memory[core.framework] = clean
         if let data = try? JSONSerialization.data(withJSONObject: clean) {
