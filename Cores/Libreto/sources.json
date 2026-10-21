@@ -1,0 +1,9 @@
+{
+  "dolphin": {
+    "repository": "https://github.com/libretro/dolphin.git",
+    "revision": "5466da350f2fd143ee3e7b921e8c33aee64f7065",
+    "framework": "dolphin_omni",
+    "bundleID": "com.omnistation.core.dolphin",
+    "notes": "Dolphin de libretro (GPL-2.0-or-later). En iOS pide su memoria de JIT al frontend con RETRO_ENVIRONMENT_EXEC_MEM_ALLOC: con OmniStation usa el JIT permanente."
+  }
+}
