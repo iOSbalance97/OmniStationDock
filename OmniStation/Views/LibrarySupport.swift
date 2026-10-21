@@ -375,6 +375,8 @@ enum LibraryScanner {
         var visited: Int = 0
         // Switch: las actualizaciones y DLC no son juegos; van dentro de su juego.
         var switchFiles: SwitchScanCollector? = emulator == .melonx ? SwitchScanCollector(source: source) : nil
+        // MeloNX: el archivo de cada juego, para saber cómo lo llama la app MeloNX.
+        var meloNXFiles: [String: URL] = [:]
         for case let url as URL in enumerator {
             visited += 1
             if visited > limit { break }
@@ -387,9 +389,13 @@ enum LibraryScanner {
             if found[id] == nil {
                 found[id] = LibraryGame(id: id, name: name, platform: emulator.platform, launchURL: nil,
                                         source: source, fileName: url.lastPathComponent)
+                if emulator == .melonx { meloNXFiles[id] = url }
             }
         }
         switchFiles?.save()
+        if emulator == .melonx {
+            MeloNXIdentity.identify(meloNXFiles, keyFolders: [folder, folder.deletingLastPathComponent()])
+        }
         return found.values.sorted { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
     }
 

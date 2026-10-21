@@ -2,25 +2,32 @@ import Foundation
 
 // MARK: - Núcleos libretro integrados (sacados de ManicEMU)
 //
-// Cada sistema (NES, SNES, Game Boy, GBA, NDS) tiene su carpeta en Archivos → OmniStation Dock:
+// Cada sistema tiene su carpeta en Archivos → OmniStation Dock:
 //   <Sistema>/Juegos    los juegos (también en subcarpetas)
-//   <Sistema>/BIOS      la BIOS si el núcleo la usa (la de GBA o NDS es opcional)
+//   <Sistema>/BIOS      la BIOS si el núcleo la usa
 //   <Sistema>/Partidas  partidas (.srm) y estados guardados (.state)
 // y uno o varios núcleos para elegir (Ajustes → el sistema → Núcleo, o por juego).
 // Los núcleos van en Frameworks/<nombre>.libretro.framework; si una compilación no los trae,
 // el sistema no sale.
+//
+// Fase 1: NES, SNES, Game Boy, GBA y NDS (imagen por CPU).
+// Fase 2: PS1, N64, PSP y Dreamcast (imagen por GPU con OpenGL ES y JIT si OmniStation lo tiene).
 
 struct RetroCore: Hashable {
     let id: String
     let name: String
     /// Carpeta del núcleo en Frameworks («snes9x.libretro.framework»).
     let framework: String
-    /// Usa JIT (fase 2: de momento todos van sin él).
+    /// Puede usar JIT (si OmniStation lo tiene; si no, va en modo intérprete).
     let jit: Bool
+    /// Solo funciona con JIT (Flycast): sin él se usa otro núcleo del sistema.
+    var requiresJIT: Bool = false
+    /// Pinta con la GPU (OpenGL ES).
+    var gpu: Bool = false
 }
 
 enum RetroSystem: String, CaseIterable, Identifiable {
-    case nes, snes, gb, gba, nds
+    case nes, snes, gb, gba, nds, ps1, n64, psp, dc
 
     var id: String { rawValue }
 
@@ -32,6 +39,10 @@ enum RetroSystem: String, CaseIterable, Identifiable {
         case .gb: return "Game Boy / Color"
         case .gba: return "Game Boy Advance"
         case .nds: return "Nintendo DS"
+        case .ps1: return "PlayStation"
+        case .n64: return "Nintendo 64"
+        case .psp: return "PSP"
+        case .dc: return "Dreamcast"
         }
     }
 
@@ -43,6 +54,10 @@ enum RetroSystem: String, CaseIterable, Identifiable {
         case .gb: return "Game Boy"
         case .gba: return "GBA"
         case .nds: return "NDS"
+        case .ps1: return "PS1"
+        case .n64: return "N64"
+        case .psp: return "PSP"
+        case .dc: return "Dreamcast"
         }
     }
 
@@ -53,6 +68,18 @@ enum RetroSystem: String, CaseIterable, Identifiable {
         case .gb: return ["gb", "gbc", "dmg", "sgb", "cgb"]
         case .gba: return ["gba", "agb"]
         case .nds: return ["nds", "dsi", "ids"]
+        case .ps1: return ["cue", "chd", "pbp", "m3u", "ccd", "iso", "img", "bin"]
+        case .n64: return ["z64", "n64", "v64"]
+        case .psp: return ["iso", "cso", "pbp", "chd"]
+        case .dc: return ["gdi", "cdi", "chd", "cue", "m3u"]
+        }
+    }
+
+    /// Pistas de un disco (.bin, .img…): no son juegos si en su carpeta hay un .cue, .gdi o .ccd.
+    var trackExtensions: Set<String> {
+        switch self {
+        case .ps1, .dc: return ["bin", "img", "raw"]
+        default: return []
         }
     }
 
@@ -64,6 +91,10 @@ enum RetroSystem: String, CaseIterable, Identifiable {
         case .gb: return ext.lowercased() == "gbc" || ext.lowercased() == "cgb" ? "Game Boy Color" : "Game Boy"
         case .gba: return "GBA"
         case .nds: return "NDS"
+        case .ps1: return "PS1"
+        case .n64: return "N64"
+        case .psp: return "PSP"
+        case .dc: return "Dreamcast"
         }
     }
 
@@ -82,8 +113,18 @@ enum RetroSystem: String, CaseIterable, Identifiable {
                     RetroCore(id: "gpsp", name: "gpSP", framework: "gpsp.libretro.framework", jit: false),
                     RetroCore(id: "vbam", name: "VBA-M", framework: "vbam.libretro.framework", jit: false)]
         case .nds:
-            return [RetroCore(id: "melondsds", name: "melonDS DS", framework: "melondsds.libretro.framework", jit: false),
+            return [RetroCore(id: "melondsds", name: "melonDS DS", framework: "melondsds.libretro.framework", jit: true),
                     RetroCore(id: "desmume", name: "DeSmuME", framework: "desmume.libretro.framework", jit: false)]
+        case .ps1:
+            return [RetroCore(id: "pcsx_rearmed", name: "PCSX ReARMed", framework: "pcsx.rearmed.libretro.framework", jit: false),
+                    RetroCore(id: "beetle_psx_hw", name: "Beetle PSX HW", framework: "mednafen.psx.hw.libretro.framework", jit: true, gpu: true)]
+        case .n64:
+            return [RetroCore(id: "mupen64plus_next", name: "Mupen64Plus-Next", framework: "mupen64plus.next.libretro.framework", jit: true, gpu: true)]
+        case .psp:
+            return [RetroCore(id: "ppsspp", name: "PPSSPP", framework: "ppsspp.libretro.framework", jit: true, gpu: true)]
+        case .dc:
+            return [RetroCore(id: "flycast", name: "Flycast (JIT)", framework: "flycast.libretro.framework", jit: true, requiresJIT: true, gpu: true),
+                    RetroCore(id: "flycast_jitless", name: "Flycast (sin JIT)", framework: "flycast-jitless.libretro.framework", jit: false, gpu: true)]
         }
     }
 
@@ -93,6 +134,9 @@ enum RetroSystem: String, CaseIterable, Identifiable {
     }
 
     var isAvailable: Bool { !availableCores.isEmpty }
+
+    /// ¿Alguno de sus núcleos puede usar JIT?
+    var usesJIT: Bool { cores.contains { $0.jit } }
 
     /// Botones del mando táctil (lo entiende OSLibretroEngine).
     var touchLayout: String { rawValue }
@@ -110,6 +154,8 @@ enum RetroSystem: String, CaseIterable, Identifiable {
         switch self {
         case .gba: return "Opcional: gba_bios.bin (mGBA y VBA-M van sin ella; gpSP la recomienda)."
         case .nds: return "Opcional: bios7.bin, bios9.bin y firmware.bin (melonDS DS va sin ellas)."
+        case .ps1: return "PCSX ReARMed va sin BIOS. Beetle PSX HW la necesita: scph5501.bin (o scph5500.bin / scph5502.bin)."
+        case .dc: return "Opcional: dc_boot.bin y dc_flash.bin dentro de BIOS → dc (sin ellas, Flycast usa su BIOS interna)."
         default: return ""
         }
     }
@@ -129,7 +175,9 @@ enum RetroFolders {
     static func saves(_ system: RetroSystem) -> URL { root(system).appendingPathComponent("Partidas", isDirectory: true) }
 
     static func ensure(_ system: RetroSystem) {
-        for folder in [games(system), bios(system), saves(system)] {
+        var folders: [URL] = [games(system), bios(system), saves(system)]
+        if system == .dc { folders.append(bios(system).appendingPathComponent("dc", isDirectory: true)) }
+        for folder in folders {
             try? FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
         }
     }
@@ -143,13 +191,36 @@ enum RetroFolders {
             options: [.skipsHiddenFiles, .skipsPackageDescendants]
         ) else { return [] }
         let baseCount: Int = base.pathComponents.count
-        var found: [String: LibraryGame] = [:]
+        // Primero todos los archivos, por carpeta: las pistas y los discos de una lista .m3u no
+        // son juegos sueltos.
+        var files: [URL] = []
         var visited: Int = 0
         for case let url as URL in enumerator {
             visited += 1
             if visited > limit { break }
+            if system.extensions.contains(url.pathExtension.lowercased()) { files.append(url) }
+        }
+        var sheetFolders: Set<String> = []
+        var listed: Set<String> = []
+        for url in files {
             let ext: String = url.pathExtension.lowercased()
-            guard system.extensions.contains(ext) else { continue }
+            let folder: String = url.deletingLastPathComponent().standardizedFileURL.path
+            if ext == "cue" || ext == "gdi" || ext == "ccd" { sheetFolders.insert(folder) }
+            if ext == "m3u", let text = try? String(contentsOf: url, encoding: .utf8) {
+                for line in text.components(separatedBy: .newlines) {
+                    let entry: String = line.trimmingCharacters(in: .whitespaces)
+                    if entry.isEmpty || entry.hasPrefix("#") { continue }
+                    let name: String = (entry.replacingOccurrences(of: "\\", with: "/") as NSString).lastPathComponent
+                    listed.insert(folder + "/" + name.lowercased())
+                }
+            }
+        }
+        var found: [String: LibraryGame] = [:]
+        for url in files {
+            let ext: String = url.pathExtension.lowercased()
+            let folder: String = url.deletingLastPathComponent().standardizedFileURL.path
+            if system.trackExtensions.contains(ext) && sheetFolders.contains(folder) { continue }
+            if ext != "m3u" && listed.contains(folder + "/" + url.lastPathComponent.lowercased()) { continue }
             let parts: [String] = Array(url.standardizedFileURL.pathComponents.dropFirst(baseCount))
             guard !parts.isEmpty else { continue }
             let relative: String = parts.joined(separator: "/")
@@ -167,6 +238,36 @@ enum RetroFolders {
 
     static func filesAppURL(_ system: RetroSystem) -> URL? {
         URL(string: "shareddocuments://" + root(system).path)
+    }
+
+    /// Lo que necesita el núcleo en su carpeta de sistema y va dentro de la app
+    /// (PSP: los archivos de PPSSPP, en BIOS/PPSSPP). Se copia la primera vez y al actualizar.
+    static func prepareSystemFiles(_ system: RetroSystem) {
+        guard system == .psp else { return }
+        let source: URL = Bundle.main.bundleURL.appendingPathComponent("RetroSystem/PPSSPP", isDirectory: true)
+        let manager = FileManager.default
+        guard manager.fileExists(atPath: source.path) else { return }
+        let target: URL = bios(system).appendingPathComponent("PPSSPP", isDirectory: true)
+        let marker: URL = target.appendingPathComponent(".omnistation")
+        let version: String = (Bundle.main.infoDictionary?["CFBundleVersion"] as? String) ?? "0"
+        if let current = try? String(contentsOf: marker, encoding: .utf8), current == version { return }
+        try? manager.createDirectory(at: target, withIntermediateDirectories: true)
+        let items: [String] = (try? manager.contentsOfDirectory(atPath: source.path)) ?? []
+        for item in items {
+            let from: URL = source.appendingPathComponent(item)
+            let to: URL = target.appendingPathComponent(item)
+            try? manager.removeItem(at: to)
+            try? manager.copyItem(at: from, to: to)
+        }
+        try? version.write(to: marker, atomically: true, encoding: .utf8)
+    }
+
+    /// ¿Está la BIOS de Dreamcast? (Si no, Flycast usa la suya.)
+    static func hasDreamcastBIOS() -> Bool {
+        let folder: URL = bios(.dc)
+        let manager = FileManager.default
+        return manager.fileExists(atPath: folder.appendingPathComponent("dc/dc_boot.bin").path)
+            || manager.fileExists(atPath: folder.appendingPathComponent("dc_boot.bin").path)
     }
 }
 
@@ -190,8 +291,12 @@ enum RetroConfig {
             list.append(pick("core", .system, "Núcleo", "Cuál emula este sistema. Si un juego va mal, prueba otro.",
                              cores.map { ($0.id, $0.name) }, cores[0].id).grouped("Núcleo"))
         }
+        if system.usesJIT {
+            list.append(pick("jit", .system, "Usar JIT", "Si OmniStation tiene JIT, el núcleo va mucho más rápido. Sin JIT va en modo intérprete.",
+                             yesNo, "true").grouped("Núcleo"))
+        }
         list.append(pick("filter", .graphics, "Imagen", "Nítida mantiene los píxeles; suave los difumina.",
-                         [("nearest", "Nítida (píxeles)"), ("linear", "Suave")], "nearest").grouped("Pantalla"))
+                         [("nearest", "Nítida (píxeles)"), ("linear", "Suave")], system.cores.contains(where: { $0.gpu }) ? "linear" : "nearest").grouped("Pantalla"))
         list.append(pick("aspect", .graphics, "Proporción", "",
                          [("core", "La del juego"), ("stretch", "Estirar a la pantalla")], "core").grouped("Pantalla"))
         switch system {
@@ -202,6 +307,18 @@ enum RetroConfig {
         case .nds:
             list.append(pick("touchPointer", .system, "Pantalla táctil", "Tocar la pantalla de abajo del juego hace de lápiz.",
                              yesNo, "true").grouped("Controles"))
+        case .ps1:
+            list.append(pick("opt.beetle_psx_hw_internal_resolution", .graphics, "Resolución (Beetle PSX HW)", "Más resolución se ve mejor y gasta más.",
+                             [("1x(native)", "Original"), ("2x", "×2"), ("4x", "×4"), ("8x", "×8")], "2x").grouped("Resolución"))
+        case .n64:
+            list.append(pick("opt.mupen64plus-EnableNativeResFactor", .graphics, "Resolución", "Veces la resolución original de la N64.",
+                             [("0", "Original"), ("2", "×2"), ("3", "×3"), ("4", "×4")], "2").grouped("Resolución"))
+        case .psp:
+            list.append(pick("opt.ppsspp_internal_resolution", .graphics, "Resolución", "Más resolución se ve mejor y gasta más.",
+                             [("480x272", "Original (480×272)"), ("960x544", "×2"), ("1440x816", "×3"), ("1920x1088", "×4")], "960x544").grouped("Resolución"))
+        case .dc:
+            list.append(pick("opt.reicast_internal_resolution", .graphics, "Resolución", "Más resolución se ve mejor y gasta más.",
+                             [("640x480", "Original (640×480)"), ("1280x960", "×2"), ("1920x1440", "×3")], "1280x960").grouped("Resolución"))
         default:
             break
         }
@@ -220,18 +337,81 @@ enum RetroConfig {
         return available.first { $0.id == chosen } ?? available[0]
     }
 
+    /// Núcleo para jugar ahora: si el elegido solo va con JIT y no lo hay, otro del sistema.
+    static func playableCore(for system: RetroSystem, gameID: String?, jit: Bool) -> RetroCore? {
+        guard let chosen = core(for: system, gameID: gameID) else { return nil }
+        if !chosen.requiresJIT || jit { return chosen }
+        return system.availableCores.first { !$0.requiresJIT }
+    }
+
+    /// ¿Quiere este juego usar el JIT? (Ajuste «Usar JIT»; por defecto sí.)
+    static func wantsJIT(_ system: RetroSystem, gameID: String?) -> Bool {
+        guard system.usesJIT else { return false }
+        return EmulatorConfig.effective(.retro(system), gameID: gameID)["jit"] != "false"
+    }
+
     /// Opciones del núcleo («opt.<clave>» → clave) y de OmniStation para la partida.
-    static func launchOptions(_ system: RetroSystem, gameID: String?) -> (core: [String: String], host: [String: String]) {
+    /// `jit`: si la partida va a tener JIT de verdad.
+    static func launchOptions(_ system: RetroSystem, core: RetroCore, gameID: String?, jit: Bool) -> (core: [String: String], host: [String: String]) {
         let values: [String: String] = EmulatorConfig.effective(.retro(system), gameID: gameID)
-        var core: [String: String] = [:]
+        var coreOptions: [String: String] = [:]
         var host: [String: String] = [:]
         for (key, value) in values {
             if key.hasPrefix("opt.") {
-                core[String(key.dropFirst(4))] = value
+                coreOptions[String(key.dropFirst(4))] = value
             } else {
                 host[key] = value
             }
         }
-        return (core, host)
+        let useJIT: Bool = jit && core.jit
+        host["jit"] = useJIT ? "true" : "false"
+        host["gpu"] = core.gpu ? "true" : "false"
+        // Lo que cada núcleo necesita para ir bien aquí (como lo deja ManicEMU), con o sin JIT.
+        switch core.id {
+        case "melondsds":
+            coreOptions["melonds_jit_enable"] = useJIT ? "enabled" : "disabled"
+            coreOptions["melonds_number_of_screen_layouts"] = "1"
+            coreOptions["melonds_show_cursor"] = "disabled"
+            coreOptions["melonds_mic_input_active"] = "always"
+            host["orient.key"] = "melonds_screen_layout1"
+            host["orient.portrait"] = "top-bottom"
+            host["orient.landscape"] = "left-right"
+        case "desmume":
+            coreOptions["desmume_pointer_type"] = "touch"
+            coreOptions["desmume_pointer_device_l"] = "emulated"
+            coreOptions["desmume_pointer_device_r"] = "emulated"
+            host["orient.key"] = "desmume_screens_layout"
+            host["orient.portrait"] = "top/bottom"
+            host["orient.landscape"] = "left/right"
+        case "pcsx_rearmed":
+            coreOptions["pcsx_rearmed_drc"] = "disabled"
+        case "beetle_psx_hw":
+            coreOptions["beetle_psx_hw_cpu_dynarec"] = useJIT ? "execute" : "disabled"
+            coreOptions["beetle_psx_hw_renderer"] = "hardware_gl"
+        case "mupen64plus_next":
+            coreOptions["mupen64plus-cpucore"] = useJIT ? "dynamic_recompiler" : "cached_interpreter"
+            coreOptions["mupen64plus-rdp-plugin"] = "gliden64"
+        case "ppsspp":
+            coreOptions["ppsspp_backend"] = "opengl"
+            coreOptions["ppsspp_cpu_core"] = useJIT ? "JIT" : "IR JIT"
+            coreOptions["ppsspp_software_rendering_jit"] = useJIT ? "enabled" : "disabled"
+        case "flycast", "flycast_jitless":
+            let jitless: Bool = core.id == "flycast_jitless"
+            coreOptions["reicast_threaded_rendering"] = jitless ? "disabled" : "enabled"
+            coreOptions["reicast_dynamic_cpu_ratio"] = "disabled"
+            coreOptions["reicast_sh4clock"] = jitless ? "300" : "200"
+            if !RetroFolders.hasDreamcastBIOS() { coreOptions["reicast_hle_bios"] = "enabled" }
+        default:
+            break
+        }
+        // NDS: la proporción sale del fotograma (cambia al poner las pantallas al lado).
+        if system == .nds { host["frameAspect"] = "true" }
+        return (coreOptions, host)
     }
+}
+
+/// El depurador que OmniStation se pide a sí misma para el JIT de un núcleo libretro: se suelta
+/// al salir del juego.
+enum RetroJIT {
+    static var holding: Bool = false
 }

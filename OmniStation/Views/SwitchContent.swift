@@ -212,3 +212,123 @@ struct SwitchScanCollector {
         SwitchAddonStore.shared.replace(source: source, addons: addons, titles: titles)
     }
 }
+
+// MARK: - Cómo llama la app MeloNX a cada juego
+
+/// La app MeloNX abre un juego por su enlace solo si le llega su Title ID tal como lo calcula ella
+/// (a veces no es el del archivo, o lo guarda en decimal) o su título exacto. OmniStation lo lee
+/// del archivo con el núcleo de MeloNX que lleva dentro, igual que la app MeloNX, y lo guarda
+/// para no volver a leerlo. Con eso no hace falta escribir el «Nombre en MeloNX».
+enum MeloNXIdentity {
+    private struct Entry: Codable {
+        let path: String
+        let size: Int64
+        let modified: Double
+        let titleID: String
+        let title: String
+    }
+
+    private static let lock = NSLock()
+    private static var cache: [String: Entry]? = nil
+    private static var file: URL { AppFolders.folder("Switch").appendingPathComponent("melonx-ids.json") }
+    /// Si la app se cierra mientras lee (núcleo que no carga aquí), no se vuelve a intentar.
+    private static let runningKey = "melonxIdentityRunning"
+    private static let disabledKey = "melonxIdentityDisabled"
+
+    private static func entries() -> [String: Entry] {
+        if let existing = cache { return existing }
+        var loaded: [String: Entry] = [:]
+        if let data = try? Data(contentsOf: file), let decoded = try? JSONDecoder().decode([String: Entry].self, from: data) {
+            loaded = decoded
+        }
+        cache = loaded
+        return loaded
+    }
+
+    private static func store(_ value: [String: Entry]) {
+        cache = value
+        if let data = try? JSONEncoder().encode(value) {
+            try? data.write(to: file, options: .atomic)
+        }
+    }
+
+    private static func encoded(_ text: String) -> String {
+        var allowed = CharacterSet.urlQueryAllowed
+        allowed.remove(charactersIn: "&=+")
+        return text.addingPercentEncoding(withAllowedCharacters: allowed) ?? text
+    }
+
+    /// Enlace de MeloNX para el juego (nil si aún no se sabe cómo lo llama MeloNX).
+    static func link(for gameID: String) -> String? {
+        lock.lock()
+        defer { lock.unlock() }
+        guard let entry = entries()[gameID] else { return nil }
+        if !entry.titleID.isEmpty { return "melonx://game?id=" + encoded(entry.titleID) }
+        if !entry.title.isEmpty { return "melonx://game?name=" + encoded(entry.title) }
+        return nil
+    }
+
+    /// Si OmniStation no tiene claves, las de la app MeloNX (su carpeta «system»), si se ven.
+    private static func importKeys(from folders: [URL]) {
+        guard !OSMeloNXEngine.keysInstalled else { return }
+        let manager = FileManager.default
+        let target = URL(fileURLWithPath: OSMeloNXEngine.keysDirectory, isDirectory: true)
+        for folder in folders {
+            let system: URL = folder.appendingPathComponent("system", isDirectory: true)
+            let prod: URL = system.appendingPathComponent("prod.keys")
+            guard manager.fileExists(atPath: prod.path) else { continue }
+            try? manager.createDirectory(at: target, withIntermediateDirectories: true)
+            for name in ["prod.keys", "title.keys"] {
+                let from: URL = system.appendingPathComponent(name)
+                let to: URL = target.appendingPathComponent(name)
+                guard manager.fileExists(atPath: from.path), !manager.fileExists(atPath: to.path) else { continue }
+                try? manager.copyItem(at: from, to: to)
+            }
+            return
+        }
+    }
+
+    /// Lee los juegos que aún no se conocen (fuera del hilo principal, con la carpeta accesible).
+    /// `files`: id del juego → su archivo. `keyFolders`: dónde buscar las claves de la app MeloNX.
+    static func identify(_ files: [String: URL], keyFolders: [URL]) {
+        guard !files.isEmpty, !Thread.isMainThread, OSMeloNXEngine.runtimeBundled,
+              ProcessInfo.processInfo.operatingSystemVersion.majorVersion >= 18 else { return }
+        let defaults = UserDefaults.standard
+        if defaults.bool(forKey: runningKey) {
+            defaults.set(false, forKey: runningKey)
+            defaults.set(true, forKey: disabledKey)
+        }
+        guard !defaults.bool(forKey: disabledKey) else { return }
+        lock.lock()
+        var current: [String: Entry] = entries()
+        lock.unlock()
+        var pending: [(id: String, url: URL, size: Int64, modified: Double)] = []
+        for (gameID, url) in files {
+            let values = try? url.resourceValues(forKeys: [.fileSizeKey, .contentModificationDateKey])
+            let size: Int64 = Int64(values?.fileSize ?? 0)
+            let modified: Double = values?.contentModificationDate?.timeIntervalSince1970 ?? 0
+            if let entry = current[gameID], entry.path == url.path, entry.size == size, entry.modified == modified { continue }
+            pending.append((id: gameID, url: url, size: size, modified: modified))
+        }
+        guard !pending.isEmpty else { return }
+        importKeys(from: keyFolders)
+        guard OSMeloNXEngine.keysInstalled else { return }
+        defaults.set(true, forKey: runningKey)
+        defaults.synchronize()
+        var changed: Bool = false
+        for item in pending {
+            guard let info = OSMeloNXEngine.shared.identifyGame(atPath: item.url.path) else { continue }
+            current[item.id] = Entry(path: item.url.path, size: item.size, modified: item.modified,
+                                     titleID: info["titleId"] ?? "", title: info["titleName"] ?? "")
+            changed = true
+        }
+        defaults.set(false, forKey: runningKey)
+        guard changed else { return }
+        lock.lock()
+        // Lo que se haya guardado mientras tanto se queda; lo nuevo encima.
+        var merged: [String: Entry] = entries()
+        for (key, value) in current { merged[key] = value }
+        store(merged)
+        lock.unlock()
+    }
+}

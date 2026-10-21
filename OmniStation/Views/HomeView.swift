@@ -2973,16 +2973,47 @@ struct HomeView: View {
 
     private func launchRetro(_ game: Game, item: LibraryGame, system: RetroSystem) {
         guard !OSLibretroEngine.shared.busy, !OSArmsx2Engine.shared.busy, !OSMeloNXEngine.shared.busy else { return }
-        guard let core = RetroConfig.core(for: system, gameID: game.id) else {
+        guard let chosen = RetroConfig.core(for: system, gameID: game.id) else {
             showToast(tr("Esta compilación no incluye un núcleo para %@.", system.title), seconds: 4)
             return
         }
-        guard let file = item.fileName else {
+        guard item.fileName != nil else {
             showToast(tr("Vuelve a escanear las carpetas de los núcleos."), seconds: 3)
             return
         }
+        // JIT: si el núcleo puede usarlo y OmniStation aún no lo tiene, se lo pide a su extensión
+        // (instalada con SideStore). En LiveContainer vale el JIT con el que se abrió OmniStation.
+        let wantsJIT: Bool = chosen.jit && RetroConfig.wantsJIT(system, gameID: game.id)
+        if wantsJIT && !OSLibretroEngine.jitActive && canAskSelfJIT, let pairing = PairingFile.data() {
+            showToast(tr("Activando el JIT…"), seconds: 60)
+            OSMeloNXEngine.shared.prepareSharedJIT(withPairing: pairing) { success, message in
+                if success {
+                    RetroJIT.holding = true
+                    showToast(tr("JIT activo"), seconds: 2)
+                } else {
+                    showToast(tr("Sin JIT (%@). El juego va en modo intérprete.", message), seconds: 5)
+                }
+                startRetro(game, item: item, system: system)
+            }
+            return
+        }
+        startRetro(game, item: item, system: system)
+    }
+
+    private func startRetro(_ game: Game, item: LibraryGame, system: RetroSystem) {
+        guard !OSLibretroEngine.shared.busy else { return }
+        let jit: Bool = OSLibretroEngine.jitActive
+        guard let file = item.fileName, let core = RetroConfig.playableCore(for: system, gameID: game.id, jit: jit) else {
+            showToast(tr("Este núcleo necesita JIT. Elige otro núcleo en los ajustes de %@.", system.title), seconds: 5)
+            releaseRetroJIT()
+            return
+        }
+        if let chosen = RetroConfig.core(for: system, gameID: game.id), chosen.id != core.id {
+            showToast(tr("Sin JIT: se usa %@.", core.name), seconds: 3)
+        }
         RetroFolders.ensure(system)
-        let options = RetroConfig.launchOptions(system, gameID: game.id)
+        RetroFolders.prepareSystemFiles(system)
+        let options = RetroConfig.launchOptions(system, core: core, gameID: game.id, jit: jit)
         var host: [String: String] = options.host
         host["touchHaptics"] = hapticsEnabled ? "true" : "false"
         host["touchAlways"] = retroTouchAlways ? "true" : "false"
@@ -3007,13 +3038,30 @@ struct HomeView: View {
             completion: { success, message in
                 if !success {
                     endIntegratedSession()
+                    releaseRetroJIT()
                     showToast(message.isEmpty ? tr("No se pudo arrancar el juego.") : message, seconds: 6)
                 }
             },
             ended: {
                 endIntegratedSession()
+                releaseRetroJIT()
             }
         )
+    }
+
+    /// ¿Se puede pedir el JIT para la propia OmniStation ahora? (SideStore con el JIT integrado,
+    /// emparejamiento importado y sin saber ya que el VPN no responde.)
+    private var canAskSelfJIT: Bool {
+        guard usesBuiltInJIT, OSArmsx2Engine.helperBundled, BuiltInJIT.preflightProblem(lang: appLanguage) == nil else { return false }
+        if case .unreachable = jitStatus.state { return false }
+        return true
+    }
+
+    /// Suelta el depurador que OmniStation se pidió para un núcleo libretro.
+    private func releaseRetroJIT() {
+        guard RetroJIT.holding else { return }
+        RetroJIT.holding = false
+        OSMeloNXEngine.shared.releaseSharedJIT()
     }
 
     /// Ajustes → Emuladores → Núcleos clásicos: un elemento por sistema.
@@ -3461,7 +3509,12 @@ struct HomeView: View {
         }
         // MeloNX abre los juegos por su Title ID: el guardado a mano o, si no, el leído del archivo.
         let detected: String? = emulator == .melonx ? SwitchAddonStore.shared.titleID(for: game.id) : nil
-        let link: String = emulator.gameLink(fileName: file, title: game.name, override: gameMeta[game.id]?.emulatorGameID ?? detected)
+        let manual: String? = gameMeta[game.id]?.emulatorGameID
+        var link: String = emulator.gameLink(fileName: file, title: game.name, override: manual ?? detected)
+        // Lo que se escribió a mano manda; si no, el Title ID tal como lo calcula la app MeloNX.
+        if emulator == .melonx, (manual ?? "").isEmpty, let exact = MeloNXIdentity.link(for: game.id) {
+            link = exact
+        }
         switch EmulatorStore.location(emulator, installMethod: installMethodRaw) {
         case .liveContainer:
             let folder: String = EmulatorStore.lcFolder(emulator)

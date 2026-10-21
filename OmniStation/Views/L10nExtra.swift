@@ -335,6 +335,20 @@ extension L10n {
         "Tocar la pantalla de abajo del juego hace de lápiz.": "Touching the game's bottom screen works as the stylus.",
         "Controles": "Controls",
         "Opcional: gba_bios.bin (mGBA y VBA-M van sin ella; gpSP la recomienda).": "Optional: gba_bios.bin (mGBA and VBA-M work without it; gpSP recommends it).",
-        "Opcional: bios7.bin, bios9.bin y firmware.bin (melonDS DS va sin ellas).": "Optional: bios7.bin, bios9.bin and firmware.bin (melonDS DS works without them)."
+        "Opcional: bios7.bin, bios9.bin y firmware.bin (melonDS DS va sin ellas).": "Optional: bios7.bin, bios9.bin and firmware.bin (melonDS DS works without them).",
+        "JIT activo": "JIT active",
+        "Sin JIT (%@). El juego va en modo intérprete.": "No JIT (%@). The game runs in interpreter mode.",
+        "Este núcleo necesita JIT. Elige otro núcleo en los ajustes de %@.": "This core needs JIT. Pick another core in the %@ settings.",
+        "Sin JIT: se usa %@.": "No JIT: using %@.",
+        "Usar JIT": "Use JIT",
+        "Si OmniStation tiene JIT, el núcleo va mucho más rápido. Sin JIT va en modo intérprete.": "If OmniStation has JIT, the core runs much faster. Without JIT it runs in interpreter mode.",
+        "Resolución (Beetle PSX HW)": "Resolution (Beetle PSX HW)",
+        "Más resolución se ve mejor y gasta más.": "Higher resolution looks better and uses more power.",
+        "Veces la resolución original de la N64.": "Times the original N64 resolution.",
+        "Original (480×272)": "Original (480×272)",
+        "Original (640×480)": "Original (640×480)",
+        "PCSX ReARMed va sin BIOS. Beetle PSX HW la necesita: scph5501.bin (o scph5500.bin / scph5502.bin).": "PCSX ReARMed works without a BIOS. Beetle PSX HW needs one: scph5501.bin (or scph5500.bin / scph5502.bin).",
+        "Opcional: dc_boot.bin y dc_flash.bin dentro de BIOS → dc (sin ellas, Flycast usa su BIOS interna).": "Optional: dc_boot.bin and dc_flash.bin inside BIOS → dc (without them, Flycast uses its built-in BIOS).",
+        "Flycast (sin JIT)": "Flycast (no JIT)"
     ]
 }
