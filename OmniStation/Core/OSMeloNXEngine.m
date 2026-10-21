@@ -490,7 +490,22 @@ typedef struct {
     void (*withdrawDonatedMemory)(void);
     uint8_t (*offerDonatedGpuMemory)(void *base, uint64_t size);
     uint8_t (*withdrawDonatedGpuMemory)(void);
+    // DLC (opcionales).
+    void *getDlcNcaList;
+    void *freeDlcNcaList;
 } OSNXCoreAPI;
+
+// DLC de un archivo (get_dlc_nca_list de MeloNX 2.7, misma forma que su DlcNcaListC).
+typedef struct {
+    char path[256];
+    unsigned long long titleId;
+} OSNXDlcItem;
+
+typedef struct {
+    bool success;
+    unsigned int size;
+    OSNXDlcItem *items;
+} OSNXDlcList;
 
 // Estadísticas que manda el núcleo («push_statistics»: FPS, ms por fotograma y FIFO).
 typedef struct {
@@ -1562,6 +1577,8 @@ static void OSNXTeardownDonor(const OSNXCoreAPI *api) {
     api.withdrawDonatedMemory = (void (*)(void))dlsym(core, "withdraw_donated_memory");
     api.offerDonatedGpuMemory = (uint8_t (*)(void *, uint64_t))dlsym(core, "offer_donated_gpu_memory");
     api.withdrawDonatedGpuMemory = (uint8_t (*)(void))dlsym(core, "withdraw_donated_gpu_memory");
+    api.getDlcNcaList = dlsym(core, "get_dlc_nca_list");
+    api.freeDlcNcaList = dlsym(core, "free_dlc_nca_list");
     void (*sdlSetMainReady)(void) = (void (*)(void))[self symbol:sdl name:"SDL_SetMainReady" missing:missing];
     void (*sdlSetEventPump)(bool) = (void (*)(bool))[self symbol:sdl name:"SDL_SetiOSEventPump" missing:missing];
     bool (*sdlInit)(uint32_t) = (bool (*)(uint32_t))[self symbol:sdl name:"SDL_Init" missing:missing];
@@ -1594,6 +1611,50 @@ static void OSNXTeardownDonor(const OSNXCoreAPI *api) {
     }
     if (!ok && error) *error = failure;
     return ok;
+}
+
+// MARK: DLC
+
+- (void)dlcContentsAtPath:(NSString *)path
+                  titleID:(NSString *)titleID
+               completion:(void (^)(NSArray<NSDictionary<NSString *, id> *> *_Nullable, NSString *_Nullable))completion {
+    void (^finish)(NSArray *, NSString *) = ^(NSArray *items, NSString *error) {
+        dispatch_async(dispatch_get_main_queue(), ^{ completion(items, error); });
+    };
+    if (self.busy) {
+        finish(nil, @"Hay una partida abierta.");
+        return;
+    }
+    if (![OSMeloNXEngine keysInstalled]) {
+        finish(nil, @"Primero importa tus claves (prod.keys).");
+        return;
+    }
+    NSString *loadError = nil;
+    if (![self loadRuntimeOnMain:&loadError]) {
+        finish(nil, loadError ?: @"No se pudo cargar MeloNX.");
+        return;
+    }
+    if (_api.getDlcNcaList == NULL || _api.freeDlcNcaList == NULL) {
+        finish(nil, @"Este runtime de MeloNX no sabe leer DLC.");
+        return;
+    }
+    dispatch_async(_queue, ^{
+        if (self->_api.loadKeyset) self->_api.loadKeyset();
+        OSNXDlcList (*getList)(const char *, const char *) = (OSNXDlcList (*)(const char *, const char *))self->_api.getDlcNcaList;
+        void (*freeList)(OSNXDlcList) = (void (*)(OSNXDlcList))self->_api.freeDlcNcaList;
+        OSNXDlcList list = getList(titleID.UTF8String, path.fileSystemRepresentation);
+        NSMutableArray *items = [NSMutableArray new];
+        if (list.success && list.items != NULL) {
+            for (unsigned int index = 0; index < list.size; index++) {
+                OSNXDlcItem item = list.items[index];
+                item.path[255] = 0;
+                NSString *inner = [NSString stringWithUTF8String:item.path] ?: @"";
+                [items addObject:@{@"path": inner, @"titleId": @(item.titleId)}];
+            }
+        }
+        freeList(list);
+        finish(items.count ? items : nil, items.count ? nil : @"Ese archivo no tiene DLC de este juego.");
+    });
 }
 
 // MARK: Firmware

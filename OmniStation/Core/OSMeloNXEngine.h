@@ -50,6 +50,13 @@ NS_ASSUME_NONNULL_BEGIN
 /// Versión de firmware instalada (vacía si no hay). `completion` en el hilo principal.
 - (void)readFirmwareVersion:(void (^)(NSString *version))completion;
 
+/// DLC que hay en un archivo (.nsp) para el juego `titleID`, como los lee MeloNX al añadirlo:
+/// cada elemento lleva «path» (dentro del archivo, «/….nca») y «titleId» (número). Necesita las claves.
+/// En el hilo principal: los elementos, o nil y el motivo.
+- (void)dlcContentsAtPath:(NSString *)path
+                  titleID:(NSString *)titleID
+               completion:(void (^)(NSArray<NSDictionary<NSString *, id> *> *_Nullable items, NSString *_Nullable error))completion;
+
 /// Arranca un juego a pantalla completa. `settings`: ajustes de emulación de la partida (texto,
 /// ver EmulatorConfig.swift). `progress` y `completion` llegan en el hilo principal; `ended`, al
 /// cerrar la partida.

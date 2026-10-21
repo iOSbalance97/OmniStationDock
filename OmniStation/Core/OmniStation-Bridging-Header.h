@@ -2,3 +2,4 @@
 #import "OSArmsx2Engine.h"
 #import "OSMeloNXEngine.h"
 #import "OSExternalDisplay.h"
+#import "OSLibretroEngine.h"

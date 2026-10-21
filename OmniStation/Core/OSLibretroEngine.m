@@ -1,0 +1,1732 @@
+// Motor libretro de OmniStation Dock (ver OSLibretroEngine.h).
+// SPDX-License-Identifier: GPL-3.0-or-later
+//
+// Cómo va:
+// • El núcleo se carga con dlopen (una vez; luego se reutiliza) y todas sus funciones se llaman
+//   desde un único hilo de emulación, como pide libretro.
+// • Imagen: el núcleo entrega cada fotograma (0RGB1555, RGB565 o XRGB8888); se pasa a BGRA y la
+//   pantalla lo pinta en su CALayer al ritmo de la pantalla (CADisplayLink).
+// • Sonido: anillo de muestras (un productor, un consumidor) que lee un AVAudioSourceNode.
+// • Mando: el físico se lee con su manejador de cambios (GameController) y el táctil con botones;
+//   el estado va en atómicos que el núcleo lee en input_state.
+// • Partidas (.srm) al salir y cada pocos segundos si cambian; estado rápido (.state) en el menú.
+#import "OSLibretroEngine.h"
+#import "OSExternalDisplay.h"
+#import "OSPerfHUD.h"
+#import "Libretro/libretro.h"
+
+#import <AVFoundation/AVFoundation.h>
+#import <GameController/GameController.h>
+#import <QuartzCore/QuartzCore.h>
+#import <dlfcn.h>
+#import <os/lock.h>
+#import <stdatomic.h>
+#import <mach/mach_time.h>
+#import <stdarg.h>
+
+static NSString *OSLRText(NSString *language, NSString *spanish, NSString *english) {
+    return [language isEqualToString:@"en"] ? english : spanish;
+}
+
+static double OSLRNow(void) {
+    static mach_timebase_info_data_t info;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{ mach_timebase_info(&info); });
+    return (double)mach_absolute_time() * (double)info.numer / (double)info.denom / 1e9;
+}
+
+// MARK: - Funciones del núcleo
+
+typedef struct {
+    void (*init)(void);
+    void (*deinit)(void);
+    unsigned (*apiVersion)(void);
+    void (*getSystemInfo)(struct retro_system_info *info);
+    void (*getSystemAVInfo)(struct retro_system_av_info *info);
+    void (*setEnvironment)(retro_environment_t callback);
+    void (*setVideoRefresh)(retro_video_refresh_t callback);
+    void (*setAudioSample)(retro_audio_sample_t callback);
+    void (*setAudioSampleBatch)(retro_audio_sample_batch_t callback);
+    void (*setInputPoll)(retro_input_poll_t callback);
+    void (*setInputState)(retro_input_state_t callback);
+    void (*setControllerPortDevice)(unsigned port, unsigned device);
+    void (*reset)(void);
+    void (*run)(void);
+    size_t (*serializeSize)(void);
+    bool (*serialize)(void *data, size_t size);
+    bool (*unserialize)(const void *data, size_t size);
+    bool (*loadGame)(const struct retro_game_info *game);
+    void (*unloadGame)(void);
+    void *(*getMemoryData)(unsigned id);
+    size_t (*getMemorySize)(unsigned id);
+} OSLRCore;
+
+// MARK: - Estado de la partida (lo usan las funciones que llama el núcleo)
+
+static OSLRCore gCore;
+static enum retro_pixel_format gPixelFormat = RETRO_PIXEL_FORMAT_0RGB1555;
+static char gSystemDir[1024];
+static char gSaveDir[1024];
+static char gCorePath[1024];
+static unsigned gLanguage = RETRO_LANGUAGE_SPANISH;
+/// Ruta del juego (algunos núcleos guardan el puntero mientras dura la partida).
+static char gGamePath[2048];
+
+// Opciones: las que pide OmniStation y las que declara el núcleo (con su valor por defecto).
+// Solo se tocan desde el hilo de emulación.
+static NSDictionary<NSString *, NSString *> *gUserOptions;
+static NSMutableDictionary<NSString *, NSString *> *gDefaultOptions;
+static NSMutableDictionary<NSString *, NSArray<NSString *> *> *gOptionValues;
+static NSMutableDictionary<NSString *, NSData *> *gOptionStrings;
+
+// Fotograma convertido a BGRA (lo pinta la pantalla).
+static os_unfair_lock gFrameLock = OS_UNFAIR_LOCK_INIT;
+static uint32_t *gFrame;
+static size_t gFrameCapacity;
+static unsigned gFrameWidth, gFrameHeight;
+static _Atomic uint64_t gFrameSerial;
+static _Atomic uint64_t gFrameCount;
+
+// Geometría (relación de aspecto) y ritmo.
+static _Atomic double gAspect = 4.0 / 3.0;
+static double gFPS = 60.0;
+static double gSampleRate = 44100.0;
+static _Atomic bool gGeometryChanged;
+
+// Sonido: anillo de muestras estéreo (16 bits). Un productor (núcleo) y un consumidor (audio).
+static int16_t *gAudioRing;
+static size_t gAudioCapacity; // en fotogramas de audio (pares L/R)
+static _Atomic size_t gAudioWrite;
+static _Atomic size_t gAudioRead;
+static _Atomic float gVolume = 1.0f;
+
+// Mando: bits RETRO_DEVICE_ID_JOYPAD_* del físico y del táctil; sticks; puntero (pantalla táctil).
+static _Atomic uint32_t gPadBits;
+static _Atomic uint32_t gTouchBits;
+static _Atomic int32_t gAxis[4];
+static _Atomic int32_t gPointerX, gPointerY;
+static _Atomic bool gPointerDown;
+static _Atomic bool gInputSuspended;
+
+// Fotogramas por tiempo y peticiones del menú.
+static struct retro_frame_time_callback gFrameTimeCallback;
+static bool gHasFrameTimeCallback;
+static _Atomic bool gShutdownRequested;
+
+typedef void (^OSLRMessageBlock)(NSString *message);
+static OSLRMessageBlock gMessageHandler;
+
+// MARK: Opciones
+
+static void OSLRRegisterOption(const char *key, const char *defaultValue, NSArray<NSString *> *values) {
+    if (key == NULL) return;
+    NSString *name = [NSString stringWithUTF8String:key];
+    if (name.length == 0) return;
+    NSString *value = defaultValue ? [NSString stringWithUTF8String:defaultValue] : values.firstObject;
+    if (value) gDefaultOptions[name] = value;
+    if (values.count) gOptionValues[name] = values;
+}
+
+static NSArray<NSString *> *OSLRValues(const struct retro_core_option_value *values) {
+    NSMutableArray<NSString *> *list = [NSMutableArray new];
+    for (int index = 0; index < RETRO_NUM_CORE_OPTION_VALUES_MAX && values[index].value != NULL; index++) {
+        NSString *value = [NSString stringWithUTF8String:values[index].value];
+        if (value) [list addObject:value];
+    }
+    return list;
+}
+
+static void OSLRRegisterV1(const struct retro_core_option_definition *definitions) {
+    if (definitions == NULL) return;
+    for (const struct retro_core_option_definition *item = definitions; item->key != NULL; item++) {
+        OSLRRegisterOption(item->key, item->default_value, OSLRValues(item->values));
+    }
+}
+
+static void OSLRRegisterV2(const struct retro_core_options_v2 *options) {
+    if (options == NULL || options->definitions == NULL) return;
+    for (const struct retro_core_option_v2_definition *item = options->definitions; item->key != NULL; item++) {
+        OSLRRegisterOption(item->key, item->default_value, OSLRValues(item->values));
+    }
+}
+
+/// «Descripción; a|b|c» (SET_VARIABLES): el primero es el de por defecto.
+static void OSLRRegisterVariables(const struct retro_variable *variables) {
+    if (variables == NULL) return;
+    for (const struct retro_variable *item = variables; item->key != NULL; item++) {
+        if (item->value == NULL) continue;
+        NSString *text = [NSString stringWithUTF8String:item->value] ?: @"";
+        NSRange separator = [text rangeOfString:@"; "];
+        NSString *list = separator.location == NSNotFound ? text : [text substringFromIndex:NSMaxRange(separator)];
+        NSArray<NSString *> *values = [list componentsSeparatedByString:@"|"];
+        OSLRRegisterOption(item->key, NULL, values);
+    }
+}
+
+/// Valor de una opción: el pedido por OmniStation si es válido; si no, el del núcleo.
+static const char *OSLROptionValue(const char *key) {
+    if (key == NULL) return NULL;
+    NSString *name = [NSString stringWithUTF8String:key];
+    if (name == nil) return NULL;
+    NSString *value = gUserOptions[name];
+    NSArray<NSString *> *allowed = gOptionValues[name];
+    if (value != nil && allowed.count > 0 && ![allowed containsObject:value]) value = nil;
+    if (value == nil) value = gDefaultOptions[name];
+    if (value == nil) return NULL;
+    NSData *stored = gOptionStrings[name];
+    NSString *current = stored ? [NSString stringWithUTF8String:stored.bytes] : nil;
+    if (![current isEqualToString:value]) {
+        const char *utf8 = value.UTF8String;
+        stored = [NSData dataWithBytes:utf8 length:strlen(utf8) + 1];
+        gOptionStrings[name] = stored;
+    }
+    return stored.bytes;
+}
+
+// MARK: Llamadas del núcleo
+
+static void OSLRLog(enum retro_log_level level, const char *format, ...) {
+    if (level < RETRO_LOG_WARN || format == NULL) return;
+    va_list args;
+    va_start(args, format);
+    fprintf(stdout, "[libretro] ");
+    vfprintf(stdout, format, args);
+    va_end(args);
+    fflush(stdout);
+}
+
+static void OSLRShowMessage(const char *text) {
+    if (text == NULL || text[0] == 0) return;
+    NSString *message = [NSString stringWithUTF8String:text];
+    OSLRMessageBlock handler = gMessageHandler;
+    if (message.length == 0 || handler == nil) return;
+    dispatch_async(dispatch_get_main_queue(), ^{ handler(message); });
+}
+
+static void OSLRUpdateGeometry(const struct retro_game_geometry *geometry) {
+    if (geometry == NULL) return;
+    double aspect = geometry->aspect_ratio;
+    if (aspect <= 0 && geometry->base_height > 0) aspect = (double)geometry->base_width / (double)geometry->base_height;
+    if (aspect > 0.1 && aspect < 10) {
+        atomic_store(&gAspect, aspect);
+        atomic_store(&gGeometryChanged, true);
+    }
+}
+
+static bool OSLREnvironment(unsigned command, void *data) {
+    switch (command) {
+        case RETRO_ENVIRONMENT_SET_ROTATION:
+            return false;
+        case RETRO_ENVIRONMENT_GET_OVERSCAN:
+            if (data) *(bool *)data = false;
+            return true;
+        case RETRO_ENVIRONMENT_GET_CAN_DUPE:
+            if (data) *(bool *)data = true;
+            return true;
+        case RETRO_ENVIRONMENT_SET_MESSAGE: {
+            const struct retro_message *message = data;
+            if (message) OSLRShowMessage(message->msg);
+            return true;
+        }
+        case RETRO_ENVIRONMENT_SET_MESSAGE_EXT: {
+            const struct retro_message_ext *message = data;
+            if (message && message->target != RETRO_MESSAGE_TARGET_LOG) OSLRShowMessage(message->msg);
+            return true;
+        }
+        case RETRO_ENVIRONMENT_GET_MESSAGE_INTERFACE_VERSION:
+            if (data) *(unsigned *)data = 1;
+            return true;
+        case RETRO_ENVIRONMENT_SHUTDOWN:
+            atomic_store(&gShutdownRequested, true);
+            return true;
+        case RETRO_ENVIRONMENT_SET_PERFORMANCE_LEVEL:
+            return true;
+        case RETRO_ENVIRONMENT_GET_SYSTEM_DIRECTORY:
+            if (data) *(const char **)data = gSystemDir;
+            return true;
+        case RETRO_ENVIRONMENT_GET_CORE_ASSETS_DIRECTORY:
+            if (data) *(const char **)data = gSystemDir;
+            return true;
+        case RETRO_ENVIRONMENT_GET_SAVE_DIRECTORY:
+            if (data) *(const char **)data = gSaveDir;
+            return true;
+        case RETRO_ENVIRONMENT_GET_LIBRETRO_PATH:
+            if (data) *(const char **)data = gCorePath;
+            return true;
+        case RETRO_ENVIRONMENT_SET_PIXEL_FORMAT: {
+            if (data == NULL) return false;
+            enum retro_pixel_format format = *(const enum retro_pixel_format *)data;
+            if (format != RETRO_PIXEL_FORMAT_0RGB1555 && format != RETRO_PIXEL_FORMAT_XRGB8888 && format != RETRO_PIXEL_FORMAT_RGB565) return false;
+            gPixelFormat = format;
+            return true;
+        }
+        case RETRO_ENVIRONMENT_SET_INPUT_DESCRIPTORS:
+        case RETRO_ENVIRONMENT_SET_CONTROLLER_INFO:
+        case RETRO_ENVIRONMENT_SET_MEMORY_MAPS:
+        case RETRO_ENVIRONMENT_SET_SUPPORT_ACHIEVEMENTS:
+        case RETRO_ENVIRONMENT_SET_SERIALIZATION_QUIRKS:
+        case RETRO_ENVIRONMENT_SET_CORE_OPTIONS_DISPLAY:
+        case RETRO_ENVIRONMENT_SET_CORE_OPTIONS_UPDATE_DISPLAY_CALLBACK:
+        case RETRO_ENVIRONMENT_SET_CONTENT_INFO_OVERRIDE:
+        case RETRO_ENVIRONMENT_SET_MINIMUM_AUDIO_LATENCY:
+        case RETRO_ENVIRONMENT_SET_SUBSYSTEM_INFO:
+            return true;
+        case RETRO_ENVIRONMENT_SET_SUPPORT_NO_GAME:
+            return true;
+        case RETRO_ENVIRONMENT_GET_VARIABLE: {
+            struct retro_variable *variable = data;
+            if (variable == NULL || variable->key == NULL) return false;
+            variable->value = OSLROptionValue(variable->key);
+            return variable->value != NULL;
+        }
+        case RETRO_ENVIRONMENT_SET_VARIABLES:
+            OSLRRegisterVariables(data);
+            return true;
+        case RETRO_ENVIRONMENT_SET_VARIABLE: {
+            const struct retro_variable *variable = data;
+            if (variable == NULL) return true;
+            if (variable->key && variable->value) {
+                NSString *key = [NSString stringWithUTF8String:variable->key];
+                NSString *value = [NSString stringWithUTF8String:variable->value];
+                if (key && value) gDefaultOptions[key] = value;
+            }
+            return true;
+        }
+        case RETRO_ENVIRONMENT_GET_VARIABLE_UPDATE:
+            if (data) *(bool *)data = false;
+            return true;
+        case RETRO_ENVIRONMENT_GET_CORE_OPTIONS_VERSION:
+            if (data) *(unsigned *)data = 2;
+            return true;
+        case RETRO_ENVIRONMENT_SET_CORE_OPTIONS:
+            OSLRRegisterV1(data);
+            return true;
+        case RETRO_ENVIRONMENT_SET_CORE_OPTIONS_INTL: {
+            const struct retro_core_options_intl *options = data;
+            if (options) OSLRRegisterV1(options->us);
+            return true;
+        }
+        case RETRO_ENVIRONMENT_SET_CORE_OPTIONS_V2:
+            OSLRRegisterV2(data);
+            return true;
+        case RETRO_ENVIRONMENT_SET_CORE_OPTIONS_V2_INTL: {
+            const struct retro_core_options_v2_intl *options = data;
+            if (options) OSLRRegisterV2(options->us);
+            return true;
+        }
+        case RETRO_ENVIRONMENT_SET_FRAME_TIME_CALLBACK: {
+            const struct retro_frame_time_callback *callback = data;
+            if (callback == NULL) return false;
+            gFrameTimeCallback = *callback;
+            gHasFrameTimeCallback = callback->callback != NULL;
+            return true;
+        }
+        case RETRO_ENVIRONMENT_GET_LOG_INTERFACE: {
+            struct retro_log_callback *log = data;
+            if (log == NULL) return false;
+            log->log = OSLRLog;
+            return true;
+        }
+        case RETRO_ENVIRONMENT_GET_INPUT_DEVICE_CAPABILITIES:
+            if (data) *(uint64_t *)data = (1 << RETRO_DEVICE_JOYPAD) | (1 << RETRO_DEVICE_ANALOG) | (1 << RETRO_DEVICE_POINTER);
+            return true;
+        case RETRO_ENVIRONMENT_GET_INPUT_BITMASKS:
+            return true;
+        case RETRO_ENVIRONMENT_GET_INPUT_MAX_USERS:
+            if (data) *(unsigned *)data = 1;
+            return true;
+        case RETRO_ENVIRONMENT_SET_SYSTEM_AV_INFO: {
+            const struct retro_system_av_info *info = data;
+            if (info == NULL) return false;
+            OSLRUpdateGeometry(&info->geometry);
+            return true;
+        }
+        case RETRO_ENVIRONMENT_SET_GEOMETRY:
+            OSLRUpdateGeometry(data);
+            return true;
+        case RETRO_ENVIRONMENT_GET_USERNAME:
+            if (data) *(const char **)data = "OmniStation";
+            return true;
+        case RETRO_ENVIRONMENT_GET_LANGUAGE:
+            if (data) *(unsigned *)data = gLanguage;
+            return true;
+        case RETRO_ENVIRONMENT_GET_AUDIO_VIDEO_ENABLE:
+            if (data) *(int *)data = 3;
+            return true;
+        case RETRO_ENVIRONMENT_GET_FASTFORWARDING:
+            if (data) *(bool *)data = false;
+            return true;
+        case RETRO_ENVIRONMENT_GET_TARGET_REFRESH_RATE:
+            if (data) *(float *)data = 60.0f;
+            return true;
+        case RETRO_ENVIRONMENT_GET_SAVESTATE_CONTEXT:
+            if (data) *(int *)data = 0; // RETRO_SAVESTATE_CONTEXT_NORMAL
+            return true;
+        case RETRO_ENVIRONMENT_GET_JIT_CAPABLE:
+            // Fase 1: los núcleos van sin JIT.
+            if (data) *(bool *)data = false;
+            return true;
+        default:
+            // Lo demás (imagen por GPU, VFS, discos, rumble…) aún no: el núcleo sigue sin ello.
+            return false;
+    }
+}
+
+// MARK: Imagen
+
+static inline uint32_t OSLRFrom565(uint16_t pixel) {
+    uint32_t r = (pixel >> 11) & 0x1F, g = (pixel >> 5) & 0x3F, b = pixel & 0x1F;
+    r = (r << 3) | (r >> 2);
+    g = (g << 2) | (g >> 4);
+    b = (b << 3) | (b >> 2);
+    return 0xFF000000u | (r << 16) | (g << 8) | b;
+}
+
+static inline uint32_t OSLRFrom1555(uint16_t pixel) {
+    uint32_t r = (pixel >> 10) & 0x1F, g = (pixel >> 5) & 0x1F, b = pixel & 0x1F;
+    r = (r << 3) | (r >> 2);
+    g = (g << 3) | (g >> 2);
+    b = (b << 3) | (b >> 2);
+    return 0xFF000000u | (r << 16) | (g << 8) | b;
+}
+
+static void OSLRVideoRefresh(const void *data, unsigned width, unsigned height, size_t pitch) {
+    atomic_fetch_add(&gFrameCount, 1);
+    // NULL: el mismo fotograma de antes. Imagen por GPU: aún no.
+    if (data == NULL || data == RETRO_HW_FRAME_BUFFER_VALID || width == 0 || height == 0) return;
+    size_t needed = (size_t)width * height;
+    os_unfair_lock_lock(&gFrameLock);
+    if (needed > gFrameCapacity) {
+        uint32_t *grown = realloc(gFrame, needed * sizeof(uint32_t));
+        if (grown == NULL) {
+            os_unfair_lock_unlock(&gFrameLock);
+            return;
+        }
+        gFrame = grown;
+        gFrameCapacity = needed;
+    }
+    const uint8_t *source = data;
+    for (unsigned y = 0; y < height; y++) {
+        uint32_t *row = gFrame + (size_t)y * width;
+        const uint8_t *line = source + (size_t)y * pitch;
+        if (gPixelFormat == RETRO_PIXEL_FORMAT_XRGB8888) {
+            const uint32_t *pixels = (const uint32_t *)line;
+            for (unsigned x = 0; x < width; x++) row[x] = pixels[x] | 0xFF000000u;
+        } else if (gPixelFormat == RETRO_PIXEL_FORMAT_RGB565) {
+            const uint16_t *pixels = (const uint16_t *)line;
+            for (unsigned x = 0; x < width; x++) row[x] = OSLRFrom565(pixels[x]);
+        } else {
+            const uint16_t *pixels = (const uint16_t *)line;
+            for (unsigned x = 0; x < width; x++) row[x] = OSLRFrom1555(pixels[x]);
+        }
+    }
+    gFrameWidth = width;
+    gFrameHeight = height;
+    os_unfair_lock_unlock(&gFrameLock);
+    atomic_fetch_add(&gFrameSerial, 1);
+}
+
+/// Imagen del último fotograma (la pide la pantalla). NULL si no hay fotograma nuevo.
+static CGImageRef OSLRCopyFrameImage(uint64_t *lastSerial) {
+    uint64_t serial = atomic_load(&gFrameSerial);
+    if (serial == *lastSerial) return NULL;
+    os_unfair_lock_lock(&gFrameLock);
+    unsigned width = gFrameWidth, height = gFrameHeight;
+    CFDataRef bytes = NULL;
+    if (gFrame != NULL && width > 0 && height > 0) {
+        bytes = CFDataCreate(NULL, (const UInt8 *)gFrame, (CFIndex)((size_t)width * height * 4));
+    }
+    os_unfair_lock_unlock(&gFrameLock);
+    *lastSerial = serial;
+    if (bytes == NULL) return NULL;
+    CGDataProviderRef provider = CGDataProviderCreateWithCFData(bytes);
+    CFRelease(bytes);
+    CGColorSpaceRef space = CGColorSpaceCreateDeviceRGB();
+    CGImageRef image = CGImageCreate(width, height, 8, 32, width * 4, space,
+                                     kCGBitmapByteOrder32Little | (CGBitmapInfo)kCGImageAlphaNoneSkipFirst,
+                                     provider, NULL, false, kCGRenderingIntentDefault);
+    CGColorSpaceRelease(space);
+    CGDataProviderRelease(provider);
+    return image;
+}
+
+// MARK: Sonido
+
+static void OSLRPushAudio(const int16_t *samples, size_t frames) {
+    if (gAudioRing == NULL || samples == NULL) return;
+    size_t write = atomic_load_explicit(&gAudioWrite, memory_order_relaxed);
+    size_t read = atomic_load_explicit(&gAudioRead, memory_order_acquire);
+    size_t space = gAudioCapacity - (write - read);
+    if (frames > space) frames = space; // lleno: lo que sobra se pierde
+    for (size_t index = 0; index < frames; index++) {
+        size_t slot = (write + index) % gAudioCapacity;
+        gAudioRing[slot * 2] = samples[index * 2];
+        gAudioRing[slot * 2 + 1] = samples[index * 2 + 1];
+    }
+    atomic_store_explicit(&gAudioWrite, write + frames, memory_order_release);
+}
+
+static void OSLRAudioSample(int16_t left, int16_t right) {
+    int16_t pair[2] = {left, right};
+    OSLRPushAudio(pair, 1);
+}
+
+static size_t OSLRAudioSampleBatch(const int16_t *data, size_t frames) {
+    OSLRPushAudio(data, frames);
+    return frames;
+}
+
+/// Lo que queda por sonar, de 0 a 1.
+static double OSLRAudioFill(void) {
+    if (gAudioCapacity == 0) return 0.5;
+    size_t write = atomic_load(&gAudioWrite);
+    size_t read = atomic_load(&gAudioRead);
+    return (double)(write - read) / (double)gAudioCapacity;
+}
+
+// MARK: Mando
+
+static void OSLRInputPoll(void) {}
+
+static int16_t OSLRInputState(unsigned port, unsigned device, unsigned index, unsigned identifier) {
+    if (port != 0 || atomic_load(&gInputSuspended)) return 0;
+    uint32_t bits = atomic_load(&gPadBits) | atomic_load(&gTouchBits);
+    switch (device & RETRO_DEVICE_MASK) {
+        case RETRO_DEVICE_JOYPAD:
+            if (identifier == RETRO_DEVICE_ID_JOYPAD_MASK) return (int16_t)(bits & 0xFFFF);
+            return identifier < 16 ? (int16_t)((bits >> identifier) & 1) : 0;
+        case RETRO_DEVICE_ANALOG:
+            if (index == RETRO_DEVICE_INDEX_ANALOG_LEFT || index == RETRO_DEVICE_INDEX_ANALOG_RIGHT) {
+                unsigned axis = index * 2 + (identifier == RETRO_DEVICE_ID_ANALOG_Y ? 1 : 0);
+                return (int16_t)atomic_load(&gAxis[axis]);
+            }
+            if (index == RETRO_DEVICE_INDEX_ANALOG_BUTTON && identifier < 16) {
+                return ((bits >> identifier) & 1) ? 0x7FFF : 0;
+            }
+            return 0;
+        case RETRO_DEVICE_POINTER:
+            if (index != 0) return 0;
+            if (identifier == RETRO_DEVICE_ID_POINTER_X) return (int16_t)atomic_load(&gPointerX);
+            if (identifier == RETRO_DEVICE_ID_POINTER_Y) return (int16_t)atomic_load(&gPointerY);
+            if (identifier == RETRO_DEVICE_ID_POINTER_PRESSED) return atomic_load(&gPointerDown) ? 1 : 0;
+            if (identifier == RETRO_DEVICE_ID_POINTER_COUNT) return atomic_load(&gPointerDown) ? 1 : 0;
+            return 0;
+        default:
+            return 0;
+    }
+}
+
+// MARK: - Botón físico → botón de libretro (posicional, como RetroArch)
+
+/// Id del mapa de botones de OmniStation (a, b, x, y, l1…) → RETRO_DEVICE_ID_JOYPAD_*.
+static int OSLRRetroButtonForMapID(NSString *name) {
+    static NSDictionary<NSString *, NSNumber *> *table;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        table = @{@"a": @(RETRO_DEVICE_ID_JOYPAD_B), @"b": @(RETRO_DEVICE_ID_JOYPAD_A),
+                  @"x": @(RETRO_DEVICE_ID_JOYPAD_Y), @"y": @(RETRO_DEVICE_ID_JOYPAD_X),
+                  @"l1": @(RETRO_DEVICE_ID_JOYPAD_L), @"r1": @(RETRO_DEVICE_ID_JOYPAD_R),
+                  @"l2": @(RETRO_DEVICE_ID_JOYPAD_L2), @"r2": @(RETRO_DEVICE_ID_JOYPAD_R2),
+                  @"l3": @(RETRO_DEVICE_ID_JOYPAD_L3), @"r3": @(RETRO_DEVICE_ID_JOYPAD_R3),
+                  @"menu": @(RETRO_DEVICE_ID_JOYPAD_START), @"options": @(RETRO_DEVICE_ID_JOYPAD_SELECT)};
+    });
+    NSNumber *value = table[name];
+    return value ? value.intValue : -1;
+}
+
+// MARK: - Vistas
+
+/// Contenedor del mando táctil: lo que no es un botón deja pasar el toque (a la pantalla del juego).
+@interface OSLRPassThroughView : UIView
+@end
+
+@implementation OSLRPassThroughView
+- (UIView *)hitTest:(CGPoint)point withEvent:(UIEvent *)event {
+    UIView *hit = [super hitTest:point withEvent:event];
+    return hit == self ? nil : hit;
+}
+@end
+
+/// Pantalla del juego. En los sistemas con pantalla táctil (NDS), los toques hacen de lápiz.
+@interface OSLRVideoView : UIView
+@property (nonatomic, assign) BOOL pointerEnabled;
+@end
+
+@implementation OSLRVideoView {
+    UITouch *_pointerTouch;
+}
+
+- (instancetype)initWithFrame:(CGRect)frame {
+    self = [super initWithFrame:frame];
+    if (self) {
+        self.backgroundColor = UIColor.blackColor;
+        self.layer.contentsGravity = kCAGravityResize;
+        self.layer.magnificationFilter = kCAFilterNearest;
+        self.multipleTouchEnabled = NO;
+    }
+    return self;
+}
+
+- (void)updatePointer:(UITouch *)touch {
+    CGSize size = self.bounds.size;
+    if (size.width < 1 || size.height < 1) return;
+    CGPoint point = [touch locationInView:self];
+    double x = MAX(0, MIN(1, point.x / size.width)) * 2.0 - 1.0;
+    double y = MAX(0, MIN(1, point.y / size.height)) * 2.0 - 1.0;
+    atomic_store(&gPointerX, (int32_t)(x * 0x7FFF));
+    atomic_store(&gPointerY, (int32_t)(y * 0x7FFF));
+}
+
+- (void)touchesBegan:(NSSet<UITouch *> *)touches withEvent:(UIEvent *)event {
+    if (!self.pointerEnabled || _pointerTouch != nil) return;
+    _pointerTouch = touches.anyObject;
+    [self updatePointer:_pointerTouch];
+    atomic_store(&gPointerDown, true);
+}
+
+- (void)touchesMoved:(NSSet<UITouch *> *)touches withEvent:(UIEvent *)event {
+    if (_pointerTouch && [touches containsObject:_pointerTouch]) [self updatePointer:_pointerTouch];
+}
+
+- (void)touchesEnded:(NSSet<UITouch *> *)touches withEvent:(UIEvent *)event {
+    if (_pointerTouch && [touches containsObject:_pointerTouch]) {
+        _pointerTouch = nil;
+        atomic_store(&gPointerDown, false);
+    }
+}
+
+- (void)touchesCancelled:(NSSet<UITouch *> *)touches withEvent:(UIEvent *)event {
+    [self touchesEnded:touches withEvent:event];
+}
+@end
+
+// MARK: - Pantalla de juego
+
+@interface OSLRGameViewController : UIViewController
+@property (nonatomic, copy) NSString *language;
+@property (nonatomic, copy) NSString *layout;
+@property (nonatomic, assign) BOOL touchAlways;
+@property (nonatomic, assign) BOOL touchHaptics;
+@property (nonatomic, assign) BOOL stretch;
+@property (nonatomic, assign) BOOL smooth;
+@property (nonatomic, assign) BOOL pointer;
+@property (nonatomic, assign) BOOL closing;
+@property (nonatomic, strong, nullable) OSPerfHUD *hud;
+@property (nonatomic, strong, readonly) OSLRVideoView *videoView;
+@property (nonatomic, copy, nullable) void (^menuChanged)(BOOL open);
+@property (nonatomic, copy, nullable) void (^menuAction)(NSInteger action);
+/// Mapa de botones del juego: botón físico (RETRO id) → el que manda.
+@property (nonatomic, copy) NSDictionary<NSNumber *, NSNumber *> *buttonMap;
+- (void)showStatus:(NSString *)message;
+- (void)openMenu;
+- (void)closeMenu;
+- (void)releaseExternalDisplay;
+@end
+
+typedef NS_ENUM(NSInteger, OSLRMenuAction) {
+    OSLRMenuActionResume = 0,
+    OSLRMenuActionSaveState,
+    OSLRMenuActionLoadState,
+    OSLRMenuActionReset,
+    OSLRMenuActionQuit
+};
+
+@implementation OSLRGameViewController {
+    OSLRPassThroughView *_controlsView;
+    NSMutableArray<UIView *> *_groups;
+    UIButton *_menuButton;
+    UILabel *_statusLabel;
+    UILabel *_tvLabel;
+    UIView *_menuView;
+    NSArray<UIButton *> *_menuRows;
+    NSInteger _menuIndex;
+    BOOL _menuVisible;
+    CADisplayLink *_displayLink;
+    uint64_t _lastSerial;
+    NSUInteger _statusToken;
+    BOOL _prevHome, _prevCombo, _prevUp, _prevDown, _prevA, _prevB;
+    NSMutableArray<id> *_observers;
+    UIImpactFeedbackGenerator *_haptic;
+    UIView *_tvHost;
+    BOOL _onTV;
+    GCController *_controller;
+    uint32_t _physicalBits;
+    double _hudTime;
+    uint64_t _hudFrames;
+}
+
+- (instancetype)init {
+    self = [super initWithNibName:nil bundle:nil];
+    if (self) {
+        self.modalPresentationStyle = UIModalPresentationFullScreen;
+        self.modalTransitionStyle = UIModalTransitionStyleCrossDissolve;
+        _language = @"es";
+        _layout = @"snes";
+        _observers = [NSMutableArray new];
+        _groups = [NSMutableArray new];
+        _buttonMap = @{};
+        _videoView = [[OSLRVideoView alloc] initWithFrame:CGRectMake(0, 0, 4, 3)];
+    }
+    return self;
+}
+
+- (NSString *)t:(NSString *)spanish en:(NSString *)english {
+    return OSLRText(self.language, spanish, english);
+}
+
+- (BOOL)prefersStatusBarHidden { return YES; }
+- (BOOL)prefersHomeIndicatorAutoHidden { return YES; }
+- (UIRectEdge)preferredScreenEdgesDeferringSystemGestures { return UIRectEdgeAll; }
+- (UIInterfaceOrientationMask)supportedInterfaceOrientations { return UIInterfaceOrientationMaskAllButUpsideDown; }
+
+// MARK: Botones táctiles
+
+- (UIButton *)padButton:(NSString *)title retroID:(NSInteger)retroID {
+    UIButton *button = [UIButton buttonWithType:UIButtonTypeCustom];
+    button.tag = retroID;
+    button.backgroundColor = [UIColor colorWithWhite:0 alpha:0.42];
+    [button setTitleColor:UIColor.whiteColor forState:UIControlStateNormal];
+    [button setTitleColor:[UIColor colorWithRed:0.4 green:0.9 blue:1.0 alpha:1.0] forState:UIControlStateHighlighted];
+    button.titleLabel.font = [UIFont systemFontOfSize:16 weight:UIFontWeightBold];
+    button.layer.borderWidth = 1.0;
+    button.layer.borderColor = [UIColor colorWithWhite:1 alpha:0.40].CGColor;
+    button.layer.cornerRadius = 19;
+    button.exclusiveTouch = NO;
+    [button setTitle:title forState:UIControlStateNormal];
+    [button addTarget:self action:@selector(padDown:) forControlEvents:UIControlEventTouchDown];
+    [button addTarget:self action:@selector(padUp:) forControlEvents:UIControlEventTouchUpInside | UIControlEventTouchUpOutside | UIControlEventTouchCancel];
+    return button;
+}
+
+- (void)padDown:(UIButton *)sender {
+    atomic_fetch_or(&gTouchBits, 1u << (uint32_t)sender.tag);
+    if (self.touchHaptics) [_haptic impactOccurred];
+}
+
+- (void)padUp:(UIButton *)sender {
+    atomic_fetch_and(&gTouchBits, ~(1u << (uint32_t)sender.tag));
+}
+
+/// Cruz de 4 botones (arriba, abajo, izquierda, derecha).
+- (UIView *)crossWithTitles:(NSArray<NSString *> *)titles ids:(NSArray<NSNumber *> *)ids tag:(NSInteger)tag {
+    UIView *pad = [[UIView alloc] initWithFrame:CGRectMake(0, 0, 112, 112)];
+    pad.tag = tag;
+    CGRect frames[4] = {CGRectMake(37, 0, 38, 38), CGRectMake(37, 74, 38, 38), CGRectMake(0, 37, 38, 38), CGRectMake(74, 37, 38, 38)};
+    for (NSUInteger index = 0; index < 4; index++) {
+        if (ids[index].integerValue < 0) continue;
+        UIButton *button = [self padButton:titles[index] retroID:ids[index].integerValue];
+        button.frame = frames[index];
+        [pad addSubview:button];
+    }
+    return pad;
+}
+
+- (UIView *)pairWithFirst:(NSString *)first firstID:(NSInteger)firstID second:(nullable NSString *)second secondID:(NSInteger)secondID tag:(NSInteger)tag {
+    UIView *pair = [[UIView alloc] initWithFrame:CGRectMake(0, 0, 108, 40)];
+    pair.tag = tag;
+    UIButton *a = [self padButton:first retroID:firstID];
+    a.frame = second ? CGRectMake(0, 0, 50, 40) : CGRectMake(0, 0, 108, 40);
+    a.layer.cornerRadius = 12;
+    [pair addSubview:a];
+    if (second) {
+        UIButton *b = [self padButton:second retroID:secondID];
+        b.frame = CGRectMake(58, 0, 50, 40);
+        b.layer.cornerRadius = 12;
+        [pair addSubview:b];
+    }
+    return pair;
+}
+
+- (void)buildControls {
+    NSString *layout = self.layout;
+    BOOL fourFace = [layout isEqualToString:@"snes"] || [layout isEqualToString:@"nds"];
+    BOOL shoulders = fourFace || [layout isEqualToString:@"gba"];
+    UIView *dpad = [self crossWithTitles:@[@"▲", @"▼", @"◀", @"▶"]
+                                     ids:@[@(RETRO_DEVICE_ID_JOYPAD_UP), @(RETRO_DEVICE_ID_JOYPAD_DOWN), @(RETRO_DEVICE_ID_JOYPAD_LEFT), @(RETRO_DEVICE_ID_JOYPAD_RIGHT)]
+                                     tag:1001];
+    UIView *face;
+    if (fourFace) {
+        // Como en el mando de SNES/DS: X arriba, B abajo, Y izquierda, A derecha.
+        face = [self crossWithTitles:@[@"X", @"B", @"Y", @"A"]
+                                 ids:@[@(RETRO_DEVICE_ID_JOYPAD_X), @(RETRO_DEVICE_ID_JOYPAD_B), @(RETRO_DEVICE_ID_JOYPAD_Y), @(RETRO_DEVICE_ID_JOYPAD_A)]
+                                 tag:1002];
+    } else {
+        face = [[UIView alloc] initWithFrame:CGRectMake(0, 0, 112, 112)];
+        face.tag = 1002;
+        UIButton *b = [self padButton:@"B" retroID:RETRO_DEVICE_ID_JOYPAD_B];
+        UIButton *a = [self padButton:@"A" retroID:RETRO_DEVICE_ID_JOYPAD_A];
+        b.frame = CGRectMake(2, 50, 50, 50);
+        a.frame = CGRectMake(60, 20, 50, 50);
+        b.layer.cornerRadius = 25;
+        a.layer.cornerRadius = 25;
+        [face addSubview:b];
+        [face addSubview:a];
+    }
+    [_groups addObject:dpad];
+    [_groups addObject:face];
+    if (shoulders) {
+        [_groups addObject:[self pairWithFirst:@"L" firstID:RETRO_DEVICE_ID_JOYPAD_L second:nil secondID:-1 tag:1005]];
+        [_groups addObject:[self pairWithFirst:@"R" firstID:RETRO_DEVICE_ID_JOYPAD_R second:nil secondID:-1 tag:1006]];
+    }
+    UIButton *start = [self padButton:@"START" retroID:RETRO_DEVICE_ID_JOYPAD_START];
+    UIButton *select = [self padButton:@"SELECT" retroID:RETRO_DEVICE_ID_JOYPAD_SELECT];
+    start.tag = RETRO_DEVICE_ID_JOYPAD_START;
+    select.tag = RETRO_DEVICE_ID_JOYPAD_SELECT;
+    start.titleLabel.font = [UIFont systemFontOfSize:10 weight:UIFontWeightSemibold];
+    select.titleLabel.font = [UIFont systemFontOfSize:10 weight:UIFontWeightSemibold];
+    start.layer.cornerRadius = 12;
+    select.layer.cornerRadius = 12;
+    UIView *center = [[UIView alloc] initWithFrame:CGRectMake(0, 0, 168, 34)];
+    center.tag = 1007;
+    select.frame = CGRectMake(0, 0, 76, 34);
+    start.frame = CGRectMake(92, 0, 76, 34);
+    [center addSubview:select];
+    [center addSubview:start];
+    [_groups addObject:center];
+    for (UIView *group in _groups) {
+        group.multipleTouchEnabled = YES;
+        [_controlsView addSubview:group];
+    }
+}
+
+- (void)updateControlsVisibility {
+    BOOL physical = GCController.current.extendedGamepad != nil;
+    if (!physical) {
+        for (GCController *controller in GCController.controllers) {
+            if (controller.extendedGamepad != nil) { physical = YES; break; }
+        }
+    }
+    BOOL show = !_onTV ? (self.touchAlways || !physical) : !physical;
+    _controlsView.hidden = !show;
+    if (!show) atomic_store(&gTouchBits, 0);
+}
+
+// MARK: Vista
+
+- (void)loadView {
+    UIView *root = [[UIView alloc] initWithFrame:UIScreen.mainScreen.bounds];
+    root.backgroundColor = UIColor.blackColor;
+    self.view = root;
+    self.videoView.layer.magnificationFilter = self.smooth ? kCAFilterLinear : kCAFilterNearest;
+    self.videoView.pointerEnabled = self.pointer;
+    [root addSubview:self.videoView];
+
+    _tvLabel = [UILabel new];
+    _tvLabel.text = [self t:@"Jugando en la tele" en:@"Playing on the TV"];
+    _tvLabel.textColor = [UIColor colorWithWhite:1 alpha:0.55];
+    _tvLabel.font = [UIFont systemFontOfSize:15 weight:UIFontWeightSemibold];
+    _tvLabel.textAlignment = NSTextAlignmentCenter;
+    _tvLabel.hidden = YES;
+    _tvLabel.userInteractionEnabled = NO;
+    [root addSubview:_tvLabel];
+
+    _controlsView = [[OSLRPassThroughView alloc] initWithFrame:root.bounds];
+    _controlsView.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
+    _controlsView.backgroundColor = UIColor.clearColor;
+    _controlsView.multipleTouchEnabled = YES;
+    [root addSubview:_controlsView];
+    [self buildControls];
+
+    if (self.hud) {
+        [root addSubview:self.hud];
+        [self.hud refreshWithFPS:-1 frameTime:0 fifo:0];
+    }
+    if (self.touchHaptics) {
+        _haptic = [[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleLight];
+        [_haptic prepare];
+    }
+
+    _menuButton = [UIButton buttonWithType:UIButtonTypeSystem];
+    _menuButton.tintColor = UIColor.whiteColor;
+    _menuButton.backgroundColor = [UIColor colorWithWhite:0 alpha:0.5];
+    _menuButton.layer.cornerRadius = 20;
+    [_menuButton setImage:[UIImage systemImageNamed:@"line.3.horizontal"] forState:UIControlStateNormal];
+    [_menuButton addTarget:self action:@selector(openMenu) forControlEvents:UIControlEventTouchUpInside];
+    [root addSubview:_menuButton];
+
+    _statusLabel = [UILabel new];
+    _statusLabel.textColor = UIColor.whiteColor;
+    _statusLabel.backgroundColor = [UIColor colorWithWhite:0 alpha:0.7];
+    _statusLabel.font = [UIFont systemFontOfSize:13 weight:UIFontWeightSemibold];
+    _statusLabel.textAlignment = NSTextAlignmentCenter;
+    _statusLabel.numberOfLines = 3;
+    _statusLabel.layer.cornerRadius = 10;
+    _statusLabel.clipsToBounds = YES;
+    _statusLabel.alpha = 0;
+    _statusLabel.userInteractionEnabled = NO;
+    [root addSubview:_statusLabel];
+
+    [self buildMenu];
+    [self updateControlsVisibility];
+}
+
+- (void)buildMenu {
+    _menuView = [[UIView alloc] initWithFrame:self.view.bounds];
+    _menuView.backgroundColor = [UIColor colorWithWhite:0 alpha:0.72];
+    _menuView.hidden = YES;
+    NSArray<NSString *> *titles = @[[self t:@"Continuar" en:@"Resume"],
+                                    [self t:@"Guardar estado" en:@"Save state"],
+                                    [self t:@"Cargar estado" en:@"Load state"],
+                                    [self t:@"Reiniciar" en:@"Reset"],
+                                    [self t:@"Salir del juego" en:@"Quit game"]];
+    NSMutableArray<UIButton *> *rows = [NSMutableArray new];
+    for (NSUInteger index = 0; index < titles.count; index++) {
+        UIButton *row = [UIButton buttonWithType:UIButtonTypeSystem];
+        row.tag = (NSInteger)index;
+        row.backgroundColor = [UIColor colorWithWhite:1 alpha:0.10];
+        row.layer.cornerRadius = 14;
+        row.layer.borderColor = [UIColor colorWithRed:0.0 green:0.85 blue:1.0 alpha:1.0].CGColor;
+        row.titleLabel.font = [UIFont systemFontOfSize:16 weight:UIFontWeightSemibold];
+        [row setTitle:titles[index] forState:UIControlStateNormal];
+        UIColor *color = index == titles.count - 1 ? [UIColor colorWithRed:1.0 green:0.55 blue:0.45 alpha:1.0] : UIColor.whiteColor;
+        [row setTitleColor:color forState:UIControlStateNormal];
+        [row addTarget:self action:@selector(menuRowTapped:) forControlEvents:UIControlEventTouchUpInside];
+        [_menuView addSubview:row];
+        [rows addObject:row];
+    }
+    _menuRows = rows;
+    [self.view addSubview:_menuView];
+}
+
+- (CGRect)videoFrameInBounds:(CGRect)bounds safe:(UIEdgeInsets)safe portrait:(BOOL)portrait {
+    CGFloat w = bounds.size.width;
+    CGFloat h = bounds.size.height;
+    double aspect = atomic_load(&gAspect);
+    if (self.stretch && !portrait) {
+        return CGRectMake(safe.left, 0, w - safe.left - safe.right, h);
+    }
+    if (portrait) {
+        // Arriba, dejando sitio debajo para los controles táctiles.
+        CGFloat maxHeight = MAX(120, h * 0.55 - safe.top);
+        CGFloat width = w;
+        CGFloat height = floor(width / aspect);
+        if (height > maxHeight) {
+            height = maxHeight;
+            width = floor(height * aspect);
+        }
+        CGFloat top = safe.top + MAX(0, floor((h * 0.5 - safe.top - height) * 0.5));
+        return CGRectMake(floor((w - width) * 0.5), top, width, height);
+    }
+    CGFloat height = h;
+    CGFloat width = floor(height * aspect);
+    if (width > w) {
+        width = w;
+        height = floor(width / aspect);
+    }
+    return CGRectMake(floor((w - width) * 0.5), floor((h - height) * 0.5), width, height);
+}
+
+- (void)viewDidLayoutSubviews {
+    [super viewDidLayoutSubviews];
+    UIView *root = self.view;
+    CGFloat w = root.bounds.size.width;
+    CGFloat h = root.bounds.size.height;
+    UIEdgeInsets safe = root.safeAreaInsets;
+    BOOL portrait = h > w;
+    if (!_onTV) {
+        self.videoView.frame = [self videoFrameInBounds:root.bounds safe:safe portrait:portrait];
+    }
+    _controlsView.frame = root.bounds;
+    CGFloat bottom = safe.bottom + 14;
+    UIView *dpad = [_controlsView viewWithTag:1001];
+    UIView *face = [_controlsView viewWithTag:1002];
+    UIView *left = [_controlsView viewWithTag:1005];
+    UIView *right = [_controlsView viewWithTag:1006];
+    UIView *center = [_controlsView viewWithTag:1007];
+    dpad.frame = CGRectMake(safe.left + 18, h - bottom - 112 - (portrait ? 40 : 0), 112, 112);
+    face.frame = CGRectMake(w - safe.right - 130, h - bottom - 112 - (portrait ? 40 : 0), 112, 112);
+    if (portrait) {
+        left.frame = CGRectMake(safe.left + 12, h - bottom - 112 - 40 - 58, 108, 40);
+        right.frame = CGRectMake(w - safe.right - 120, h - bottom - 112 - 40 - 58, 108, 40);
+    } else {
+        left.frame = CGRectMake(safe.left + 12, safe.top + 60, 108, 40);
+        right.frame = CGRectMake(w - safe.right - 120, safe.top + 60, 108, 40);
+    }
+    center.frame = CGRectMake(floor((w - 168) * 0.5), h - bottom - 34, 168, 34);
+    _menuButton.frame = CGRectMake(safe.left + 14, safe.top + 12, 40, 40);
+    if (self.hud) {
+        CGSize size = [self.hud fittingSize];
+        self.hud.frame = CGRectMake(w - safe.right - 10 - size.width, safe.top + 12, size.width, size.height);
+    }
+    _tvLabel.frame = CGRectMake(0, h * 0.30, w, 24);
+    CGFloat labelWidth = MIN(w * 0.7, 420);
+    _statusLabel.frame = CGRectMake((w - labelWidth) * 0.5, safe.top + 14, labelWidth, 54);
+    _menuView.frame = root.bounds;
+    CGFloat rowWidth = MIN(w - 40, 340);
+    CGFloat rowHeight = 48;
+    CGFloat total = rowHeight * (CGFloat)_menuRows.count + 12 * (CGFloat)(_menuRows.count - 1);
+    CGFloat y = (h - total) * 0.5;
+    for (UIButton *row in _menuRows) {
+        row.frame = CGRectMake((w - rowWidth) * 0.5, y, rowWidth, rowHeight);
+        y += rowHeight + 12;
+    }
+    if (_onTV) [self layoutTV];
+}
+
+- (void)viewDidLoad {
+    [super viewDidLoad];
+    __weak OSLRGameViewController *weakSelf = self;
+    NSNotificationCenter *center = NSNotificationCenter.defaultCenter;
+    for (NSNotificationName name in @[GCControllerDidConnectNotification, GCControllerDidDisconnectNotification]) {
+        [_observers addObject:[center addObserverForName:name object:nil queue:NSOperationQueue.mainQueue usingBlock:^(NSNotification *note) {
+            [weakSelf bindController];
+            [weakSelf updateControlsVisibility];
+        }]];
+    }
+    [_observers addObject:[center addObserverForName:OSExternalDisplayDidChangeNotification object:nil queue:NSOperationQueue.mainQueue usingBlock:^(NSNotification *note) {
+        [weakSelf updateExternalDisplay];
+    }]];
+    [_observers addObject:[center addObserverForName:UIApplicationWillResignActiveNotification object:nil queue:NSOperationQueue.mainQueue usingBlock:^(NSNotification *note) {
+        OSLRGameViewController *strongSelf = weakSelf;
+        if (strongSelf && !strongSelf.closing && !strongSelf->_menuVisible) [strongSelf openMenu];
+    }]];
+    [self bindController];
+}
+
+- (void)viewDidAppear:(BOOL)animated {
+    [super viewDidAppear:animated];
+    if (_displayLink == nil) {
+        _displayLink = [CADisplayLink displayLinkWithTarget:self selector:@selector(tick)];
+        _displayLink.preferredFrameRateRange = CAFrameRateRangeMake(30, 60, 60);
+        [_displayLink addToRunLoop:NSRunLoop.mainRunLoop forMode:NSRunLoopCommonModes];
+    }
+    UIApplication.sharedApplication.idleTimerDisabled = YES;
+    [self updateExternalDisplay];
+}
+
+- (void)viewWillDisappear:(BOOL)animated {
+    [super viewWillDisappear:animated];
+    [_displayLink invalidate];
+    _displayLink = nil;
+    UIApplication.sharedApplication.idleTimerDisabled = NO;
+}
+
+- (void)dealloc {
+    for (id token in _observers) [NSNotificationCenter.defaultCenter removeObserver:token];
+    [self wireController:_controller enabled:NO];
+}
+
+// MARK: Mando físico
+
+- (void)bindController {
+    GCController *preferred = GCController.current.extendedGamepad ? GCController.current : nil;
+    if (preferred == nil) {
+        for (GCController *controller in GCController.controllers) {
+            if (controller.extendedGamepad != nil) { preferred = controller; break; }
+        }
+    }
+    if (preferred == _controller) return;
+    [self wireController:_controller enabled:NO];
+    _controller = preferred;
+    [self wireController:_controller enabled:YES];
+}
+
+- (void)wireController:(GCController *)controller enabled:(BOOL)enabled {
+    GCExtendedGamepad *pad = controller.extendedGamepad;
+    if (pad == nil) return;
+    if (!enabled) {
+        pad.valueChangedHandler = nil;
+        atomic_store(&gPadBits, 0);
+        for (int index = 0; index < 4; index++) atomic_store(&gAxis[index], 0);
+        return;
+    }
+    if (pad.buttonHome != nil) pad.buttonHome.preferredSystemGestureState = GCSystemGestureStateDisabled;
+    __weak OSLRGameViewController *weakSelf = self;
+    pad.valueChangedHandler = ^(GCExtendedGamepad *gamepad, GCControllerElement *element) {
+        [weakSelf readGamepad:gamepad];
+    };
+    [self readGamepad:pad];
+}
+
+- (void)readGamepad:(GCExtendedGamepad *)pad {
+    if (pad == nil) return;
+    uint32_t physical = 0;
+    #define OSLR_SET(condition, button) if (condition) physical |= (1u << (button))
+    OSLR_SET(pad.buttonA.isPressed, RETRO_DEVICE_ID_JOYPAD_B);
+    OSLR_SET(pad.buttonB.isPressed, RETRO_DEVICE_ID_JOYPAD_A);
+    OSLR_SET(pad.buttonX.isPressed, RETRO_DEVICE_ID_JOYPAD_Y);
+    OSLR_SET(pad.buttonY.isPressed, RETRO_DEVICE_ID_JOYPAD_X);
+    OSLR_SET(pad.leftShoulder.isPressed, RETRO_DEVICE_ID_JOYPAD_L);
+    OSLR_SET(pad.rightShoulder.isPressed, RETRO_DEVICE_ID_JOYPAD_R);
+    OSLR_SET(pad.leftTrigger.isPressed, RETRO_DEVICE_ID_JOYPAD_L2);
+    OSLR_SET(pad.rightTrigger.isPressed, RETRO_DEVICE_ID_JOYPAD_R2);
+    OSLR_SET(pad.leftThumbstickButton.isPressed, RETRO_DEVICE_ID_JOYPAD_L3);
+    OSLR_SET(pad.rightThumbstickButton.isPressed, RETRO_DEVICE_ID_JOYPAD_R3);
+    OSLR_SET(pad.buttonMenu.isPressed, RETRO_DEVICE_ID_JOYPAD_START);
+    OSLR_SET(pad.buttonOptions.isPressed, RETRO_DEVICE_ID_JOYPAD_SELECT);
+    // La cruceta y el stick izquierdo mueven igual (los juegos 2D no usan el stick).
+    float x = pad.dpad.xAxis.value, y = pad.dpad.yAxis.value;
+    float lx = pad.leftThumbstick.xAxis.value, ly = pad.leftThumbstick.yAxis.value;
+    OSLR_SET(y > 0.5f || ly > 0.6f, RETRO_DEVICE_ID_JOYPAD_UP);
+    OSLR_SET(y < -0.5f || ly < -0.6f, RETRO_DEVICE_ID_JOYPAD_DOWN);
+    OSLR_SET(x < -0.5f || lx < -0.6f, RETRO_DEVICE_ID_JOYPAD_LEFT);
+    OSLR_SET(x > 0.5f || lx > 0.6f, RETRO_DEVICE_ID_JOYPAD_RIGHT);
+    #undef OSLR_SET
+    _physicalBits = physical;
+    // Mapa de botones del juego (solo los botones, no la cruceta).
+    uint32_t output = physical;
+    if (self.buttonMap.count > 0) {
+        uint32_t directions = (1u << RETRO_DEVICE_ID_JOYPAD_UP) | (1u << RETRO_DEVICE_ID_JOYPAD_DOWN) |
+                              (1u << RETRO_DEVICE_ID_JOYPAD_LEFT) | (1u << RETRO_DEVICE_ID_JOYPAD_RIGHT);
+        output = physical & directions;
+        for (unsigned button = 0; button < 16; button++) {
+            if (!(physical & (1u << button)) || (directions & (1u << button))) continue;
+            NSNumber *target = self.buttonMap[@(button)];
+            output |= 1u << (target ? target.unsignedIntValue : button);
+        }
+    }
+    atomic_store(&gPadBits, output);
+    atomic_store(&gAxis[0], (int32_t)(lx * 32767.0f));
+    atomic_store(&gAxis[1], (int32_t)(-ly * 32767.0f));
+    atomic_store(&gAxis[2], (int32_t)(pad.rightThumbstick.xAxis.value * 32767.0f));
+    atomic_store(&gAxis[3], (int32_t)(-pad.rightThumbstick.yAxis.value * 32767.0f));
+}
+
+// MARK: Ritmo de pantalla: imagen, menú y HUD
+
+- (void)tick {
+    uint64_t serial = _lastSerial;
+    CGImageRef image = OSLRCopyFrameImage(&serial);
+    _lastSerial = serial;
+    if (image != NULL) {
+        [CATransaction begin];
+        [CATransaction setDisableActions:YES];
+        self.videoView.layer.contents = (__bridge id)image;
+        [CATransaction commit];
+        CGImageRelease(image);
+    }
+    if (atomic_exchange(&gGeometryChanged, false)) [self.view setNeedsLayout];
+    [self pollMenuInput];
+    if (self.hud) {
+        double now = OSLRNow();
+        if (_hudTime == 0) {
+            _hudTime = now;
+            _hudFrames = atomic_load(&gFrameCount);
+        } else if (now - _hudTime >= 0.5) {
+            uint64_t frames = atomic_load(&gFrameCount);
+            double fps = (double)(frames - _hudFrames) / (now - _hudTime);
+            _hudTime = now;
+            _hudFrames = frames;
+            [self.hud refreshWithFPS:fps frameTime:fps > 0 ? 1000.0 / fps : 0 fifo:0];
+            [self.view setNeedsLayout];
+        }
+    }
+}
+
+- (void)pollMenuInput {
+    GCExtendedGamepad *pad = _controller.extendedGamepad;
+    if (pad == nil) return;
+    BOOL home = pad.buttonHome != nil && pad.buttonHome.isPressed;
+    BOOL combo = pad.buttonMenu.isPressed && pad.buttonOptions != nil && pad.buttonOptions.isPressed;
+    float y = pad.dpad.yAxis.value;
+    if (fabsf(y) < 0.5f) y = pad.leftThumbstick.yAxis.value;
+    BOOL up = y > 0.5f, down = y < -0.5f;
+    BOOL a = pad.buttonA.isPressed, b = pad.buttonB.isPressed;
+    if (!_menuVisible) {
+        if ((home && !_prevHome) || (combo && !_prevCombo)) [self openMenu];
+    } else if (!self.closing) {
+        NSInteger count = (NSInteger)_menuRows.count;
+        if (up && !_prevUp) { _menuIndex = (_menuIndex + count - 1) % count; [self refreshMenu]; }
+        if (down && !_prevDown) { _menuIndex = (_menuIndex + 1) % count; [self refreshMenu]; }
+        if (a && !_prevA) [self activateRow:_menuIndex];
+        if ((b && !_prevB) || (home && !_prevHome)) [self closeMenu];
+    }
+    _prevHome = home; _prevCombo = combo; _prevUp = up; _prevDown = down; _prevA = a; _prevB = b;
+}
+
+// MARK: Menú
+
+- (void)refreshMenu {
+    for (UIButton *row in _menuRows) {
+        BOOL selected = row.tag == _menuIndex && _controller != nil;
+        row.layer.borderWidth = selected ? 2.5 : 0;
+        row.backgroundColor = [UIColor colorWithWhite:1 alpha:selected ? 0.18 : 0.10];
+    }
+}
+
+- (void)openMenu {
+    if (_menuVisible || self.closing) return;
+    _menuVisible = YES;
+    _menuIndex = 0;
+    [self refreshMenu];
+    _menuView.hidden = NO;
+    [self.view bringSubviewToFront:_menuView];
+    atomic_store(&gTouchBits, 0);
+    if (self.menuChanged) self.menuChanged(YES);
+}
+
+- (void)closeMenu {
+    if (!_menuVisible) return;
+    _menuVisible = NO;
+    _menuView.hidden = YES;
+    if (self.menuChanged) self.menuChanged(NO);
+}
+
+- (void)menuRowTapped:(UIButton *)sender {
+    [self activateRow:sender.tag];
+}
+
+- (void)activateRow:(NSInteger)row {
+    if (row != OSLRMenuActionQuit) [self closeMenu];
+    if (self.menuAction) self.menuAction(row);
+}
+
+- (void)showStatus:(NSString *)message {
+    _statusLabel.text = message;
+    [self.view bringSubviewToFront:_statusLabel];
+    NSUInteger token = ++_statusToken;
+    [UIView animateWithDuration:0.2 animations:^{ self->_statusLabel.alpha = 1; }];
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(2.6 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+        if (token != self->_statusToken) return;
+        [UIView animateWithDuration:0.3 animations:^{ self->_statusLabel.alpha = 0; }];
+    });
+}
+
+// MARK: Tele
+
+- (void)layoutTV {
+    if (_tvHost == nil) return;
+    CGRect bounds = _tvHost.bounds;
+    self.videoView.frame = [self videoFrameInBounds:bounds safe:UIEdgeInsetsZero portrait:NO];
+}
+
+- (void)updateExternalDisplay {
+    BOOL wantTV = OSExternalDisplay.enabled && OSExternalDisplay.shared.connected;
+    if (wantTV && !_onTV) {
+        if (_tvHost == nil) {
+            _tvHost = [[UIView alloc] initWithFrame:CGRectMake(0, 0, 1920, 1080)];
+            _tvHost.backgroundColor = UIColor.blackColor;
+            _tvHost.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
+        }
+        [_tvHost addSubview:self.videoView];
+        if ([OSExternalDisplay.shared hostView:_tvHost]) {
+            _onTV = YES;
+            _tvLabel.hidden = NO;
+            [self layoutTV];
+            dispatch_async(dispatch_get_main_queue(), ^{ [self layoutTV]; });
+        } else {
+            [self returnVideoToPhone];
+        }
+    } else if (!wantTV && _onTV) {
+        [self releaseExternalDisplay];
+    }
+    [self updateControlsVisibility];
+}
+
+- (void)returnVideoToPhone {
+    [self.view insertSubview:self.videoView atIndex:0];
+    [self.view setNeedsLayout];
+}
+
+- (void)releaseExternalDisplay {
+    if (!_onTV) return;
+    _onTV = NO;
+    _tvLabel.hidden = YES;
+    [self returnVideoToPhone];
+    [OSExternalDisplay.shared releaseView:_tvHost];
+}
+
+@end
+
+// MARK: - Sonido (AVAudioEngine)
+
+@interface OSLRAudio : NSObject
+- (BOOL)startWithSampleRate:(double)rate;
+- (void)stop;
+@end
+
+@implementation OSLRAudio {
+    AVAudioEngine *_engine;
+    AVAudioSourceNode *_source;
+}
+
+- (BOOL)startWithSampleRate:(double)rate {
+    AVAudioSession *session = AVAudioSession.sharedInstance;
+    [session setCategory:AVAudioSessionCategoryPlayback withOptions:AVAudioSessionCategoryOptionMixWithOthers error:nil];
+    [session setPreferredIOBufferDuration:0.01 error:nil];
+    [session setActive:YES error:nil];
+    AVAudioFormat *format = [[AVAudioFormat alloc] initStandardFormatWithSampleRate:rate channels:2];
+    if (format == nil) return NO;
+    _engine = [AVAudioEngine new];
+    _source = [[AVAudioSourceNode alloc] initWithFormat:format renderBlock:^OSStatus(BOOL *isSilence, const AudioTimeStamp *timestamp, AVAudioFrameCount frameCount, AudioBufferList *outputData) {
+        float *left = outputData->mNumberBuffers > 0 ? (float *)outputData->mBuffers[0].mData : NULL;
+        float *right = outputData->mNumberBuffers > 1 ? (float *)outputData->mBuffers[1].mData : left;
+        if (left == NULL) return noErr;
+        size_t read = atomic_load_explicit(&gAudioRead, memory_order_relaxed);
+        size_t write = atomic_load_explicit(&gAudioWrite, memory_order_acquire);
+        size_t available = write - read;
+        size_t count = MIN((size_t)frameCount, available);
+        float volume = atomic_load(&gVolume) / 32768.0f;
+        for (size_t index = 0; index < count; index++) {
+            size_t slot = (read + index) % gAudioCapacity;
+            left[index] = (float)gAudioRing[slot * 2] * volume;
+            if (right != left) right[index] = (float)gAudioRing[slot * 2 + 1] * volume;
+        }
+        for (size_t index = count; index < frameCount; index++) {
+            left[index] = 0;
+            if (right != left) right[index] = 0;
+        }
+        atomic_store_explicit(&gAudioRead, read + count, memory_order_release);
+        return noErr;
+    }];
+    [_engine attachNode:_source];
+    [_engine connect:_source to:_engine.mainMixerNode format:format];
+    NSError *error = nil;
+    if (![_engine startAndReturnError:&error]) {
+        printf("[OmniStation] libretro: no se pudo arrancar el sonido: %s\n", error.localizedDescription.UTF8String);
+        return NO;
+    }
+    return YES;
+}
+
+- (void)stop {
+    [_engine stop];
+    if (_source) [_engine detachNode:_source];
+    _source = nil;
+    _engine = nil;
+}
+
+@end
+
+// MARK: - Motor
+
+@interface OSLibretroEngine ()
+@property (nonatomic, assign) BOOL busy;
+@property (nonatomic, strong, nullable) OSLRGameViewController *gameController;
+@property (nonatomic, copy, nullable) void (^endedHandler)(void);
+@end
+
+@implementation OSLibretroEngine {
+    NSMutableDictionary<NSString *, NSValue *> *_handles;
+    NSThread *_thread;
+    _Atomic bool _running;
+    _Atomic bool _paused;
+    _Atomic int _pendingAction;
+    OSLRAudio *_audio;
+    NSData *_gameData;
+    NSString *_savePath;
+    NSString *_statePath;
+    NSString *_language;
+}
+
++ (OSLibretroEngine *)shared {
+    static OSLibretroEngine *instance = nil;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{ instance = [OSLibretroEngine new]; });
+    return instance;
+}
+
+- (instancetype)init {
+    self = [super init];
+    if (self) {
+        _handles = [NSMutableDictionary new];
+        atomic_store(&_pendingAction, -1);
+    }
+    return self;
+}
+
++ (NSString *)binaryPathForFramework:(NSString *)framework {
+    NSString *frameworks = NSBundle.mainBundle.privateFrameworksPath ?: [NSBundle.mainBundle.bundlePath stringByAppendingPathComponent:@"Frameworks"];
+    NSString *folder = [frameworks stringByAppendingPathComponent:framework];
+    NSString *name = framework.stringByDeletingPathExtension;
+    NSString *binary = [folder stringByAppendingPathComponent:name];
+    // Si el Info.plist dice otro ejecutable, ese.
+    NSDictionary *info = [NSDictionary dictionaryWithContentsOfFile:[folder stringByAppendingPathComponent:@"Info.plist"]];
+    NSString *executable = info[@"CFBundleExecutable"];
+    if ([executable isKindOfClass:NSString.class] && executable.length > 0) {
+        binary = [folder stringByAppendingPathComponent:executable];
+    }
+    return binary;
+}
+
++ (BOOL)coreAvailable:(NSString *)framework {
+    if (framework.length == 0) return NO;
+    return [NSFileManager.defaultManager fileExistsAtPath:[self binaryPathForFramework:framework]];
+}
+
+- (BOOL)loadCore:(NSString *)framework error:(NSString **)error {
+    NSString *path = [OSLibretroEngine binaryPathForFramework:framework];
+    void *handle = _handles[framework].pointerValue;
+    if (handle == NULL) {
+        dlerror();
+        handle = dlopen(path.fileSystemRepresentation, RTLD_NOW | RTLD_LOCAL);
+        if (handle == NULL) {
+            const char *detail = dlerror();
+            if (error) *error = [NSString stringWithFormat:@"No se pudo cargar el núcleo: %s", detail ? detail : "?"];
+            return NO;
+        }
+        _handles[framework] = [NSValue valueWithPointer:handle];
+    }
+    OSLRCore core;
+    memset(&core, 0, sizeof(core));
+    NSMutableArray<NSString *> *missing = [NSMutableArray new];
+    #define OSLR_SYMBOL(field, name) do { \
+        core.field = (__typeof__(core.field))dlsym(handle, name); \
+        if (core.field == NULL) [missing addObject:[NSString stringWithUTF8String:name]]; \
+    } while (0)
+    OSLR_SYMBOL(init, "retro_init");
+    OSLR_SYMBOL(deinit, "retro_deinit");
+    OSLR_SYMBOL(apiVersion, "retro_api_version");
+    OSLR_SYMBOL(getSystemInfo, "retro_get_system_info");
+    OSLR_SYMBOL(getSystemAVInfo, "retro_get_system_av_info");
+    OSLR_SYMBOL(setEnvironment, "retro_set_environment");
+    OSLR_SYMBOL(setVideoRefresh, "retro_set_video_refresh");
+    OSLR_SYMBOL(setAudioSample, "retro_set_audio_sample");
+    OSLR_SYMBOL(setAudioSampleBatch, "retro_set_audio_sample_batch");
+    OSLR_SYMBOL(setInputPoll, "retro_set_input_poll");
+    OSLR_SYMBOL(setInputState, "retro_set_input_state");
+    OSLR_SYMBOL(setControllerPortDevice, "retro_set_controller_port_device");
+    OSLR_SYMBOL(reset, "retro_reset");
+    OSLR_SYMBOL(run, "retro_run");
+    OSLR_SYMBOL(serializeSize, "retro_serialize_size");
+    OSLR_SYMBOL(serialize, "retro_serialize");
+    OSLR_SYMBOL(unserialize, "retro_unserialize");
+    OSLR_SYMBOL(loadGame, "retro_load_game");
+    OSLR_SYMBOL(unloadGame, "retro_unload_game");
+    OSLR_SYMBOL(getMemoryData, "retro_get_memory_data");
+    OSLR_SYMBOL(getMemorySize, "retro_get_memory_size");
+    #undef OSLR_SYMBOL
+    if (missing.count > 0) {
+        if (error) *error = [@"El núcleo no es libretro o está incompleto. Falta: " stringByAppendingString:[missing componentsJoinedByString:@", "]];
+        return NO;
+    }
+    if (core.apiVersion() != RETRO_API_VERSION) {
+        if (error) *error = @"Versión de libretro distinta.";
+        return NO;
+    }
+    gCore = core;
+    snprintf(gCorePath, sizeof(gCorePath), "%s", path.fileSystemRepresentation);
+    return YES;
+}
+
+- (UIViewController *)topViewController {
+    UIWindow *keyWindow = nil;
+    for (UIScene *scene in UIApplication.sharedApplication.connectedScenes) {
+        if (![scene isKindOfClass:UIWindowScene.class]) continue;
+        for (UIWindow *window in ((UIWindowScene *)scene).windows) {
+            if (window.isKeyWindow) { keyWindow = window; break; }
+        }
+        if (keyWindow) break;
+    }
+    UIViewController *controller = keyWindow.rootViewController;
+    while (controller.presentedViewController) controller = controller.presentedViewController;
+    return controller;
+}
+
+// MARK: Partidas y estados (hilo de emulación)
+
+- (void)loadSaveRAM {
+    if (_savePath == nil || gCore.getMemoryData == NULL) return;
+    void *memory = gCore.getMemoryData(RETRO_MEMORY_SAVE_RAM);
+    size_t size = gCore.getMemorySize(RETRO_MEMORY_SAVE_RAM);
+    if (memory == NULL || size == 0) return;
+    NSData *data = [NSData dataWithContentsOfFile:_savePath];
+    if (data.length == 0) return;
+    memcpy(memory, data.bytes, MIN(size, data.length));
+}
+
+/// Guarda la partida si cambió desde la última vez (`last` es la copia de entonces).
+- (void)writeSaveRAMIfChanged:(NSMutableData *)last {
+    if (_savePath == nil) return;
+    void *memory = gCore.getMemoryData(RETRO_MEMORY_SAVE_RAM);
+    size_t size = gCore.getMemorySize(RETRO_MEMORY_SAVE_RAM);
+    if (memory == NULL || size == 0) return;
+    if (last.length == size && memcmp(last.mutableBytes, memory, size) == 0) return;
+    NSData *data = [NSData dataWithBytes:memory length:size];
+    if ([data writeToFile:_savePath atomically:YES]) {
+        [last setData:data];
+    }
+}
+
+- (BOOL)saveState {
+    size_t size = gCore.serializeSize();
+    if (size == 0 || _statePath == nil) return NO;
+    NSMutableData *data = [NSMutableData dataWithLength:size];
+    if (!gCore.serialize(data.mutableBytes, size)) return NO;
+    return [data writeToFile:_statePath atomically:YES];
+}
+
+- (BOOL)loadState {
+    NSData *data = _statePath ? [NSData dataWithContentsOfFile:_statePath] : nil;
+    if (data.length == 0) return NO;
+    return gCore.unserialize(data.bytes, data.length);
+}
+
+- (void)showStatus:(NSString *)message {
+    dispatch_async(dispatch_get_main_queue(), ^{ [self.gameController showStatus:message]; });
+}
+
+// MARK: Bucle de emulación
+
+- (void)emulationLoopWithFramework:(NSString *)framework
+                          gamePath:(NSString *)gamePath
+                        completion:(void (^)(BOOL, NSString *))completion {
+    __block NSString *failure = nil;
+    BOOL loaded = NO;
+    @autoreleasepool {
+        gCore.setEnvironment(OSLREnvironment);
+        gCore.setVideoRefresh(OSLRVideoRefresh);
+        gCore.setAudioSample(OSLRAudioSample);
+        gCore.setAudioSampleBatch(OSLRAudioSampleBatch);
+        gCore.setInputPoll(OSLRInputPoll);
+        gCore.setInputState(OSLRInputState);
+        gCore.init();
+        struct retro_system_info coreInfo;
+        memset(&coreInfo, 0, sizeof(coreInfo));
+        gCore.getSystemInfo(&coreInfo);
+        struct retro_game_info game;
+        memset(&game, 0, sizeof(game));
+        snprintf(gGamePath, sizeof(gGamePath), "%s", gamePath.fileSystemRepresentation);
+        game.path = gGamePath;
+        if (!coreInfo.need_fullpath) {
+            _gameData = [NSData dataWithContentsOfFile:gamePath options:NSDataReadingMappedIfSafe error:nil];
+            if (_gameData == nil) failure = OSLRText(_language, @"No se puede leer el archivo del juego.", @"The game file cannot be read.");
+            game.data = _gameData.bytes;
+            game.size = _gameData.length;
+        }
+        if (failure == nil) {
+            loaded = gCore.loadGame(&game);
+            if (!loaded) failure = OSLRText(_language, @"El núcleo no pudo abrir este juego.", @"The core could not open this game.");
+        }
+        if (loaded) {
+            struct retro_system_av_info av;
+            memset(&av, 0, sizeof(av));
+            gCore.getSystemAVInfo(&av);
+            OSLRUpdateGeometry(&av.geometry);
+            gFPS = av.timing.fps > 1 ? av.timing.fps : 60.0;
+            gSampleRate = av.timing.sample_rate > 1000 ? av.timing.sample_rate : 44100.0;
+            gCore.setControllerPortDevice(0, RETRO_DEVICE_JOYPAD);
+            [self loadSaveRAM];
+            // Anillo de sonido de medio segundo.
+            gAudioCapacity = (size_t)(gSampleRate * 0.5);
+            gAudioRing = calloc(gAudioCapacity * 2, sizeof(int16_t));
+            atomic_store(&gAudioWrite, 0);
+            atomic_store(&gAudioRead, 0);
+        }
+    }
+    dispatch_sync(dispatch_get_main_queue(), ^{
+        if (loaded) {
+            self->_audio = [OSLRAudio new];
+            [self->_audio startWithSampleRate:gSampleRate];
+        } else {
+            // Si no arranca, solo se avisa por `completion` (no también por `ended`).
+            self.endedHandler = nil;
+        }
+        completion(loaded, failure ?: @"");
+    });
+    if (!loaded) {
+        gCore.deinit();
+        [self finishSession];
+        return;
+    }
+
+    NSMutableData *lastSave = [NSMutableData new];
+    {
+        void *memory = gCore.getMemoryData(RETRO_MEMORY_SAVE_RAM);
+        size_t size = gCore.getMemorySize(RETRO_MEMORY_SAVE_RAM);
+        if (memory && size) [lastSave setData:[NSData dataWithBytes:memory length:size]];
+    }
+    double frameTime = 1.0 / gFPS;
+    double next = OSLRNow();
+    double lastAutosave = next;
+    while (atomic_load(&_running) && !atomic_load(&gShutdownRequested)) {
+        @autoreleasepool {
+            int action = atomic_exchange(&_pendingAction, -1);
+            if (action == OSLRMenuActionSaveState) {
+                BOOL ok = [self saveState];
+                [self showStatus:ok ? OSLRText(_language, @"Estado guardado", @"State saved") : OSLRText(_language, @"No se pudo guardar el estado", @"Could not save the state")];
+            } else if (action == OSLRMenuActionLoadState) {
+                BOOL ok = [self loadState];
+                [self showStatus:ok ? OSLRText(_language, @"Estado cargado", @"State loaded") : OSLRText(_language, @"No hay estado guardado", @"No saved state")];
+            } else if (action == OSLRMenuActionReset) {
+                gCore.reset();
+            }
+            if (atomic_load(&_paused)) {
+                [NSThread sleepForTimeInterval:0.02];
+                next = OSLRNow();
+                continue;
+            }
+            if (gHasFrameTimeCallback) gFrameTimeCallback.callback(gFrameTimeCallback.reference);
+            gCore.run();
+            // Ritmo del juego; si el sonido se llena o se vacía, se corrige un poco.
+            double fill = OSLRAudioFill();
+            double adjust = fill > 0.6 ? 1.02 : (fill < 0.2 ? 0.98 : 1.0);
+            next += frameTime * adjust;
+            double now = OSLRNow();
+            if (next > now) {
+                [NSThread sleepForTimeInterval:next - now];
+            } else if (now - next > 0.25) {
+                next = now; // muy atrasado (o vuelve de una pausa): sin intentar recuperar
+            }
+            if (now - lastAutosave > 10) {
+                lastAutosave = now;
+                [self writeSaveRAMIfChanged:lastSave];
+            }
+        }
+    }
+    [self writeSaveRAMIfChanged:lastSave];
+    gCore.unloadGame();
+    gCore.deinit();
+    [self finishSession];
+}
+
+- (void)finishSession {
+    dispatch_async(dispatch_get_main_queue(), ^{
+        [self->_audio stop];
+        self->_audio = nil;
+        self->_gameData = nil;
+        free(gAudioRing);
+        gAudioRing = NULL;
+        gAudioCapacity = 0;
+        gMessageHandler = nil;
+        atomic_store(&gPadBits, 0);
+        atomic_store(&gTouchBits, 0);
+        atomic_store(&gPointerDown, false);
+        OSLRGameViewController *controller = self.gameController;
+        self.gameController = nil;
+        controller.closing = YES;
+        [controller releaseExternalDisplay];
+        void (^done)(void) = ^{
+            self.busy = NO;
+            void (^ended)(void) = self.endedHandler;
+            self.endedHandler = nil;
+            if (ended) ended();
+        };
+        UIViewController *presenter = controller.presentingViewController;
+        if (presenter) {
+            [presenter dismissViewControllerAnimated:NO completion:done];
+        } else {
+            done();
+        }
+    });
+}
+
+- (void)launchGameAtPath:(NSString *)gamePath
+                   title:(NSString *)title
+               framework:(NSString *)framework
+                  layout:(NSString *)layout
+         systemDirectory:(NSString *)systemDirectory
+           saveDirectory:(NSString *)saveDirectory
+             coreOptions:(NSDictionary<NSString *, NSString *> *)coreOptions
+             hostOptions:(NSDictionary<NSString *, NSString *> *)hostOptions
+                language:(NSString *)language
+              completion:(void (^)(BOOL, NSString *))completion
+                   ended:(void (^)(void))ended {
+    if (self.busy) {
+        completion(NO, OSLRText(language, @"Ya hay una partida abierta.", @"A game is already running."));
+        return;
+    }
+    if (![NSFileManager.defaultManager isReadableFileAtPath:gamePath]) {
+        completion(NO, OSLRText(language, @"No se puede leer el archivo del juego.", @"The game file cannot be read."));
+        return;
+    }
+    NSString *error = nil;
+    if (![self loadCore:framework error:&error]) {
+        completion(NO, error ?: @"No se pudo cargar el núcleo.");
+        return;
+    }
+    UIViewController *root = [self topViewController];
+    if (root == nil) {
+        completion(NO, @"No se pudo crear la pantalla del juego.");
+        return;
+    }
+    self.busy = YES;
+    self.endedHandler = ended;
+    _language = [language copy];
+    [NSFileManager.defaultManager createDirectoryAtPath:systemDirectory withIntermediateDirectories:YES attributes:nil error:nil];
+    [NSFileManager.defaultManager createDirectoryAtPath:saveDirectory withIntermediateDirectories:YES attributes:nil error:nil];
+    snprintf(gSystemDir, sizeof(gSystemDir), "%s", systemDirectory.fileSystemRepresentation);
+    snprintf(gSaveDir, sizeof(gSaveDir), "%s", saveDirectory.fileSystemRepresentation);
+    NSString *base = gamePath.lastPathComponent.stringByDeletingPathExtension;
+    _savePath = [saveDirectory stringByAppendingPathComponent:[base stringByAppendingPathExtension:@"srm"]];
+    _statePath = [saveDirectory stringByAppendingPathComponent:[base stringByAppendingPathExtension:@"state"]];
+    gLanguage = [language isEqualToString:@"en"] ? RETRO_LANGUAGE_ENGLISH : RETRO_LANGUAGE_SPANISH;
+    gUserOptions = [coreOptions copy] ?: @{};
+    gDefaultOptions = [NSMutableDictionary new];
+    gOptionValues = [NSMutableDictionary new];
+    gOptionStrings = [NSMutableDictionary new];
+    gPixelFormat = RETRO_PIXEL_FORMAT_0RGB1555;
+    gHasFrameTimeCallback = NO;
+    atomic_store(&gShutdownRequested, false);
+    atomic_store(&gInputSuspended, false);
+    atomic_store(&gFrameSerial, 0);
+    atomic_store(&gFrameCount, 0);
+    atomic_store(&gAspect, 4.0 / 3.0);
+    atomic_store(&_paused, false);
+    atomic_store(&_pendingAction, -1);
+    atomic_store(&_running, true);
+    os_unfair_lock_lock(&gFrameLock);
+    gFrameWidth = 0;
+    gFrameHeight = 0;
+    os_unfair_lock_unlock(&gFrameLock);
+
+    OSLRGameViewController *controller = [OSLRGameViewController new];
+    controller.language = language;
+    controller.layout = layout;
+    controller.title = title;
+    controller.touchAlways = [hostOptions[@"touchAlways"] boolValue];
+    controller.touchHaptics = [hostOptions[@"touchHaptics"] boolValue];
+    controller.stretch = [hostOptions[@"aspect"] isEqualToString:@"stretch"];
+    controller.smooth = [hostOptions[@"filter"] isEqualToString:@"linear"];
+    controller.pointer = [layout isEqualToString:@"nds"] && ![hostOptions[@"touchPointer"] isEqualToString:@"false"];
+    NSMutableDictionary<NSNumber *, NSNumber *> *map = [NSMutableDictionary new];
+    for (NSString *key in hostOptions) {
+        if (![key hasPrefix:@"map."]) continue;
+        int from = OSLRRetroButtonForMapID([key substringFromIndex:4]);
+        int to = OSLRRetroButtonForMapID(hostOptions[key]);
+        if (from >= 0 && to >= 0) map[@(from)] = @(to);
+    }
+    controller.buttonMap = map;
+    if ([hostOptions[@"hud"] boolValue]) {
+        OSPerfHUD *hud = [[OSPerfHUD alloc] initWithFrame:CGRectZero];
+        hud.showFrameTime = NO;
+        hud.showFifo = NO;
+        hud.showMemory = ![hostOptions[@"hudMemory"] isEqualToString:@"false"];
+        hud.showThermal = ![hostOptions[@"hudThermal"] isEqualToString:@"false"];
+        hud.showBattery = [hostOptions[@"hudBattery"] boolValue];
+        controller.hud = hud;
+    }
+    __weak OSLibretroEngine *weakSelf = self;
+    __weak OSLRGameViewController *weakController = controller;
+    controller.menuChanged = ^(BOOL open) {
+        OSLibretroEngine *strongSelf = weakSelf;
+        if (!strongSelf) return;
+        atomic_store(&strongSelf->_paused, open);
+        atomic_store(&gInputSuspended, open);
+    };
+    controller.menuAction = ^(NSInteger action) {
+        OSLibretroEngine *strongSelf = weakSelf;
+        if (!strongSelf) return;
+        if (action == OSLRMenuActionQuit) {
+            weakController.closing = YES;
+            atomic_store(&strongSelf->_running, false);
+            atomic_store(&strongSelf->_paused, false);
+            return;
+        }
+        if (action != OSLRMenuActionResume) atomic_store(&strongSelf->_pendingAction, (int)action);
+    };
+    gMessageHandler = ^(NSString *message) {
+        [weakController showStatus:message];
+    };
+    [controller loadViewIfNeeded];
+    [root presentViewController:controller animated:NO completion:nil];
+    self.gameController = controller;
+
+    NSThread *thread = [[NSThread alloc] initWithBlock:^{
+        [self emulationLoopWithFramework:framework gamePath:gamePath completion:^(BOOL success, NSString *message) {
+            if (success) {
+                BOOL physical = GCController.current.extendedGamepad != nil;
+                [weakController showStatus:physical ? OSLRText(language, @"Home o SELECT+START: menú", @"Home or SELECT+START: menu")
+                                                    : OSLRText(language, @"Botón ☰: menú", @"☰ button: menu")];
+            }
+            completion(success, message);
+        }];
+    }];
+    thread.name = @"OmniStation libretro";
+    thread.stackSize = 8 * 1024 * 1024;
+    thread.qualityOfService = NSQualityOfServiceUserInteractive;
+    _thread = thread;
+    [thread start];
+}
+
+@end
