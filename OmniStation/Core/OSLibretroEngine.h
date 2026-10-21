@@ -58,6 +58,11 @@ NS_ASSUME_NONNULL_BEGIN
 /// Se llama (en el hilo principal) cuando se cambia una opción desde el menú de la partida.
 @property (nonatomic, copy, nullable) void (^menuOptionChanged)(NSString *key, NSString *value);
 
+/// Se llama (en el hilo principal) cuando OmniStation suelta el depurador a los pocos segundos de
+/// empezar una partida (la memoria de JIT ya está preparada). Con SideStore, para cerrar la
+/// extensión de JIT.
+@property (nonatomic, copy, nullable) void (^debuggerReleasedHandler)(void);
+
 /// Arranca `gamePath` con el núcleo `framework`.
 /// - layout: botones del mando táctil («nes», «snes», «gb», «gba», «nds», «ps1», «n64», «psp», «dc»).
 /// - systemDirectory: BIOS; saveDirectory: partidas (.srm) y estados (.state).

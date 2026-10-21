@@ -1148,7 +1148,6 @@ static NSString *OSString(const char *text, NSString *fallback) {
 // Dos núcleos posibles: el de NeoStation (ARMSX2Core.framework) y el compilado por
 // OmniStation (ARMSX2CoreOmni.framework). Se elige en Ajustes; una vez cargado, no cambia
 // hasta volver a abrir la app (un núcleo nunca se descarga).
-static NSString *const kOSCoreFlavorKey = @"armsx2CoreFlavor";
 static NSString *const kOSFlavorNeoStation = @"neostation";
 static NSString *const kOSFlavorOmniStation = @"omnistation";
 static NSString *gLoadedCorePath = nil;
@@ -1169,14 +1168,8 @@ static NSString *gLoadedFlavor = nil;
 }
 
 + (NSString *)coreFlavor {
-    if (gLoadedFlavor.length > 0) return gLoadedFlavor;
-    NSString *preferred = [NSUserDefaults.standardUserDefaults stringForKey:kOSCoreFlavorKey];
-    BOOL wantsOmni = [preferred isEqualToString:kOSFlavorOmniStation];
-    if (wantsOmni && [self omniStationCoreBundled]) return kOSFlavorOmniStation;
-    if (!wantsOmni && [self neoStationCoreBundled]) return kOSFlavorNeoStation;
-    if ([self neoStationCoreBundled]) return kOSFlavorNeoStation;
-    if ([self omniStationCoreBundled]) return kOSFlavorOmniStation;
-    return wantsOmni ? kOSFlavorOmniStation : kOSFlavorNeoStation;
+    // Solo va el núcleo compilado por OmniStation (Cores/ARMSX2): el de NeoStation ya no se usa.
+    return kOSFlavorOmniStation;
 }
 
 + (NSString *)loadedCoreFlavor {

@@ -212,6 +212,9 @@ static _Atomic uint32_t gTouchCBits; // 1 arriba, 2 abajo, 4 izquierda, 8 derech
 static bool gJITCapable;
 // El juego quiere JIT (ajuste «Usar JIT»): el bloque permanente solo se da si lo quiere.
 static bool gJITWanted;
+// Núcleo que pide su memoria de JIT a OmniStation, y si de verdad se le dio.
+static bool gJITPoolCore;
+static _Atomic bool gJITPoolGiven;
 
 // Proporción sacada del propio fotograma (NDS: cambia con la colocación de las pantallas).
 static bool gUseFrameAspect;
@@ -1761,6 +1764,7 @@ static bool OSLREnvironment(unsigned command, void *data) {
             if (rx == NULL) return false;
             request->rx = rx;
             request->rw = (uint8_t *)rx + gJITPoolDiff;
+            atomic_store(&gJITPoolGiven, true);
             [gJITSessionBlocks addObject:[NSValue valueWithPointer:rx]];
             return true;
         }
@@ -3140,6 +3144,11 @@ typedef NS_ENUM(NSInteger, OSLRMenuAction) {
         self.jitOn = NO;
         self.jitText = [self t:@"Sin JIT: el depurador no preparó la memoria del núcleo" en:@"No JIT: the debugger did not prepare the core's memory"];
         [self updateJITLabel];
+    } else if (self.jitOn && gJITPoolCore && !atomic_load(&gJITPoolGiven)) {
+        // Núcleo con JIT permanente al que no se le pudo dar: va en modo intérprete.
+        self.jitOn = NO;
+        self.jitText = [NSString stringWithFormat:@"%@ (%@)", [self t:@"Sin JIT: no se pudo preparar el JIT permanente" en:@"No JIT: the permanent JIT could not be prepared"], gJITPoolStatus ?: @"?"];
+        [self updateJITLabel];
     }
     _menuVisible = YES;
     _menuIndex = 0;
@@ -3675,6 +3684,9 @@ typedef NS_ENUM(NSInteger, OSLRMenuAction) {
     double next = OSLRNow();
     double lastAutosave = next;
     double lastMemoryCheck = 0;
+    // El depurador se suelta solo a los pocos segundos de jugar (ver abajo).
+    double sessionStart = next;
+    BOOL debuggerSettled = NO;
     while (atomic_load(&gRunning) && !atomic_load(&gShutdownRequested)) {
         @autoreleasepool {
             int action = atomic_exchange(&gPendingAction, -1);
@@ -3741,6 +3753,21 @@ typedef NS_ENUM(NSInteger, OSLRMenuAction) {
             if (now - lastAutosave > 10) {
                 lastAutosave = now;
                 [self writeSaveRAMIfChanged:lastSave];
+            }
+            // A los 4 s de partida, el núcleo ya preparó su memoria de JIT. Si el depurador sigue
+            // enganchado, se suelta: con él puesto, cada aviso del sistema (los fallos de página que
+            // usan Dolphin o melonDS para ir rápido) pasa por StikDebug y la VPN, lo que calienta,
+            // ralentiza, hace lento el cierre y corta el JIT si cambia la red. Sin él, el JIT ya
+            // preparado sigue valiendo.
+            if (!debuggerSettled && now - sessionStart > 4.0) {
+                debuggerSettled = YES;
+                if (gJITCapable && OSLRUsesJITScript() && OSLRIsTraced()) {
+                    OSLRTrace(@"JIT: se suelta el depurador (la memoria de JIT ya está preparada)", NO);
+                    OSLRInstallTrapGuard(YES);
+                    OSLRUniversalDetach();
+                    void (^released)(void) = self.debuggerReleasedHandler;
+                    if (released) dispatch_async(dispatch_get_main_queue(), released);
+                }
             }
             if (now - lastMemoryCheck > 1.0) {
                 lastMemoryCheck = now;
@@ -3904,6 +3931,8 @@ typedef NS_ENUM(NSInteger, OSLRMenuAction) {
     BOOL pooled = [hostOptions[@"jitPool"] isEqualToString:@"true"] && [OSLibretroEngine persistentJITReady];
     gJITCapable = gJITWanted && ([OSLibretroEngine jitActive] || pooled);
     gJITSessionBlocks = [NSMutableArray new];
+    gJITPoolCore = [hostOptions[@"jitPool"] isEqualToString:@"true"];
+    atomic_store(&gJITPoolGiven, false);
     gJITUnanswered = 0;
     atomic_store(&gLoopDone, false);
     OSLRTrace([NSString stringWithFormat:@"abrir: %@ con %@ (JIT %@, depurador %@)", gamePath.lastPathComponent, framework,
