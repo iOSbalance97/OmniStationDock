@@ -13,15 +13,21 @@ NS_ASSUME_NONNULL_BEGIN
 /// ¿Trae esta compilación el núcleo `framework` («snes9x.libretro.framework»)?
 + (BOOL)coreAvailable:(NSString *)framework;
 
+/// ¿Tiene OmniStation JIT ahora mismo? (Depurador enganchado; en iOS 26, que siga enganchado.)
+@property (class, nonatomic, readonly) BOOL jitActive;
+
 /// Hay una partida abierta.
 @property (nonatomic, readonly) BOOL busy;
 
 /// Arranca `gamePath` con el núcleo `framework`.
-/// - layout: botones del mando táctil («nes», «snes», «gb», «gba», «nds»).
+/// - layout: botones del mando táctil («nes», «snes», «gb», «gba», «nds», «ps1», «n64», «psp», «dc»).
 /// - systemDirectory: BIOS; saveDirectory: partidas (.srm) y estados (.state).
 /// - coreOptions: opciones del núcleo (sus claves); las que no estén, las de por defecto del núcleo.
 /// - hostOptions: de OmniStation («filter» nearest/linear, «aspect» core/stretch, «hud», «hudThermal»,
-///   «hudMemory», «hudBattery», «touchPointer», «touchAlways», «touchHaptics», «map.<físico>» = botón).
+///   «hudMemory», «hudBattery», «touchPointer», «touchAlways», «touchHaptics», «map.<físico>» = botón,
+///   «gpu» (imagen por OpenGL ES), «jit» (dejar usar el JIT si lo hay), «frameAspect» (proporción
+///   del fotograma), «orient.key», «orient.portrait», «orient.landscape» (opción del núcleo que
+///   cambia al girar el iPhone)).
 /// `completion` se llama al abrir la pantalla (o si falla) y `ended` al salir del juego.
 - (void)launchGameAtPath:(NSString *)gamePath
                    title:(NSString *)title

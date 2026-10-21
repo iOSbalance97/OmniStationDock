@@ -57,6 +57,20 @@ NS_ASSUME_NONNULL_BEGIN
                   titleID:(NSString *)titleID
                completion:(void (^)(NSArray<NSDictionary<NSString *, id> *> *_Nullable items, NSString *_Nullable error))completion;
 
+/// Title ID y título de un juego tal como los ve la app MeloNX («titleId» y «titleName»), leídos
+/// del archivo con este mismo núcleo: con ellos su enlace abre el juego sin escribir el nombre.
+/// Necesita las claves. Síncrono: llamar fuera del hilo principal. nil si no se pudo.
+- (nullable NSDictionary<NSString *, NSString *> *)identifyGameAtPath:(NSString *)path;
+
+/// JIT para OmniStation con la extensión (para los núcleos libretro): engancha el depurador con
+/// el script universal de StikDebug y lo deja enganchado hasta `releaseSharedJIT`.
+/// `completion` llega en el hilo principal.
+- (void)prepareSharedJITWithPairing:(NSData *)pairingData
+                         completion:(void (^)(BOOL success, NSString *message))completion;
+
+/// Suelta el depurador enganchado con `prepareSharedJITWithPairing:completion:`.
+- (void)releaseSharedJIT;
+
 /// Arranca un juego a pantalla completa. `settings`: ajustes de emulación de la partida (texto,
 /// ver EmulatorConfig.swift). `progress` y `completion` llegan en el hilo principal; `ended`, al
 /// cerrar la partida.

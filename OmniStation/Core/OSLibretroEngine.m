@@ -10,6 +10,14 @@
 // • Mando: el físico se lee con su manejador de cambios (GameController) y el táctil con botones;
 //   el estado va en atómicos que el núcleo lee en input_state.
 // • Partidas (.srm) al salir y cada pocos segundos si cambian; estado rápido (.state) en el menú.
+// • Imagen por GPU (PS1, N64, PSP, Dreamcast): OpenGL ES 3. El núcleo pinta en un framebuffer
+//   de OmniStation y cada fotograma se copia a la pantalla (CAEAGLLayer) desde el mismo hilo.
+// • JIT: el núcleo lo usa solo si OmniStation lo tiene (depurador enganchado); si no, va en modo
+//   intérprete. En iOS 26 sin depurador, las peticiones de JIT del núcleo (brk #0xf00d) se
+//   contestan «no» en vez de cerrar la app.
+#define GLES_SILENCE_DEPRECATION 1
+// OpenGL ES está marcado como obsoleto, pero sigue en iOS y es lo que usan estos núcleos.
+#pragma clang diagnostic ignored "-Wdeprecated-declarations"
 #import "OSLibretroEngine.h"
 #import "OSExternalDisplay.h"
 #import "OSPerfHUD.h"
@@ -18,11 +26,32 @@
 #import <AVFoundation/AVFoundation.h>
 #import <GameController/GameController.h>
 #import <QuartzCore/QuartzCore.h>
+#import <OpenGLES/EAGL.h>
+#import <OpenGLES/EAGLDrawable.h>
+#import <OpenGLES/ES3/gl.h>
+#import <OpenGLES/ES3/glext.h>
 #import <dlfcn.h>
 #import <os/lock.h>
 #import <stdatomic.h>
 #import <mach/mach_time.h>
 #import <stdarg.h>
+#import <signal.h>
+#import <sys/sysctl.h>
+#import <sys/types.h>
+#import <sys/utsname.h>
+#import <unistd.h>
+
+extern int csops(pid_t pid, unsigned int ops, void *useraddr, size_t usersize);
+
+#ifndef CS_OPS_STATUS
+#define CS_OPS_STATUS 0
+#endif
+#ifndef CS_DEBUGGED
+#define CS_DEBUGGED 0x10000000
+#endif
+#ifndef P_TRACED
+#define P_TRACED 0x00000800
+#endif
 
 static NSString *OSLRText(NSString *language, NSString *spanish, NSString *english) {
     return [language isEqualToString:@"en"] ? english : spanish;
@@ -115,10 +144,103 @@ static _Atomic bool gShutdownRequested;
 // Bucle de emulación: en marcha, en pausa (menú) y lo que pide el menú (-1: nada).
 static _Atomic bool gRunning;
 static _Atomic bool gPaused;
+// En segundo plano no se puede usar la GPU (iOS cierra la app): el bucle espera.
+static _Atomic bool gBackground;
 static _Atomic int gPendingAction = -1;
 
 typedef void (^OSLRMessageBlock)(NSString *message);
 static OSLRMessageBlock gMessageHandler;
+
+// Mando táctil: stick analógico (N64, PSP, Dreamcast) y botones C de N64 (stick derecho).
+static _Atomic int32_t gTouchAxis[2];
+static _Atomic bool gTouchStickActive;
+static _Atomic uint32_t gTouchCBits; // 1 arriba, 2 abajo, 4 izquierda, 8 derecha
+
+// JIT: si el núcleo puede usarlo en esta partida.
+static bool gJITCapable;
+
+// Proporción sacada del propio fotograma (NDS: cambia con la colocación de las pantallas).
+static bool gUseFrameAspect;
+static unsigned gAspectFrameWidth, gAspectFrameHeight;
+
+// Opción que cambia con la orientación (NDS: pantallas una encima de otra o al lado).
+static NSString *gOrientKey;
+static NSString *gOrientPortrait;
+static NSString *gOrientLandscape;
+static _Atomic int gOrientWanted = -1; // 1 vertical, 0 horizontal
+static int gOrientApplied = -1;
+static _Atomic bool gVariablesChanged;
+
+// Imagen por GPU (OpenGL ES 3). Solo se toca desde el hilo de emulación, salvo la capa, que la
+// crea la pantalla antes de arrancar.
+static struct retro_hw_render_callback gHWCallback;
+static bool gHWRequested;
+static EAGLContext *gGLContext;
+static GLuint gGLFramebuffer, gGLColorTexture, gGLDepthBuffer;
+static unsigned gGLWidth, gGLHeight;
+static GLuint gGLScreenFramebuffer, gGLScreenColor;
+static GLint gGLScreenWidth, gGLScreenHeight;
+static CAEAGLLayer *gGLLayer;
+static _Atomic bool gGLLayerChanged;
+static _Atomic bool gGLLayerShown;
+static bool gGLSmooth;
+
+// MARK: JIT y depurador
+
+static BOOL OSLRIsDebugged(void) {
+    uint32_t flags = 0;
+    if (csops(getpid(), CS_OPS_STATUS, &flags, sizeof(flags)) != 0) return NO;
+    return (flags & CS_DEBUGGED) != 0;
+}
+
+/// Hay un depurador enganchado ahora mismo (CS_DEBUGGED se queda aunque se suelte).
+static BOOL OSLRIsTraced(void) {
+    int mib[4] = {CTL_KERN, KERN_PROC, KERN_PROC_PID, getpid()};
+    struct kinfo_proc info;
+    size_t size = sizeof(info);
+    memset(&info, 0, sizeof(info));
+    if (sysctl(mib, 4, &info, &size, NULL, 0) != 0) return NO;
+    return (info.kp_proc.p_flag & P_TRACED) != 0;
+}
+
+static BOOL OSLRUsesJITScript(void) {
+    return NSProcessInfo.processInfo.operatingSystemVersion.majorVersion >= 26;
+}
+
+// Sin depurador, un «brk #0xf00d» (petición de JIT del núcleo) cerraría la app: se contesta 0.
+static struct sigaction gPreviousTrapAction;
+static bool gTrapGuardInstalled;
+
+static void OSLRTrapHandler(int signalNumber, siginfo_t *info, void *context) {
+    ucontext_t *state = (ucontext_t *)context;
+    if (state != NULL && state->uc_mcontext != NULL) {
+        uint64_t pc = state->uc_mcontext->__ss.__pc;
+        uint32_t instruction = pc != 0 ? *(const uint32_t *)(uintptr_t)pc : 0;
+        if (instruction == 0xD43E01A0u) { // brk #0xf00d
+            state->uc_mcontext->__ss.__pc = pc + 4;
+            state->uc_mcontext->__ss.__x[0] = 0;
+            return;
+        }
+    }
+    // Otra trampa: lo de siempre.
+    sigaction(SIGTRAP, &gPreviousTrapAction, NULL);
+}
+
+static void OSLRInstallTrapGuard(void) {
+    if (gTrapGuardInstalled || !OSLRUsesJITScript() || OSLRIsTraced()) return;
+    struct sigaction action;
+    memset(&action, 0, sizeof(action));
+    action.sa_sigaction = OSLRTrapHandler;
+    action.sa_flags = SA_SIGINFO;
+    sigemptyset(&action.sa_mask);
+    if (sigaction(SIGTRAP, &action, &gPreviousTrapAction) == 0) gTrapGuardInstalled = true;
+}
+
+static void OSLRRemoveTrapGuard(void) {
+    if (!gTrapGuardInstalled) return;
+    sigaction(SIGTRAP, &gPreviousTrapAction, NULL);
+    gTrapGuardInstalled = false;
+}
 
 // MARK: Opciones
 
@@ -208,7 +330,7 @@ static void OSLRShowMessage(const char *text) {
 }
 
 static void OSLRUpdateGeometry(const struct retro_game_geometry *geometry) {
-    if (geometry == NULL) return;
+    if (geometry == NULL || gUseFrameAspect) return;
     double aspect = geometry->aspect_ratio;
     if (aspect <= 0 && geometry->base_height > 0) aspect = (double)geometry->base_width / (double)geometry->base_height;
     if (aspect > 0.1 && aspect < 10) {
@@ -217,8 +339,163 @@ static void OSLRUpdateGeometry(const struct retro_game_geometry *geometry) {
     }
 }
 
+/// Proporción del fotograma tal cual (píxeles cuadrados), si la partida la usa.
+static void OSLRNoteFrameSize(unsigned width, unsigned height) {
+    if (!gUseFrameAspect || width == 0 || height == 0) return;
+    if (width == gAspectFrameWidth && height == gAspectFrameHeight) return;
+    gAspectFrameWidth = width;
+    gAspectFrameHeight = height;
+    atomic_store(&gAspect, (double)width / (double)height);
+    atomic_store(&gGeometryChanged, true);
+}
+
+// MARK: Imagen por GPU
+
+static uintptr_t OSLRCurrentFramebuffer(void) {
+    return gGLFramebuffer;
+}
+
+static retro_proc_address_t OSLRProcAddress(const char *symbol) {
+    if (symbol == NULL) return NULL;
+    static void *library = NULL;
+    if (library == NULL) library = dlopen("/System/Library/Frameworks/OpenGLES.framework/OpenGLES", RTLD_LAZY | RTLD_GLOBAL);
+    void *address = library ? dlsym(library, symbol) : NULL;
+    if (address == NULL) address = dlsym(RTLD_DEFAULT, symbol);
+    return (retro_proc_address_t)address;
+}
+
+/// (Re)hace el sitio donde pinta el núcleo. Mantiene el mismo framebuffer (el núcleo lo pide
+/// cada vez) y deja todo como estaba.
+static void OSLRResizeGL(unsigned width, unsigned height) {
+    GLint maximum = 4096;
+    glGetIntegerv(GL_MAX_RENDERBUFFER_SIZE, &maximum);
+    if (maximum < 1024) maximum = 1024;
+    width = MIN(MAX(width, 16u), (unsigned)maximum);
+    height = MIN(MAX(height, 16u), (unsigned)maximum);
+    GLint previousTexture = 0, previousRenderbuffer = 0, previousFramebuffer = 0;
+    glGetIntegerv(GL_TEXTURE_BINDING_2D, &previousTexture);
+    glGetIntegerv(GL_RENDERBUFFER_BINDING, &previousRenderbuffer);
+    glGetIntegerv(GL_FRAMEBUFFER_BINDING, &previousFramebuffer);
+    gGLWidth = width;
+    gGLHeight = height;
+    glBindTexture(GL_TEXTURE_2D, gGLColorTexture);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, (GLsizei)width, (GLsizei)height, 0, GL_RGBA, GL_UNSIGNED_BYTE, NULL);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+    glBindRenderbuffer(GL_RENDERBUFFER, gGLDepthBuffer);
+    glRenderbufferStorage(GL_RENDERBUFFER, GL_DEPTH24_STENCIL8, (GLsizei)width, (GLsizei)height);
+    glBindFramebuffer(GL_FRAMEBUFFER, gGLFramebuffer);
+    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, gGLColorTexture, 0);
+    glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_RENDERBUFFER, gGLDepthBuffer);
+    glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_STENCIL_ATTACHMENT, GL_RENDERBUFFER, gGLDepthBuffer);
+    glBindTexture(GL_TEXTURE_2D, (GLuint)previousTexture);
+    glBindRenderbuffer(GL_RENDERBUFFER, (GLuint)previousRenderbuffer);
+    glBindFramebuffer(GL_FRAMEBUFFER, (GLuint)previousFramebuffer);
+}
+
+/// Crea el contexto y el framebuffer del núcleo (después de cargar el juego).
+static BOOL OSLRCreateGL(unsigned width, unsigned height) {
+    gGLContext = [[EAGLContext alloc] initWithAPI:kEAGLRenderingAPIOpenGLES3];
+    if (gGLContext == nil || ![EAGLContext setCurrentContext:gGLContext]) {
+        gGLContext = nil;
+        return NO;
+    }
+    glGenFramebuffers(1, &gGLFramebuffer);
+    glGenTextures(1, &gGLColorTexture);
+    glGenRenderbuffers(1, &gGLDepthBuffer);
+    glGenFramebuffers(1, &gGLScreenFramebuffer);
+    glGenRenderbuffers(1, &gGLScreenColor);
+    OSLRResizeGL(width, height);
+    glBindFramebuffer(GL_FRAMEBUFFER, gGLFramebuffer);
+    BOOL complete = glCheckFramebufferStatus(GL_FRAMEBUFFER) == GL_FRAMEBUFFER_COMPLETE;
+    glViewport(0, 0, (GLsizei)gGLWidth, (GLsizei)gGLHeight);
+    glClearColor(0, 0, 0, 1);
+    glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT | GL_STENCIL_BUFFER_BIT);
+    gGLScreenWidth = 0;
+    gGLScreenHeight = 0;
+    atomic_store(&gGLLayerChanged, true);
+    return complete;
+}
+
+static void OSLRDestroyGL(void) {
+    if (gGLContext == nil) return;
+    [EAGLContext setCurrentContext:gGLContext];
+    GLuint framebuffers[2] = {gGLFramebuffer, gGLScreenFramebuffer};
+    GLuint renderbuffers[2] = {gGLDepthBuffer, gGLScreenColor};
+    glDeleteFramebuffers(2, framebuffers);
+    glDeleteRenderbuffers(2, renderbuffers);
+    glDeleteTextures(1, &gGLColorTexture);
+    gGLFramebuffer = gGLScreenFramebuffer = gGLDepthBuffer = gGLScreenColor = gGLColorTexture = 0;
+    gGLWidth = gGLHeight = 0;
+    [EAGLContext setCurrentContext:nil];
+    gGLContext = nil;
+}
+
+/// Copia lo que ha pintado el núcleo (width × height) a la pantalla.
+static void OSLRPresentGL(unsigned width, unsigned height) {
+    if (gGLContext == nil || gGLLayer == nil || width == 0 || height == 0 || atomic_load(&gBackground)) return;
+    GLint previousRead = 0, previousDraw = 0, previousRenderbuffer = 0;
+    glGetIntegerv(GL_READ_FRAMEBUFFER_BINDING, &previousRead);
+    glGetIntegerv(GL_DRAW_FRAMEBUFFER_BINDING, &previousDraw);
+    glGetIntegerv(GL_RENDERBUFFER_BINDING, &previousRenderbuffer);
+    if (atomic_exchange(&gGLLayerChanged, false)) {
+        glBindRenderbuffer(GL_RENDERBUFFER, gGLScreenColor);
+        gGLScreenWidth = 0;
+        gGLScreenHeight = 0;
+        if ([gGLContext renderbufferStorage:GL_RENDERBUFFER fromDrawable:gGLLayer]) {
+            glGetRenderbufferParameteriv(GL_RENDERBUFFER, GL_RENDERBUFFER_WIDTH, &gGLScreenWidth);
+            glGetRenderbufferParameteriv(GL_RENDERBUFFER, GL_RENDERBUFFER_HEIGHT, &gGLScreenHeight);
+            glBindFramebuffer(GL_FRAMEBUFFER, gGLScreenFramebuffer);
+            glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_RENDERBUFFER, gGLScreenColor);
+        }
+    }
+    if (gGLScreenWidth > 0 && gGLScreenHeight > 0) {
+        GLboolean scissor = glIsEnabled(GL_SCISSOR_TEST);
+        if (scissor) glDisable(GL_SCISSOR_TEST);
+        GLint w = (GLint)MIN(width, gGLWidth), h = (GLint)MIN(height, gGLHeight);
+        GLenum filter = gGLSmooth ? GL_LINEAR : GL_NEAREST;
+        glBindFramebuffer(GL_READ_FRAMEBUFFER, gGLFramebuffer);
+        glBindFramebuffer(GL_DRAW_FRAMEBUFFER, gGLScreenFramebuffer);
+        if (gHWCallback.bottom_left_origin) {
+            glBlitFramebuffer(0, 0, w, h, 0, 0, gGLScreenWidth, gGLScreenHeight, GL_COLOR_BUFFER_BIT, filter);
+        } else {
+            glBlitFramebuffer(0, 0, w, h, 0, gGLScreenHeight, gGLScreenWidth, 0, GL_COLOR_BUFFER_BIT, filter);
+        }
+        if (scissor) glEnable(GL_SCISSOR_TEST);
+        glBindRenderbuffer(GL_RENDERBUFFER, gGLScreenColor);
+        [gGLContext presentRenderbuffer:GL_RENDERBUFFER];
+        if (!atomic_exchange(&gGLLayerShown, true)) {
+            dispatch_async(dispatch_get_main_queue(), ^{ gGLLayer.hidden = NO; });
+        }
+    }
+    glBindFramebuffer(GL_READ_FRAMEBUFFER, (GLuint)previousRead);
+    glBindFramebuffer(GL_DRAW_FRAMEBUFFER, (GLuint)previousDraw);
+    glBindRenderbuffer(GL_RENDERBUFFER, (GLuint)previousRenderbuffer);
+}
+
 static bool OSLREnvironment(unsigned command, void *data) {
     switch (command) {
+        case RETRO_ENVIRONMENT_SET_HW_RENDER: {
+            struct retro_hw_render_callback *callback = data;
+            if (callback == NULL || gGLLayer == nil) return false;
+            enum retro_hw_context_type type = callback->context_type;
+            BOOL gles = type == RETRO_HW_CONTEXT_OPENGLES2 || type == RETRO_HW_CONTEXT_OPENGLES3 ||
+                (type == RETRO_HW_CONTEXT_OPENGLES_VERSION && callback->version_major <= 3);
+            if (!gles) return false;
+            callback->get_current_framebuffer = OSLRCurrentFramebuffer;
+            callback->get_proc_address = OSLRProcAddress;
+            gHWCallback = *callback;
+            gHWRequested = true;
+            return true;
+        }
+        case RETRO_ENVIRONMENT_GET_PREFERRED_HW_RENDER:
+            if (gGLLayer == nil) return false;
+            if (data) *(unsigned *)data = RETRO_HW_CONTEXT_OPENGLES3;
+            return true;
+        case RETRO_ENVIRONMENT_SET_HW_SHARED_CONTEXT:
+            return gGLLayer != nil;
         case RETRO_ENVIRONMENT_SET_ROTATION:
             return false;
         case RETRO_ENVIRONMENT_GET_OVERSCAN:
@@ -297,7 +574,7 @@ static bool OSLREnvironment(unsigned command, void *data) {
             return true;
         }
         case RETRO_ENVIRONMENT_GET_VARIABLE_UPDATE:
-            if (data) *(bool *)data = false;
+            if (data) *(bool *)data = atomic_exchange(&gVariablesChanged, false);
             return true;
         case RETRO_ENVIRONMENT_GET_CORE_OPTIONS_VERSION:
             if (data) *(unsigned *)data = 2;
@@ -343,6 +620,10 @@ static bool OSLREnvironment(unsigned command, void *data) {
             const struct retro_system_av_info *info = data;
             if (info == NULL) return false;
             OSLRUpdateGeometry(&info->geometry);
+            // Más resolución que antes: el framebuffer del núcleo crece.
+            if (gGLContext != nil && (info->geometry.max_width > gGLWidth || info->geometry.max_height > gGLHeight)) {
+                OSLRResizeGL(MAX(info->geometry.max_width, gGLWidth), MAX(info->geometry.max_height, gGLHeight));
+            }
             return true;
         }
         case RETRO_ENVIRONMENT_SET_GEOMETRY:
@@ -367,8 +648,7 @@ static bool OSLREnvironment(unsigned command, void *data) {
             if (data) *(int *)data = 0; // RETRO_SAVESTATE_CONTEXT_NORMAL
             return true;
         case RETRO_ENVIRONMENT_GET_JIT_CAPABLE:
-            // Fase 1: los núcleos van sin JIT.
-            if (data) *(bool *)data = false;
+            if (data) *(bool *)data = gJITCapable;
             return true;
         default:
             // Lo demás (imagen por GPU, VFS, discos, rumble…) aún no: el núcleo sigue sin ello.
@@ -396,8 +676,16 @@ static inline uint32_t OSLRFrom1555(uint16_t pixel) {
 
 static void OSLRVideoRefresh(const void *data, unsigned width, unsigned height, size_t pitch) {
     atomic_fetch_add(&gFrameCount, 1);
-    // NULL: el mismo fotograma de antes. Imagen por GPU: aún no.
-    if (data == NULL || data == RETRO_HW_FRAME_BUFFER_VALID || width == 0 || height == 0) return;
+    if (width == 0 || height == 0) return;
+    // Imagen por GPU: ya está en el framebuffer del núcleo; se copia a la pantalla.
+    if (data == RETRO_HW_FRAME_BUFFER_VALID) {
+        OSLRNoteFrameSize(width, height);
+        OSLRPresentGL(width, height);
+        return;
+    }
+    // NULL: el mismo fotograma de antes.
+    if (data == NULL) return;
+    OSLRNoteFrameSize(width, height);
     size_t needed = (size_t)width * height;
     os_unfair_lock_lock(&gFrameLock);
     if (needed > gFrameCapacity) {
@@ -500,6 +788,17 @@ static int16_t OSLRInputState(unsigned port, unsigned device, unsigned index, un
             if (identifier == RETRO_DEVICE_ID_JOYPAD_MASK) return (int16_t)(bits & 0xFFFF);
             return identifier < 16 ? (int16_t)((bits >> identifier) & 1) : 0;
         case RETRO_DEVICE_ANALOG:
+            if (index == RETRO_DEVICE_INDEX_ANALOG_LEFT && atomic_load(&gTouchStickActive)) {
+                return (int16_t)atomic_load(&gTouchAxis[identifier == RETRO_DEVICE_ID_ANALOG_Y ? 1 : 0]);
+            }
+            if (index == RETRO_DEVICE_INDEX_ANALOG_RIGHT) {
+                // Botones C táctiles (N64) = stick derecho a tope.
+                uint32_t c = atomic_load(&gTouchCBits);
+                if (c != 0) {
+                    if (identifier == RETRO_DEVICE_ID_ANALOG_X) return (c & 8) ? 0x7FFF : ((c & 4) ? -0x7FFF : 0);
+                    return (c & 2) ? 0x7FFF : ((c & 1) ? -0x7FFF : 0);
+                }
+            }
             if (index == RETRO_DEVICE_INDEX_ANALOG_LEFT || index == RETRO_DEVICE_INDEX_ANALOG_RIGHT) {
                 unsigned axis = index * 2 + (identifier == RETRO_DEVICE_ID_ANALOG_Y ? 1 : 0);
                 return (int16_t)atomic_load(&gAxis[axis]);
@@ -554,6 +853,9 @@ static int OSLRRetroButtonForMapID(NSString *name) {
 /// Pantalla del juego. En los sistemas con pantalla táctil (NDS), los toques hacen de lápiz.
 @interface OSLRVideoView : UIView
 @property (nonatomic, assign) BOOL pointerEnabled;
+/// Capa de OpenGL ES (núcleos con imagen por GPU). Oculta hasta el primer fotograma.
+@property (nonatomic, strong, nullable) CAEAGLLayer *glLayer;
+- (void)enableGLLayer;
 @end
 
 @implementation OSLRVideoView {
@@ -569,6 +871,29 @@ static int OSLRRetroButtonForMapID(NSString *name) {
         self.multipleTouchEnabled = NO;
     }
     return self;
+}
+
+- (void)enableGLLayer {
+    if (self.glLayer != nil) return;
+    CAEAGLLayer *layer = [CAEAGLLayer layer];
+    layer.opaque = YES;
+    layer.hidden = YES;
+    layer.contentsScale = UIScreen.mainScreen.nativeScale;
+    layer.drawableProperties = @{kEAGLDrawablePropertyRetainedBacking: @NO,
+                                 kEAGLDrawablePropertyColorFormat: kEAGLColorFormatRGBA8};
+    layer.frame = self.bounds;
+    [self.layer addSublayer:layer];
+    self.glLayer = layer;
+}
+
+- (void)layoutSubviews {
+    [super layoutSubviews];
+    if (self.glLayer == nil) return;
+    [CATransaction begin];
+    [CATransaction setDisableActions:YES];
+    self.glLayer.frame = self.bounds;
+    [CATransaction commit];
+    atomic_store(&gGLLayerChanged, true);
 }
 
 - (void)updatePointer:(UITouch *)touch {
@@ -597,6 +922,77 @@ static int OSLRRetroButtonForMapID(NSString *name) {
         _pointerTouch = nil;
         atomic_store(&gPointerDown, false);
     }
+}
+
+- (void)touchesCancelled:(NSSet<UITouch *> *)touches withEvent:(UIEvent *)event {
+    [self touchesEnded:touches withEvent:event];
+}
+@end
+
+/// Stick analógico táctil (izquierdo).
+@interface OSLRStickView : UIView
+@end
+
+@implementation OSLRStickView {
+    UIView *_knob;
+    UITouch *_touch;
+}
+
+- (instancetype)initWithFrame:(CGRect)frame {
+    self = [super initWithFrame:frame];
+    if (self) {
+        self.backgroundColor = [UIColor colorWithWhite:0 alpha:0.30];
+        self.layer.borderWidth = 1.0;
+        self.layer.borderColor = [UIColor colorWithWhite:1 alpha:0.40].CGColor;
+        self.multipleTouchEnabled = NO;
+        _knob = [[UIView alloc] initWithFrame:CGRectMake(0, 0, 50, 50)];
+        _knob.backgroundColor = [UIColor colorWithWhite:1 alpha:0.35];
+        _knob.layer.cornerRadius = 25;
+        _knob.userInteractionEnabled = NO;
+        [self addSubview:_knob];
+    }
+    return self;
+}
+
+- (void)layoutSubviews {
+    [super layoutSubviews];
+    self.layer.cornerRadius = self.bounds.size.width * 0.5;
+    if (_touch == nil) _knob.center = CGPointMake(CGRectGetMidX(self.bounds), CGRectGetMidY(self.bounds));
+}
+
+- (void)track:(UITouch *)touch {
+    CGPoint center = CGPointMake(CGRectGetMidX(self.bounds), CGRectGetMidY(self.bounds));
+    CGPoint point = [touch locationInView:self];
+    CGFloat radius = MAX(1, self.bounds.size.width * 0.5 - 12);
+    CGFloat dx = point.x - center.x, dy = point.y - center.y;
+    CGFloat length = sqrt(dx * dx + dy * dy);
+    if (length > radius) {
+        dx = dx / length * radius;
+        dy = dy / length * radius;
+    }
+    _knob.center = CGPointMake(center.x + dx, center.y + dy);
+    atomic_store(&gTouchAxis[0], (int32_t)(dx / radius * 32767.0));
+    atomic_store(&gTouchAxis[1], (int32_t)(dy / radius * 32767.0));
+    atomic_store(&gTouchStickActive, true);
+}
+
+- (void)touchesBegan:(NSSet<UITouch *> *)touches withEvent:(UIEvent *)event {
+    if (_touch != nil) return;
+    _touch = touches.anyObject;
+    [self track:_touch];
+}
+
+- (void)touchesMoved:(NSSet<UITouch *> *)touches withEvent:(UIEvent *)event {
+    if (_touch && [touches containsObject:_touch]) [self track:_touch];
+}
+
+- (void)touchesEnded:(NSSet<UITouch *> *)touches withEvent:(UIEvent *)event {
+    if (_touch == nil || ![touches containsObject:_touch]) return;
+    _touch = nil;
+    atomic_store(&gTouchStickActive, false);
+    atomic_store(&gTouchAxis[0], 0);
+    atomic_store(&gTouchAxis[1], 0);
+    [self setNeedsLayout];
 }
 
 - (void)touchesCancelled:(NSSet<UITouch *> *)touches withEvent:(UIEvent *)event {
@@ -703,12 +1099,20 @@ typedef NS_ENUM(NSInteger, OSLRMenuAction) {
 }
 
 - (void)padDown:(UIButton *)sender {
-    atomic_fetch_or(&gTouchBits, 1u << (uint32_t)sender.tag);
+    if (sender.tag >= 100) {
+        atomic_fetch_or(&gTouchCBits, 1u << (uint32_t)(sender.tag - 100));
+    } else {
+        atomic_fetch_or(&gTouchBits, 1u << (uint32_t)sender.tag);
+    }
     if (self.touchHaptics) [_haptic impactOccurred];
 }
 
 - (void)padUp:(UIButton *)sender {
-    atomic_fetch_and(&gTouchBits, ~(1u << (uint32_t)sender.tag));
+    if (sender.tag >= 100) {
+        atomic_fetch_and(&gTouchCBits, ~(1u << (uint32_t)(sender.tag - 100)));
+    } else {
+        atomic_fetch_and(&gTouchBits, ~(1u << (uint32_t)sender.tag));
+    }
 }
 
 /// Cruz de 4 botones (arriba, abajo, izquierda, derecha).
@@ -741,50 +1145,96 @@ typedef NS_ENUM(NSInteger, OSLRMenuAction) {
     return pair;
 }
 
+/// Dos botones redondos (izquierda abajo y derecha arriba), como en NES, Game Boy o N64.
+- (UIView *)twoButtonsLeft:(NSString *)leftTitle leftID:(NSInteger)leftID right:(NSString *)rightTitle rightID:(NSInteger)rightID {
+    UIView *face = [[UIView alloc] initWithFrame:CGRectMake(0, 0, 112, 112)];
+    face.tag = 1002;
+    UIButton *left = [self padButton:leftTitle retroID:leftID];
+    UIButton *right = [self padButton:rightTitle retroID:rightID];
+    left.frame = CGRectMake(2, 50, 50, 50);
+    right.frame = CGRectMake(60, 20, 50, 50);
+    left.layer.cornerRadius = 25;
+    right.layer.cornerRadius = 25;
+    [face addSubview:left];
+    [face addSubview:right];
+    return face;
+}
+
 - (void)buildControls {
     NSString *layout = self.layout;
+    BOOL playStation = [layout isEqualToString:@"ps1"] || [layout isEqualToString:@"psp"];
+    BOOL n64 = [layout isEqualToString:@"n64"];
+    BOOL dreamcast = [layout isEqualToString:@"dc"];
     BOOL fourFace = [layout isEqualToString:@"snes"] || [layout isEqualToString:@"nds"];
-    BOOL shoulders = fourFace || [layout isEqualToString:@"gba"];
-    UIView *dpad = [self crossWithTitles:@[@"▲", @"▼", @"◀", @"▶"]
-                                     ids:@[@(RETRO_DEVICE_ID_JOYPAD_UP), @(RETRO_DEVICE_ID_JOYPAD_DOWN), @(RETRO_DEVICE_ID_JOYPAD_LEFT), @(RETRO_DEVICE_ID_JOYPAD_RIGHT)]
-                                     tag:1001];
+    BOOL stick = n64 || dreamcast || [layout isEqualToString:@"psp"];
+    if (!n64) {
+        UIView *dpad = [self crossWithTitles:@[@"▲", @"▼", @"◀", @"▶"]
+                                         ids:@[@(RETRO_DEVICE_ID_JOYPAD_UP), @(RETRO_DEVICE_ID_JOYPAD_DOWN), @(RETRO_DEVICE_ID_JOYPAD_LEFT), @(RETRO_DEVICE_ID_JOYPAD_RIGHT)]
+                                         tag:1001];
+        [_groups addObject:dpad];
+    }
     UIView *face;
     if (fourFace) {
         // Como en el mando de SNES/DS: X arriba, B abajo, Y izquierda, A derecha.
         face = [self crossWithTitles:@[@"X", @"B", @"Y", @"A"]
                                  ids:@[@(RETRO_DEVICE_ID_JOYPAD_X), @(RETRO_DEVICE_ID_JOYPAD_B), @(RETRO_DEVICE_ID_JOYPAD_Y), @(RETRO_DEVICE_ID_JOYPAD_A)]
                                  tag:1002];
+    } else if (playStation) {
+        // △ arriba, ✕ abajo, □ izquierda, ○ derecha (en libretro: X, B, Y, A).
+        face = [self crossWithTitles:@[@"△", @"✕", @"□", @"○"]
+                                 ids:@[@(RETRO_DEVICE_ID_JOYPAD_X), @(RETRO_DEVICE_ID_JOYPAD_B), @(RETRO_DEVICE_ID_JOYPAD_Y), @(RETRO_DEVICE_ID_JOYPAD_A)]
+                                 tag:1002];
+    } else if (dreamcast) {
+        // Y arriba, A abajo, X izquierda, B derecha.
+        face = [self crossWithTitles:@[@"Y", @"A", @"X", @"B"]
+                                 ids:@[@(RETRO_DEVICE_ID_JOYPAD_X), @(RETRO_DEVICE_ID_JOYPAD_B), @(RETRO_DEVICE_ID_JOYPAD_Y), @(RETRO_DEVICE_ID_JOYPAD_A)]
+                                 tag:1002];
+    } else if (n64) {
+        // A y B de N64 (en libretro: B e Y).
+        face = [self twoButtonsLeft:@"B" leftID:RETRO_DEVICE_ID_JOYPAD_Y right:@"A" rightID:RETRO_DEVICE_ID_JOYPAD_B];
     } else {
-        face = [[UIView alloc] initWithFrame:CGRectMake(0, 0, 112, 112)];
-        face.tag = 1002;
-        UIButton *b = [self padButton:@"B" retroID:RETRO_DEVICE_ID_JOYPAD_B];
-        UIButton *a = [self padButton:@"A" retroID:RETRO_DEVICE_ID_JOYPAD_A];
-        b.frame = CGRectMake(2, 50, 50, 50);
-        a.frame = CGRectMake(60, 20, 50, 50);
-        b.layer.cornerRadius = 25;
-        a.layer.cornerRadius = 25;
-        [face addSubview:b];
-        [face addSubview:a];
+        face = [self twoButtonsLeft:@"B" leftID:RETRO_DEVICE_ID_JOYPAD_B right:@"A" rightID:RETRO_DEVICE_ID_JOYPAD_A];
     }
-    [_groups addObject:dpad];
     [_groups addObject:face];
-    if (shoulders) {
+    if (stick) {
+        OSLRStickView *pad = [[OSLRStickView alloc] initWithFrame:CGRectMake(0, 0, 120, 120)];
+        pad.tag = 1003;
+        [_groups addObject:pad];
+    }
+    if (n64) {
+        // Botones C (el stick derecho).
+        [_groups addObject:[self crossWithTitles:@[@"C▲", @"C▼", @"C◀", @"C▶"] ids:@[@100, @101, @102, @103] tag:1004]];
+    }
+    if ([layout isEqualToString:@"ps1"]) {
+        [_groups addObject:[self pairWithFirst:@"L1" firstID:RETRO_DEVICE_ID_JOYPAD_L second:@"L2" secondID:RETRO_DEVICE_ID_JOYPAD_L2 tag:1005]];
+        [_groups addObject:[self pairWithFirst:@"R2" firstID:RETRO_DEVICE_ID_JOYPAD_R2 second:@"R1" secondID:RETRO_DEVICE_ID_JOYPAD_R tag:1006]];
+    } else if (n64) {
+        [_groups addObject:[self pairWithFirst:@"L" firstID:RETRO_DEVICE_ID_JOYPAD_L second:@"Z" secondID:RETRO_DEVICE_ID_JOYPAD_L2 tag:1005]];
+        [_groups addObject:[self pairWithFirst:@"R" firstID:RETRO_DEVICE_ID_JOYPAD_R second:nil secondID:-1 tag:1006]];
+    } else if (dreamcast) {
+        // Gatillos L y R (en libretro: L2 y R2).
+        [_groups addObject:[self pairWithFirst:@"L" firstID:RETRO_DEVICE_ID_JOYPAD_L2 second:nil secondID:-1 tag:1005]];
+        [_groups addObject:[self pairWithFirst:@"R" firstID:RETRO_DEVICE_ID_JOYPAD_R2 second:nil secondID:-1 tag:1006]];
+    } else if (fourFace || [layout isEqualToString:@"gba"] || [layout isEqualToString:@"psp"]) {
         [_groups addObject:[self pairWithFirst:@"L" firstID:RETRO_DEVICE_ID_JOYPAD_L second:nil secondID:-1 tag:1005]];
         [_groups addObject:[self pairWithFirst:@"R" firstID:RETRO_DEVICE_ID_JOYPAD_R second:nil secondID:-1 tag:1006]];
     }
     UIButton *start = [self padButton:@"START" retroID:RETRO_DEVICE_ID_JOYPAD_START];
-    UIButton *select = [self padButton:@"SELECT" retroID:RETRO_DEVICE_ID_JOYPAD_SELECT];
-    start.tag = RETRO_DEVICE_ID_JOYPAD_START;
-    select.tag = RETRO_DEVICE_ID_JOYPAD_SELECT;
     start.titleLabel.font = [UIFont systemFontOfSize:10 weight:UIFontWeightSemibold];
-    select.titleLabel.font = [UIFont systemFontOfSize:10 weight:UIFontWeightSemibold];
     start.layer.cornerRadius = 12;
-    select.layer.cornerRadius = 12;
     UIView *center = [[UIView alloc] initWithFrame:CGRectMake(0, 0, 168, 34)];
     center.tag = 1007;
-    select.frame = CGRectMake(0, 0, 76, 34);
-    start.frame = CGRectMake(92, 0, 76, 34);
-    [center addSubview:select];
+    if (n64 || dreamcast) {
+        // Solo START.
+        start.frame = CGRectMake(46, 0, 76, 34);
+    } else {
+        UIButton *select = [self padButton:@"SELECT" retroID:RETRO_DEVICE_ID_JOYPAD_SELECT];
+        select.titleLabel.font = [UIFont systemFontOfSize:10 weight:UIFontWeightSemibold];
+        select.layer.cornerRadius = 12;
+        select.frame = CGRectMake(0, 0, 76, 34);
+        start.frame = CGRectMake(92, 0, 76, 34);
+        [center addSubview:select];
+    }
     [center addSubview:start];
     [_groups addObject:center];
     for (UIView *group in _groups) {
@@ -802,7 +1252,11 @@ typedef NS_ENUM(NSInteger, OSLRMenuAction) {
     }
     BOOL show = !_onTV ? (self.touchAlways || !physical) : !physical;
     _controlsView.hidden = !show;
-    if (!show) atomic_store(&gTouchBits, 0);
+    if (!show) {
+        atomic_store(&gTouchBits, 0);
+        atomic_store(&gTouchCBits, 0);
+        atomic_store(&gTouchStickActive, false);
+    }
 }
 
 // MARK: Vista
@@ -900,8 +1354,9 @@ typedef NS_ENUM(NSInteger, OSLRMenuAction) {
         return CGRectMake(safe.left, 0, w - safe.left - safe.right, h);
     }
     if (portrait) {
-        // Arriba, dejando sitio debajo para los controles táctiles.
-        CGFloat maxHeight = MAX(120, h * 0.55 - safe.top);
+        // Arriba, dejando sitio debajo para los controles táctiles (NDS, con sus dos pantallas, algo más).
+        CGFloat share = [self.layout isEqualToString:@"nds"] ? 0.64 : 0.55;
+        CGFloat maxHeight = MAX(120, h * share - safe.top);
         CGFloat width = w;
         CGFloat height = floor(width / aspect);
         if (height > maxHeight) {
@@ -930,18 +1385,33 @@ typedef NS_ENUM(NSInteger, OSLRMenuAction) {
     if (!_onTV) {
         self.videoView.frame = [self videoFrameInBounds:root.bounds safe:safe portrait:portrait];
     }
+    // Opción que va con la orientación (NDS: una pantalla encima de otra o al lado). En la tele, al lado.
+    if (gOrientKey != nil) atomic_store(&gOrientWanted, (portrait && !_onTV) ? 1 : 0);
     _controlsView.frame = root.bounds;
     CGFloat bottom = safe.bottom + 14;
     UIView *dpad = [_controlsView viewWithTag:1001];
     UIView *face = [_controlsView viewWithTag:1002];
+    UIView *stick = [_controlsView viewWithTag:1003];
+    UIView *cButtons = [_controlsView viewWithTag:1004];
     UIView *left = [_controlsView viewWithTag:1005];
     UIView *right = [_controlsView viewWithTag:1006];
     UIView *center = [_controlsView viewWithTag:1007];
-    dpad.frame = CGRectMake(safe.left + 18, h - bottom - 112 - (portrait ? 40 : 0), 112, 112);
-    face.frame = CGRectMake(w - safe.right - 130, h - bottom - 112 - (portrait ? 40 : 0), 112, 112);
+    CGFloat rowY = h - bottom - 112 - (portrait ? 40 : 0);
+    CGFloat upperY = rowY - 124;
+    BOOL twoRows = stick != nil || cButtons != nil;
+    if (stick != nil) {
+        // Stick abajo a la izquierda y la cruceta (si la hay) encima.
+        stick.frame = CGRectMake(safe.left + 14, rowY - 4, 120, 120);
+        dpad.frame = CGRectMake(safe.left + 18, upperY, 112, 112);
+    } else {
+        dpad.frame = CGRectMake(safe.left + 18, rowY, 112, 112);
+    }
+    face.frame = CGRectMake(w - safe.right - 130, rowY, 112, 112);
+    cButtons.frame = CGRectMake(w - safe.right - 130, upperY, 112, 112);
     if (portrait) {
-        left.frame = CGRectMake(safe.left + 12, h - bottom - 112 - 40 - 58, 108, 40);
-        right.frame = CGRectMake(w - safe.right - 120, h - bottom - 112 - 40 - 58, 108, 40);
+        CGFloat shoulderY = (twoRows ? upperY : rowY) - 58;
+        left.frame = CGRectMake(safe.left + 12, shoulderY, 108, 40);
+        right.frame = CGRectMake(w - safe.right - 120, shoulderY, 108, 40);
     } else {
         left.frame = CGRectMake(safe.left + 12, safe.top + 60, 108, 40);
         right.frame = CGRectMake(w - safe.right - 120, safe.top + 60, 108, 40);
@@ -979,6 +1449,12 @@ typedef NS_ENUM(NSInteger, OSLRMenuAction) {
     }
     [_observers addObject:[center addObserverForName:OSExternalDisplayDidChangeNotification object:nil queue:NSOperationQueue.mainQueue usingBlock:^(NSNotification *note) {
         [weakSelf updateExternalDisplay];
+    }]];
+    [_observers addObject:[center addObserverForName:UIApplicationDidEnterBackgroundNotification object:nil queue:NSOperationQueue.mainQueue usingBlock:^(NSNotification *note) {
+        atomic_store(&gBackground, true);
+    }]];
+    [_observers addObject:[center addObserverForName:UIApplicationWillEnterForegroundNotification object:nil queue:NSOperationQueue.mainQueue usingBlock:^(NSNotification *note) {
+        atomic_store(&gBackground, false);
     }]];
     [_observers addObject:[center addObserverForName:UIApplicationWillResignActiveNotification object:nil queue:NSOperationQueue.mainQueue usingBlock:^(NSNotification *note) {
         OSLRGameViewController *strongSelf = weakSelf;
@@ -1340,6 +1816,12 @@ typedef NS_ENUM(NSInteger, OSLRMenuAction) {
     return binary;
 }
 
++ (BOOL)jitActive {
+    if (!OSLRIsDebugged()) return NO;
+    // En iOS 26 el JIT necesita el depurador enganchado (CS_DEBUGGED se queda aunque se suelte).
+    return OSLRUsesJITScript() ? OSLRIsTraced() : YES;
+}
+
 + (BOOL)coreAvailable:(NSString *)framework {
     if (framework.length == 0) return NO;
     return [NSFileManager.defaultManager fileExistsAtPath:[self binaryPathForFramework:framework]];
@@ -1489,11 +1971,26 @@ typedef NS_ENUM(NSInteger, OSLRMenuAction) {
             loaded = gCore.loadGame(&game);
             if (!loaded) failure = OSLRText(_language, @"El núcleo no pudo abrir este juego.", @"The core could not open this game.");
         }
+        struct retro_system_av_info av;
+        memset(&av, 0, sizeof(av));
         if (loaded) {
-            struct retro_system_av_info av;
-            memset(&av, 0, sizeof(av));
             gCore.getSystemAVInfo(&av);
             OSLRUpdateGeometry(&av.geometry);
+            // Imagen por GPU: el contexto se crea ahora y el núcleo prepara lo suyo (context_reset).
+            if (gHWRequested) {
+                unsigned width = MAX(av.geometry.max_width, av.geometry.base_width);
+                unsigned height = MAX(av.geometry.max_height, av.geometry.base_height);
+                if (OSLRCreateGL(width > 0 ? width : 640, height > 0 ? height : 480)) {
+                    if (gHWCallback.context_reset) gHWCallback.context_reset();
+                } else {
+                    failure = OSLRText(_language, @"No se pudo preparar la imagen por GPU (OpenGL ES).", @"Could not set up GPU rendering (OpenGL ES).");
+                    gCore.unloadGame();
+                    OSLRDestroyGL();
+                    loaded = NO;
+                }
+            }
+        }
+        if (loaded) {
             gFPS = av.timing.fps > 1 ? av.timing.fps : 60.0;
             gSampleRate = av.timing.sample_rate > 1000 ? av.timing.sample_rate : 44100.0;
             gCore.setControllerPortDevice(0, RETRO_DEVICE_JOYPAD);
@@ -1517,6 +2014,7 @@ typedef NS_ENUM(NSInteger, OSLRMenuAction) {
     });
     if (!loaded) {
         gCore.deinit();
+        OSLRDestroyGL();
         [self finishSession];
         return;
     }
@@ -1542,10 +2040,20 @@ typedef NS_ENUM(NSInteger, OSLRMenuAction) {
             } else if (action == OSLRMenuActionReset) {
                 gCore.reset();
             }
-            if (atomic_load(&gPaused)) {
+            if (atomic_load(&gPaused) || atomic_load(&gBackground)) {
                 [NSThread sleepForTimeInterval:0.02];
                 next = OSLRNow();
                 continue;
+            }
+            // La orientación cambió: la opción que va con ella (NDS) se le pasa al núcleo.
+            int orientation = atomic_load(&gOrientWanted);
+            if (gOrientKey != nil && orientation >= 0 && orientation != gOrientApplied) {
+                gOrientApplied = orientation;
+                NSMutableDictionary<NSString *, NSString *> *options = [gUserOptions mutableCopy] ?: [NSMutableDictionary new];
+                NSString *value = orientation == 1 ? gOrientPortrait : gOrientLandscape;
+                if (value) options[gOrientKey] = value;
+                gUserOptions = options;
+                atomic_store(&gVariablesChanged, true);
             }
             if (gHasFrameTimeCallback) gFrameTimeCallback.callback(gFrameTimeCallback.reference);
             gCore.run();
@@ -1566,8 +2074,11 @@ typedef NS_ENUM(NSInteger, OSLRMenuAction) {
         }
     }
     [self writeSaveRAMIfChanged:lastSave];
+    // Como RetroArch: primero se avisa al núcleo de que se va el contexto y luego se cierra el juego.
+    if (gGLContext != nil && gHWCallback.context_destroy) gHWCallback.context_destroy();
     gCore.unloadGame();
     gCore.deinit();
+    OSLRDestroyGL();
     [self finishSession];
 }
 
@@ -1582,7 +2093,11 @@ typedef NS_ENUM(NSInteger, OSLRMenuAction) {
         gMessageHandler = nil;
         atomic_store(&gPadBits, 0);
         atomic_store(&gTouchBits, 0);
+        atomic_store(&gTouchCBits, 0);
+        atomic_store(&gTouchStickActive, false);
         atomic_store(&gPointerDown, false);
+        gGLLayer = nil;
+        OSLRRemoveTrapGuard();
         OSLRGameViewController *controller = self.gameController;
         self.gameController = nil;
         controller.closing = YES;
@@ -1648,12 +2163,44 @@ typedef NS_ENUM(NSInteger, OSLRMenuAction) {
     gOptionStrings = [NSMutableDictionary new];
     gPixelFormat = RETRO_PIXEL_FORMAT_0RGB1555;
     gHasFrameTimeCallback = NO;
+    // JIT: solo si se pidió y OmniStation lo tiene de verdad ahora.
+    gJITCapable = [hostOptions[@"jit"] isEqualToString:@"true"] && [OSLibretroEngine jitActive];
+    if (!OSLRIsTraced()) OSLRInstallTrapGuard();
+    // Imagen por GPU y proporción.
+    memset(&gHWCallback, 0, sizeof(gHWCallback));
+    gHWRequested = false;
+    gGLSmooth = [hostOptions[@"filter"] isEqualToString:@"linear"];
+    atomic_store(&gGLLayerShown, false);
+    atomic_store(&gGLLayerChanged, true);
+    gUseFrameAspect = [hostOptions[@"frameAspect"] isEqualToString:@"true"];
+    gAspectFrameWidth = 0;
+    gAspectFrameHeight = 0;
+    // Opción que va con la orientación: la de ahora, desde el principio.
+    gOrientKey = hostOptions[@"orient.key"].length > 0 ? [hostOptions[@"orient.key"] copy] : nil;
+    gOrientPortrait = [hostOptions[@"orient.portrait"] copy];
+    gOrientLandscape = [hostOptions[@"orient.landscape"] copy];
+    gOrientApplied = -1;
+    atomic_store(&gOrientWanted, -1);
+    atomic_store(&gVariablesChanged, false);
+    if (gOrientKey != nil) {
+        CGSize screen = UIScreen.mainScreen.bounds.size;
+        BOOL portrait = screen.height > screen.width && !(OSExternalDisplay.enabled && OSExternalDisplay.shared.connected);
+        NSString *value = portrait ? gOrientPortrait : gOrientLandscape;
+        if (value.length > 0) {
+            NSMutableDictionary<NSString *, NSString *> *options = [gUserOptions mutableCopy];
+            options[gOrientKey] = value;
+            gUserOptions = options;
+        }
+        gOrientApplied = portrait ? 1 : 0;
+        atomic_store(&gOrientWanted, gOrientApplied);
+    }
     atomic_store(&gShutdownRequested, false);
     atomic_store(&gInputSuspended, false);
     atomic_store(&gFrameSerial, 0);
     atomic_store(&gFrameCount, 0);
     atomic_store(&gAspect, 4.0 / 3.0);
     atomic_store(&gPaused, false);
+    atomic_store(&gBackground, false);
     atomic_store(&gPendingAction, -1);
     atomic_store(&gRunning, true);
     os_unfair_lock_lock(&gFrameLock);
@@ -1710,6 +2257,12 @@ typedef NS_ENUM(NSInteger, OSLRMenuAction) {
         [weakController showStatus:message];
     };
     [controller loadViewIfNeeded];
+    if ([hostOptions[@"gpu"] isEqualToString:@"true"]) {
+        [controller.videoView enableGLLayer];
+        gGLLayer = controller.videoView.glLayer;
+    } else {
+        gGLLayer = nil;
+    }
     [root presentViewController:controller animated:NO completion:nil];
     self.gameController = controller;
 

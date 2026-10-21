@@ -493,7 +493,21 @@ typedef struct {
     // DLC (opcionales).
     void *getDlcNcaList;
     void *freeDlcNcaList;
+    // Información de un juego (opcionales).
+    void *getGameInfo;
+    void *freeGameInfo;
 } OSNXCoreAPI;
+
+// Información de un juego (get_game_info de MeloNX, misma forma que su GameInfo).
+typedef struct {
+    uint64_t fileSize;
+    char titleName[512];
+    char titleId[32];
+    char developer[256];
+    char version[16];
+    unsigned char *imageData;
+    unsigned int imageSize;
+} OSNXGameInfo;
 
 // DLC de un archivo (get_dlc_nca_list de MeloNX 2.7, misma forma que su DlcNcaListC).
 typedef struct {
@@ -1579,6 +1593,8 @@ static void OSNXTeardownDonor(const OSNXCoreAPI *api) {
     api.withdrawDonatedGpuMemory = (uint8_t (*)(void))dlsym(core, "withdraw_donated_gpu_memory");
     api.getDlcNcaList = dlsym(core, "get_dlc_nca_list");
     api.freeDlcNcaList = dlsym(core, "free_dlc_nca_list");
+    api.getGameInfo = dlsym(core, "get_game_info");
+    api.freeGameInfo = dlsym(core, "free_game_info");
     void (*sdlSetMainReady)(void) = (void (*)(void))[self symbol:sdl name:"SDL_SetMainReady" missing:missing];
     void (*sdlSetEventPump)(bool) = (void (*)(bool))[self symbol:sdl name:"SDL_SetiOSEventPump" missing:missing];
     bool (*sdlInit)(uint32_t) = (bool (*)(uint32_t))[self symbol:sdl name:"SDL_Init" missing:missing];
@@ -1655,6 +1671,59 @@ static void OSNXTeardownDonor(const OSNXCoreAPI *api) {
         freeList(list);
         finish(items.count ? items : nil, items.count ? nil : @"Ese archivo no tiene DLC de este juego.");
     });
+}
+
+// MARK: Identificar juegos (como la app MeloNX)
+
+- (NSDictionary<NSString *, NSString *> *)identifyGameAtPath:(NSString *)path {
+    if (NSThread.isMainThread || self.busy || ![OSMeloNXEngine keysInstalled]) return nil;
+    NSString *loadError = nil;
+    if (![self loadRuntimeOnMain:&loadError]) return nil;
+    if (_api.getGameInfo == NULL) return nil;
+    int descriptor = open(path.fileSystemRepresentation, O_RDONLY);
+    if (descriptor < 0) return nil;
+    NSString *extension = path.pathExtension.lowercaseString ?: @"";
+    __block NSString *titleID = @"";
+    __block NSString *titleName = @"";
+    dispatch_sync(_queue, ^{
+        OSNXGameInfo (*getInfo)(int, const char *) = (OSNXGameInfo (*)(int, const char *))self->_api.getGameInfo;
+        OSNXGameInfo info = getInfo(descriptor, extension.UTF8String);
+        info.titleId[sizeof(info.titleId) - 1] = 0;
+        info.titleName[sizeof(info.titleName) - 1] = 0;
+        titleID = [NSString stringWithUTF8String:info.titleId] ?: @"";
+        titleName = [NSString stringWithUTF8String:info.titleName] ?: @"";
+        if (self->_api.freeGameInfo != NULL) {
+            void (*freeInfo)(OSNXGameInfo *) = (void (*)(OSNXGameInfo *))self->_api.freeGameInfo;
+            freeInfo(&info);
+        }
+    });
+    close(descriptor);
+    NSCharacterSet *zeros = [NSCharacterSet characterSetWithCharactersInString:@"0"];
+    BOOL emptyID = titleID.length == 0 || [titleID stringByTrimmingCharactersInSet:zeros].length == 0;
+    BOOL emptyName = titleName.length == 0 || [titleName isEqualToString:@"Unknown"];
+    if (emptyID && emptyName) return nil;
+    return @{@"titleId": emptyID ? @"" : titleID, @"titleName": emptyName ? @"" : titleName};
+}
+
+// MARK: JIT para los núcleos libretro
+
+- (void)prepareSharedJITWithPairing:(NSData *)pairingData completion:(void (^)(BOOL, NSString *))completion {
+    if (self.busy) {
+        completion(NO, @"Hay una partida de MeloNX abierta.");
+        return;
+    }
+    dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
+        NSString *error = nil;
+        BOOL ok = [self prepareJITWithPairing:pairingData progress:nil error:&error];
+        dispatch_async(dispatch_get_main_queue(), ^{
+            completion(ok, ok ? @"" : (error ?: @"No se pudo activar el JIT."));
+        });
+    });
+}
+
+- (void)releaseSharedJIT {
+    if (self.busy) return;
+    [self closeSession];
 }
 
 // MARK: Firmware
