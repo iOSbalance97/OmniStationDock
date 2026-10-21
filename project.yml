@@ -20,8 +20,8 @@ targets:
     settings:
       base:
         
-        MARKETING_VERSION: "0.4.7"
-        CURRENT_PROJECT_VERSION: "47"
+        MARKETING_VERSION: "0.4.8"
+        CURRENT_PROJECT_VERSION: "48"
         PRODUCT_BUNDLE_IDENTIFIER: com.omnistation.dock
         PRODUCT_NAME: OmniStationDock
         SWIFT_VERSION: "5.0"
@@ -36,7 +36,8 @@ targets:
         IPHONEOS_DEPLOYMENT_TARGET: "17.0"
         # JIT integrado (StikJIT): idevice se descarga en el workflow a Vendor/idevice.
         SWIFT_INCLUDE_PATHS: "$(inherited) $(SRCROOT)/Vendor/idevice"
-        HEADER_SEARCH_PATHS: "$(inherited) $(SRCROOT)/Vendor/idevice"
+        # Cabeceras de Vulkan (las baja el workflow a Vendor/Vulkan-Headers) para los núcleos de 3DS y GameCube/Wii.
+        HEADER_SEARCH_PATHS: "$(inherited) $(SRCROOT)/Vendor/idevice $(SRCROOT)/Vendor/Vulkan-Headers/include"
         LIBRARY_SEARCH_PATHS: "$(inherited) $(SRCROOT)/Vendor/idevice"
         OTHER_LDFLAGS: "$(inherited) -lidevice_ffi"
         DEAD_CODE_STRIPPING: YES
@@ -55,6 +56,7 @@ targets:
       - sdk: QuartzCore.framework
       # Imagen por GPU de los núcleos libretro de PS1, N64, PSP y Dreamcast.
       - sdk: OpenGLES.framework
+      - sdk: Metal.framework
       - sdk: JavaScriptCore.framework
       - sdk: Network.framework
       - sdk: Security.framework
@@ -71,8 +73,8 @@ targets:
       - path: OmniStation/JIT/StikJIT
     settings:
       base:
-        MARKETING_VERSION: "0.4.7"
-        CURRENT_PROJECT_VERSION: "47"
+        MARKETING_VERSION: "0.4.8"
+        CURRENT_PROJECT_VERSION: "48"
         PRODUCT_BUNDLE_IDENTIFIER: com.omnistation.dock.jithelper
         PRODUCT_NAME: OmniStationJITHelper
         SWIFT_VERSION: "5.0"
@@ -102,8 +104,8 @@ targets:
       - path: RamDonor
     settings:
       base:
-        MARKETING_VERSION: "0.4.7"
-        CURRENT_PROJECT_VERSION: "47"
+        MARKETING_VERSION: "0.4.8"
+        CURRENT_PROJECT_VERSION: "48"
         PRODUCT_BUNDLE_IDENTIFIER: com.omnistation.dock.ramdonor
         PRODUCT_NAME: OmniStationRamDonor
         TARGETED_DEVICE_FAMILY: "1"
