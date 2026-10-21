@@ -9,18 +9,63 @@ permissions:
 jobs:
   build:
     runs-on: macos-26
+    env:
+      # Versiones fijas de lo que se descarga. Al cambiarlas se invalida su caché y se vuelve a bajar.
+      STIKJIT_COMMIT: 32287268fa5824f9edce4cb359f5833ce0cf7b00
+      NEOSTATION_TAG: "0.0.8"
+      MANIC_TAG: v2.0.1
+      XCODEGEN_VERSION: "2.42.0"
 
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Install XcodeGen
-        run: brew install xcodegen
+      # Lo que se descarga de fuera se guarda en la caché de Actions (no gasta minutos): en las builds
+      # siguientes se reutiliza y solo se vuelve a bajar si cambia su versión.
+      - name: Cache tools
+        uses: actions/cache@v4
+        with:
+          path: .ci-tools
+          key: tools-xcodegen-${{ env.XCODEGEN_VERSION }}-ldid-v1
+
+      - name: Install XcodeGen and ldid
+        run: |
+          set -uo pipefail
+          mkdir -p .ci-tools
+          if [ ! -x .ci-tools/xcodegen/bin/xcodegen ]; then
+            if curl -fsSL --retry 3 -o "$RUNNER_TEMP/xcodegen.zip" "https://github.com/yonaskolb/XcodeGen/releases/download/${XCODEGEN_VERSION}/xcodegen.zip"; then
+              rm -rf .ci-tools/xcodegen
+              unzip -q "$RUNNER_TEMP/xcodegen.zip" -d .ci-tools
+            fi
+          fi
+          if [ -x .ci-tools/xcodegen/bin/xcodegen ]; then
+            echo "$PWD/.ci-tools/xcodegen/bin" >> "$GITHUB_PATH"
+          else
+            HOMEBREW_NO_AUTO_UPDATE=1 brew install xcodegen
+          fi
+          if [ ! -x .ci-tools/ldid ]; then
+            if curl -fsSL --retry 3 -o .ci-tools/ldid "https://github.com/ProcursusTeam/ldid/releases/download/v2.1.5-procursus7/ldid_macosx_arm64"; then
+              chmod +x .ci-tools/ldid
+            else
+              rm -f .ci-tools/ldid
+            fi
+          fi
+          if [ -x .ci-tools/ldid ] && file .ci-tools/ldid | grep -q Mach-O; then
+            echo "$PWD/.ci-tools" >> "$GITHUB_PATH"
+          else
+            rm -f .ci-tools/ldid
+          fi
+
+      - name: Cache idevice
+        id: idevice-cache
+        uses: actions/cache@v4
+        with:
+          path: Vendor/idevice
+          key: idevice-${{ env.STIKJIT_COMMIT }}
 
       # JIT integrado: la librería idevice de StikJIT (fijada a un commit concreto y comprobada).
       - name: Fetch idevice (StikJIT)
-        env:
-          STIKJIT_COMMIT: 32287268fa5824f9edce4cb359f5833ce0cf7b00
+        if: steps.idevice-cache.outputs.cache-hit != 'true'
         run: |
           set -e
           git init -q "$RUNNER_TEMP/stikjit"
@@ -36,9 +81,14 @@ jobs:
           shasum -a 256 -c SHA256SUMS
           rm SHA256SUMS
 
+      - name: Cache ARMSX2 core (NeoStation)
+        uses: actions/cache@v4
+        with:
+          path: Vendor/ARMSX2Core.framework
+          key: neostation-armsx2core-${{ env.NEOSTATION_TAG }}-a091badf
+
       # Núcleo de ARMSX2 integrado: ARMSX2Core.framework (ARMSX2 iOS 2.6, interfaz C v6) sacado de la
-      # IPA pública de NeoStation iOS 0.0.8. Va antes de compilar: si algo no cuadra, falla sin gastar
-      # minutos. Se comprueba la IPA, el binario y la huella de los 151 archivos del framework.
+      # IPA pública de NeoStation iOS 0.0.8. Si ya está en la caché, solo se comprueba su huella.
       - name: Fetch ARMSX2 core (NeoStation iOS 0.0.8)
         env:
           NEOSTATION_IPA_URL: https://github.com/TarbleFR/neostation-ios/releases/download/0.0.8/NeoStation-0.0.8.ipa
@@ -47,16 +97,18 @@ jobs:
           ARMSX2CORE_FILES_SHA256: 4857aef56625e06600db3d48a11143eb1747122847f268cff79536168382b95d
         run: |
           set -euo pipefail
-          IPA="$RUNNER_TEMP/NeoStation-0.0.8.ipa"
-          curl -fsSL --retry 3 -o "$IPA" "$NEOSTATION_IPA_URL"
-          echo "$NEOSTATION_IPA_SHA256  $IPA" | shasum -a 256 -c -
-          rm -rf "$RUNNER_TEMP/neostation"
-          mkdir -p "$RUNNER_TEMP/neostation"
-          unzip -q "$IPA" 'Payload/NeoStation.app/Frameworks/ARMSX2Core.framework/*' -d "$RUNNER_TEMP/neostation"
-          rm -f "$IPA"
-          rm -rf Vendor/ARMSX2Core.framework
-          mkdir -p Vendor
-          cp -R "$RUNNER_TEMP/neostation/Payload/NeoStation.app/Frameworks/ARMSX2Core.framework" Vendor/
+          if [ ! -f Vendor/ARMSX2Core.framework/ARMSX2Core ]; then
+            IPA="$RUNNER_TEMP/NeoStation-0.0.8.ipa"
+            curl -fsSL --retry 3 -o "$IPA" "$NEOSTATION_IPA_URL"
+            echo "$NEOSTATION_IPA_SHA256  $IPA" | shasum -a 256 -c -
+            rm -rf "$RUNNER_TEMP/neostation"
+            mkdir -p "$RUNNER_TEMP/neostation"
+            unzip -q "$IPA" 'Payload/NeoStation.app/Frameworks/ARMSX2Core.framework/*' -d "$RUNNER_TEMP/neostation"
+            rm -f "$IPA"
+            rm -rf Vendor/ARMSX2Core.framework
+            mkdir -p Vendor
+            cp -R "$RUNNER_TEMP/neostation/Payload/NeoStation.app/Frameworks/ARMSX2Core.framework" Vendor/
+          fi
           cd Vendor/ARMSX2Core.framework
           echo "$ARMSX2CORE_BINARY_SHA256  ARMSX2Core" | shasum -a 256 -c -
           FILES_SHA256=$(find . -type f | LC_ALL=C sort | while IFS= read -r f; do shasum -a 256 "$f"; done | shasum -a 256 | cut -d' ' -f1)
@@ -90,10 +142,33 @@ jobs:
           cp "$RUNNER_TEMP/omnicore/identity.json" Vendor/ARMSX2CoreOmni.json
           echo "Núcleo propio listo:"; cat Vendor/ARMSX2CoreOmni.json
 
+      # Clave de la caché de MeloNX: su versión publicada y la fecha de tu IPA «melonx-runtime» (si la
+      # subes). Mientras no cambien, no se vuelve a bajar ni a extraer.
+      - name: MeloNX runtime version
+        id: melonx-version
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -uo pipefail
+          LOCAL=$(gh release view melonx-runtime --repo "$GITHUB_REPOSITORY" --json assets --jq '[.assets[] | select(.name | endswith(".ipa")) | .updatedAt] | first // ""' 2>/dev/null || true)
+          UPSTREAM=$(python3 -I tools/fetch_melonx_runtime.py --latest-tag 2>/dev/null || true)
+          KEY="melonx-runtime-${UPSTREAM:-unknown}-${LOCAL:-none}-${{ hashFiles('tools/fetch_melonx_runtime.py') }}"
+          KEY="${KEY//[^A-Za-z0-9._-]/_}"
+          echo "key=$KEY" >> "$GITHUB_OUTPUT"
+          echo "Clave de la caché de MeloNX: $KEY"
+
+      - name: Cache MeloNX runtime
+        id: melonx-cache
+        uses: actions/cache@v4
+        with:
+          path: Vendor/MeloNX
+          key: ${{ steps.melonx-version.outputs.key }}
+
       # Runtime de MeloNX (núcleo Ryujinx compilado y sus librerías) sacado de la IPA oficial.
       # Opcional: si no se consigue, la app se compila sin MeloNX integrado. Si subes tu propia
       # IPA como release «melonx-runtime» de este repo, se usa esa.
       - name: Fetch MeloNX runtime (optional)
+        if: steps.melonx-cache.outputs.cache-hit != 'true'
         env:
           GH_TOKEN: ${{ github.token }}
           MELONX_TAG: ""
@@ -106,6 +181,31 @@ jobs:
             LOCAL="$(ls "$RUNNER_TEMP"/melonx-ipa/*.ipa | head -1)"
           fi
           python3 -I tools/fetch_melonx_runtime.py Vendor/MeloNX "$LOCAL"
+
+      # Núcleos libretro de ManicEMU (NES, SNES, Game Boy, GBA y NDS) sacados de su IPA pública.
+      # Opcionales: si no se consiguen, la app va sin ellos. En caché por versión de ManicEMU.
+      - name: Cache ManicEMU cores
+        id: manic-cache
+        uses: actions/cache@v4
+        with:
+          path: Vendor/Libretro
+          key: manic-cores-${{ env.MANIC_TAG }}-${{ hashFiles('tools/fetch_manic_cores.py') }}
+
+      - name: Fetch ManicEMU cores (optional)
+        if: steps.manic-cache.outputs.cache-hit != 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -uo pipefail
+          rm -rf Vendor/Libretro "$RUNNER_TEMP/manic"
+          mkdir -p "$RUNNER_TEMP/manic" Vendor
+          if ! gh release download "$MANIC_TAG" --repo Manic-EMU/ManicEMU --pattern '*.ipa' --dir "$RUNNER_TEMP/manic"; then
+            echo "::warning::No se pudo descargar la IPA de ManicEMU $MANIC_TAG: la app va sin sus núcleos."
+            exit 0
+          fi
+          ls -l "$RUNNER_TEMP/manic"
+          python3 -I tools/fetch_manic_cores.py Vendor/Libretro "$RUNNER_TEMP/manic"
+          rm -rf "$RUNNER_TEMP/manic"
 
       - name: Generate Xcode project
         run: xcodegen generate
@@ -135,6 +235,7 @@ jobs:
           test -f Payload/OmniStationDock.app/Frameworks/ARMSX2Core.framework/ARMSX2Core
           test -f Payload/OmniStationDock.app/Frameworks/ARMSX2Core.framework/Info.plist
           test -d Payload/OmniStationDock.app/PlugIns/OmniStationJITHelper.appex
+          test -d Payload/OmniStationDock.app/PlugIns/OmniStationRamDonor.appex || echo "::warning::Falta la extensión de memoria (OmniStationRamDonor)."
           # Núcleo de ARMSX2 propio (si se descargó).
           if [ -d Vendor/ARMSX2CoreOmni.framework ]; then
             cp -R Vendor/ARMSX2CoreOmni.framework Payload/OmniStationDock.app/Frameworks/ARMSX2CoreOmni.framework
@@ -151,6 +252,19 @@ jobs:
               cp -R "$item" "Payload/OmniStationDock.app/Frameworks/$name"
             done
             cp Vendor/MeloNX/MeloNXRuntime.json Payload/OmniStationDock.app/MeloNXRuntime.json
+          fi
+          # Núcleos libretro de ManicEMU (si se consiguieron).
+          if [ -f Vendor/Libretro/cores.json ]; then
+            for item in Vendor/Libretro/*; do
+              name="$(basename "$item")"
+              [ "$name" = "cores.json" ] && continue
+              if [ -e "Payload/OmniStationDock.app/Frameworks/$name" ]; then
+                echo "::warning::$name ya existe en la app; no se copia."
+                continue
+              fi
+              cp -R "$item" "Payload/OmniStationDock.app/Frameworks/$name"
+            done
+            cp Vendor/Libretro/cores.json Payload/OmniStationDock.app/LibretroCores.json
           fi
           # Permisos de la app (get-task-allow y más memoria). SideStore los conserva al firmar
           # si el perfil los permite; «Increased Memory Limit» se añade al App ID con GetMoreRam.
