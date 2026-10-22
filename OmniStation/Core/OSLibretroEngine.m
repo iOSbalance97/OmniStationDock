@@ -202,6 +202,8 @@ static void OSLRTrace(NSString *step, BOOL reset) {
 // abrir otro juego de estos núcleos (su hilo sigue ocupado).
 static _Atomic bool gCoreStuck;
 static _Atomic bool gLoopDone;
+// Cada partida tiene su número: el aviso de «no terminó de cerrarse» de una no puede cortar la siguiente.
+static _Atomic uint64_t gSessionNumber;
 
 // Mando táctil: stick analógico (N64, PSP, Dreamcast) y botones C de N64 (stick derecho).
 static _Atomic int32_t gTouchAxis[2];
@@ -427,6 +429,8 @@ static void *OSLRJITPoolAllocate(size_t size) {
                 memset(gJITPoolUsed + first, 1, need);
                 gJITPoolRuns[first] = (uint32_t)need;
                 result = gJITPoolRX + first * kOSLRJITPage;
+                // Vuelven a contar como memoria de la app (las devueltas con MADV_FREE_REUSABLE).
+                madvise((uint8_t *)result + gJITPoolDiff, need * kOSLRJITPage, MADV_FREE_REUSE);
                 break;
             }
         }
@@ -447,8 +451,13 @@ static BOOL OSLRJITPoolFree(void *pointer) {
             size_t first = (size_t)(rx - gJITPoolRX) / kOSLRJITPage;
             uint32_t count = gJITPoolRuns[first];
             if (count > 0) {
-                // Lo que deja escrito un núcleo no debe verlo el siguiente.
-                memset(gJITPoolRX + gJITPoolDiff + first * kOSLRJITPage, 0, (size_t)count * kOSLRJITPage);
+                // Las páginas se devuelven al sistema (no cuentan como memoria usada; antes se
+                // llenaban de ceros y se quedaban gastadas: cientos de MB tras un juego de 3DS o
+                // PS2). El bloque sigue preparado para el JIT.
+                uint8_t *rw = gJITPoolRX + gJITPoolDiff + first * kOSLRJITPage;
+                if (madvise(rw, (size_t)count * kOSLRJITPage, MADV_FREE_REUSABLE) != 0) {
+                    memset(rw, 0, (size_t)count * kOSLRJITPage);
+                }
                 memset(gJITPoolUsed + first, 0, count);
                 gJITPoolRuns[first] = 0;
                 freed = YES;
@@ -457,6 +466,39 @@ static BOOL OSLRJITPoolFree(void *pointer) {
     }
     os_unfair_lock_unlock(&gJITPoolLock);
     return freed;
+}
+
+// MARK: JIT permanente para los otros motores (ARMSX2)
+
+void *OSPermanentJITAllocate(size_t size, void **rw) {
+    if (rw) *rw = NULL;
+    if (size == 0 || rw == NULL) return NULL;
+    void *rx = OSLRJITPoolAllocate(size);
+    if (rx == NULL) {
+        OSLRTrace([NSString stringWithFormat:@"JIT permanente: %zu MB NO caben (otro motor)", size / (1024 * 1024)], NO);
+        return NULL;
+    }
+    *rw = (uint8_t *)rx + gJITPoolDiff;
+    OSLRTrace([NSString stringWithFormat:@"JIT permanente: %zu MB dados (otro motor)", size / (1024 * 1024)], NO);
+    return rx;
+}
+
+void OSPermanentJITFree(void *rx) {
+    if (OSLRJITPoolFree(rx)) OSLRTrace(@"JIT permanente: devuelto (otro motor)", NO);
+}
+
+size_t OSPermanentJITLargestFree(void) {
+    size_t best = 0;
+    os_unfair_lock_lock(&gJITPoolLock);
+    if (gJITPoolRX != NULL) {
+        size_t run = 0;
+        for (size_t page = 0; page < gJITPoolPages; page++) {
+            run = gJITPoolUsed[page] ? 0 : run + 1;
+            if (run > best) best = run;
+        }
+    }
+    os_unfair_lock_unlock(&gJITPoolLock);
+    return best * kOSLRJITPage;
 }
 
 // MARK: Opciones
@@ -3994,6 +4036,7 @@ typedef NS_ENUM(NSInteger, OSLRMenuAction) {
     atomic_store(&gJITSmallLogged, 0);
     gJITUnanswered = 0;
     atomic_store(&gLoopDone, false);
+    atomic_fetch_add(&gSessionNumber, 1);
     @synchronized ([OSLibretroEngine class]) { gLastCoreMessage = nil; }
     OSLRCoreLogReset();
     OSLRTrace([NSString stringWithFormat:@"abrir: %@ con %@ (JIT %@, depurador %@)", gamePath.lastPathComponent, framework,
@@ -4111,11 +4154,13 @@ typedef NS_ENUM(NSInteger, OSLRMenuAction) {
             weakController.closing = YES;
             atomic_store(&gRunning, false);
             atomic_store(&gPaused, false);
+            const uint64_t session = atomic_load(&gSessionNumber);
             // Si el núcleo no termina de cerrarse, la app no se queda colgada en su pantalla: se
             // vuelve a la biblioteca y se avisa (ese núcleo queda ocupado hasta reabrir la app).
             dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(12 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
                 OSLibretroEngine *engine = weakSelf;
-                if (engine == nil || !engine.busy || atomic_load(&gLoopDone)) return;
+                // Solo si sigue siendo esta partida (si ya se abrió otra, esta terminó bien).
+                if (engine == nil || !engine.busy || atomic_load(&gLoopDone) || atomic_load(&gSessionNumber) != session) return;
                 OSLRTrace(@"salir: el núcleo no terminó en 12 s; se vuelve a la biblioteca", NO);
                 atomic_store(&gCoreStuck, true);
                 [engine abandonSession];

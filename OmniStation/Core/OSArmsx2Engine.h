@@ -34,6 +34,13 @@ NS_ASSUME_NONNULL_BEGIN
 /// ¿Va la extensión de JIT dentro de la app? (SideStore puede quitarla al instalar.)
 @property (class, nonatomic, readonly) BOOL helperBundled;
 
+/// ¿La próxima partida puede ir con el JIT permanente? (Bloque preparado y con sitio para ARMSX2:
+/// sin extensión, sin VPN y sin depurador en cada partida, también en LiveContainer.)
+@property (class, nonatomic, readonly) BOOL permanentJITUsable;
+
+/// La partida abierta (o la última) usa el JIT permanente.
+@property (nonatomic, readonly) BOOL usingPermanentJIT;
+
 /// Hay una partida abierta o arrancando.
 @property (nonatomic, readonly) BOOL busy;
 

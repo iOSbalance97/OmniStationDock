@@ -88,3 +88,10 @@ NS_ASSUME_NONNULL_BEGIN
 @end
 
 NS_ASSUME_NONNULL_END
+
+/// JIT permanente para los motores que no son libretro (ARMSX2): un trozo del bloque preparado
+/// (devuelve la vista RX y deja la RW en *rw), o NULL si no está listo o no cabe.
+void * _Nullable OSPermanentJITAllocate(size_t size, void * _Nullable * _Nullable rw);
+void OSPermanentJITFree(void * _Nullable rx);
+/// El trozo libre más grande del JIT permanente (0 si no está preparado).
+size_t OSPermanentJITLargestFree(void);

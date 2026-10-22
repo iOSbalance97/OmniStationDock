@@ -14,6 +14,7 @@
 #import "OSArmsx2Engine.h"
 #import "ARMSX2CoreABI.h"
 #import "OSExternalDisplay.h"
+#import "OSLibretroEngine.h"
 #import "OSPerfHUD.h"
 
 #import <AVFoundation/AVFoundation.h>
@@ -1134,6 +1135,7 @@ static NSString *OSString(const char *text, NSString *fallback) {
 @property (nonatomic, copy) NSString *coreRevision;
 @property (nonatomic, copy, nullable) void (^endedHandler)(void);
 @property (nonatomic, copy, nullable) NSString *lastLaunchError;
+@property (nonatomic, readwrite) BOOL usingPermanentJIT;
 @end
 
 @implementation OSArmsx2Engine {
@@ -1219,8 +1221,24 @@ static NSString *gLoadedFlavor = nil;
 }
 
 + (BOOL)supportedHere {
-    if (getenv("LC_HOME_PATH") != NULL) return NO;
-    return NSProcessInfo.processInfo.operatingSystemVersion.majorVersion >= 18;
+    if (NSProcessInfo.processInfo.operatingSystemVersion.majorVersion < 18) return NO;
+    // En LiveContainer no hay extensión de JIT: solo con el JIT permanente (StikDebug al abrir la app).
+    if (getenv("LC_HOME_PATH") != NULL) return [OSArmsx2Engine permanentJITUsable];
+    return YES;
+}
+
+/// Memoria de código de ARMSX2 (HostMemoryMap::CodeSize: 305 MB).
+static const size_t kOSArmsx2CodeSize = (size_t)305 * 1024 * 1024;
+
+/// ¿Puede jugar con el JIT permanente (sin depurador ni extensión en cada partida)?
++ (BOOL)permanentJITUsable {
+    return [OSLibretroEngine persistentJITReady] && OSPermanentJITLargestFree() >= kOSArmsx2CodeSize;
+}
+
+/// ¿El núcleo cargado sabe usar la memoria de JIT de OmniStation?
+- (BOOL)coreSupportsCodeMemoryProvider {
+    const NeoARMSX2API *api = self.api;
+    return api != NULL && api->size >= sizeof(NeoARMSX2API) && api->set_code_memory_provider != NULL;
 }
 
 /// Carga el núcleo (una vez por proceso; nunca se descarga).
@@ -1240,7 +1258,8 @@ static NSString *gLoadedFlavor = nil;
     }
     NeoARMSX2GetAPI getAPI = (NeoARMSX2GetAPI)dlsym(handle, "NeoARMSX2_GetAPI");
     const NeoARMSX2API *api = getAPI ? getAPI(NEO_ARMSX2_ABI_VERSION) : NULL;
-    if (api == NULL || api->version != NEO_ARMSX2_ABI_VERSION || api->size < sizeof(NeoARMSX2API) ||
+    // Un núcleo anterior (sin set_code_memory_provider) también vale: va con el depurador.
+    if (api == NULL || api->version != NEO_ARMSX2_ABI_VERSION || api->size < offsetof(NeoARMSX2API, set_code_memory_provider) ||
         !api->create_render_view || !api->release_render_view || !api->prepare || !api->request_jit_detach ||
         !api->validate_jit || !api->boot || !api->request_stop || !api->shutdown || !api->set_paused ||
         !api->set_button || !api->set_sticks || !api->has_save_state || !api->save_state || !api->load_state) {
@@ -1526,27 +1545,54 @@ static NSString *gLoadedFlavor = nil;
     };
 
     dispatch_async(_runtimeQueue, ^{
-        report(OSText(language, @"Activando el JIT…", @"Enabling JIT…"));
         NSString *error = nil;
-        if (![self prepareJITWithPairing:pairingData progress:report error:&error]) {
-            self.busy = NO;
-            [self finishLaunch:NO message:error completion:completion];
-            return;
+        // JIT permanente: el bloque que OmniStation preparó al abrirse le da a ARMSX2 su memoria de
+        // código. Sin extensión, sin VPN y sin depurador en cada partida (también en LiveContainer).
+        BOOL pooled = [OSArmsx2Engine permanentJITUsable];
+        if (pooled) {
+            report(OSText(language, @"Cargando el núcleo de ARMSX2…", @"Loading the ARMSX2 core…"));
+            if (![self loadCore:&error]) {
+                self.busy = NO;
+                [self finishLaunch:NO message:error completion:completion];
+                return;
+            }
+            if ([self coreSupportsCodeMemoryProvider]) {
+                self.api->set_code_memory_provider(OSPermanentJITAllocate, OSPermanentJITFree);
+            } else {
+                pooled = NO; // núcleo anterior: con el depurador, como siempre
+            }
+        } else if ([self coreSupportsCodeMemoryProvider]) {
+            self.api->set_code_memory_provider(NULL, NULL);
         }
-        // iOS 26: el depurador debe responder de verdad antes de cargar (o reutilizar) el núcleo.
-        if (self.session.requiresCoreHandshake && ![self.session confirmCoreLoadReady]) {
-            [self abortJIT];
-            self.busy = NO;
-            [self finishLaunch:NO message:OSText(language, @"La comprobación del depurador falló. Vuelve a intentarlo.",
-                                                    @"The debugger check failed. Try again.") completion:completion];
-            return;
-        }
-        report(OSText(language, @"Cargando el núcleo de ARMSX2…", @"Loading the ARMSX2 core…"));
-        if (![self loadCore:&error]) {
-            [self abortJIT];
-            self.busy = NO;
-            [self finishLaunch:NO message:error completion:completion];
-            return;
+        self.usingPermanentJIT = pooled;
+        if (!pooled) {
+            if (getenv("LC_HOME_PATH") != NULL) {
+                self.busy = NO;
+                [self finishLaunch:NO message:OSText(language, @"En LiveContainer, ARMSX2 integrado necesita el JIT permanente: abre OmniStation con el JIT de StikDebug.",
+                                                        @"In LiveContainer, built-in ARMSX2 needs the permanent JIT: open OmniStation with StikDebug's JIT.") completion:completion];
+                return;
+            }
+            report(OSText(language, @"Activando el JIT…", @"Enabling JIT…"));
+            if (![self prepareJITWithPairing:pairingData progress:report error:&error]) {
+                self.busy = NO;
+                [self finishLaunch:NO message:error completion:completion];
+                return;
+            }
+            // iOS 26: el depurador debe responder de verdad antes de cargar (o reutilizar) el núcleo.
+            if (self.session.requiresCoreHandshake && ![self.session confirmCoreLoadReady]) {
+                [self abortJIT];
+                self.busy = NO;
+                [self finishLaunch:NO message:OSText(language, @"La comprobación del depurador falló. Vuelve a intentarlo.",
+                                                        @"The debugger check failed. Try again.") completion:completion];
+                return;
+            }
+            report(OSText(language, @"Cargando el núcleo de ARMSX2…", @"Loading the ARMSX2 core…"));
+            if (![self loadCore:&error]) {
+                [self abortJIT];
+                self.busy = NO;
+                [self finishLaunch:NO message:error completion:completion];
+                return;
+            }
         }
 
         __block OSArmsx2GameViewController *controller = nil;
@@ -1561,7 +1607,8 @@ static NSString *gLoadedFlavor = nil;
             controller.api = self.api;
             controller.language = language;
             // ARMSX2 solo arranca si validate_jit dice que el JIT quedó activo.
-            controller.jitText = OSText(language, @"Con JIT", @"Running with JIT");
+            controller.jitText = pooled ? OSText(language, @"Con JIT permanente", @"Running with permanent JIT")
+                                        : OSText(language, @"Con JIT", @"Running with JIT");
             controller.touchAlways = touchControlsAlways;
             controller.touchHaptics = [hostOptions[@"touchHaptics"] boolValue];
             NSString *aspect = hostOptions[@"aspectRatio"];
@@ -1612,14 +1659,17 @@ static NSString *gLoadedFlavor = nil;
             [self failLaunch:OSString(coreError, @"ARMSX2 no se pudo preparar.") completion:completion];
             return;
         }
-        memset(coreError, 0, sizeof(coreError));
-        if (!self.api->request_jit_detach(coreError, sizeof(coreError))) {
-            [self failLaunch:OSString(coreError, @"ARMSX2 no pudo soltar el depurador.") completion:completion];
-            return;
-        }
-        if (![self waitForDetach:&error]) {
-            [self failLaunch:error completion:completion];
-            return;
+        // Con el JIT permanente no hay depurador que soltar.
+        if (!pooled) {
+            memset(coreError, 0, sizeof(coreError));
+            if (!self.api->request_jit_detach(coreError, sizeof(coreError))) {
+                [self failLaunch:OSString(coreError, @"ARMSX2 no pudo soltar el depurador.") completion:completion];
+                return;
+            }
+            if (![self waitForDetach:&error]) {
+                [self failLaunch:error completion:completion];
+                return;
+            }
         }
         memset(coreError, 0, sizeof(coreError));
         if (!self.api->validate_jit(coreError, sizeof(coreError))) {
