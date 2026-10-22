@@ -18,11 +18,12 @@ print(info["framework"], info["bundleID"])
 PY
 )
 
-# Parches propios (si hay): Cores/Libretro/patches/<núcleo>/*.patch, en orden.
+# Parches propios (si hay): Cores/Libretro/patches/<núcleo>/*.patch, en orden. Con «patch» (no
+# «git apply») para que valgan también dentro de los submódulos del núcleo.
 shopt -s nullglob
 for patch in "$ROOT/Cores/Libretro/patches/$CORE/"*.patch; do
   echo "Parche: $(basename "$patch")"
-  git -C "$SRC" apply --whitespace=nowarn "$patch"
+  patch -p1 -N -d "$SRC" -i "$patch"
 done
 shopt -u nullglob
 
@@ -40,6 +41,33 @@ case "$CORE" in
       -DLIBRETRO=ON 2>&1 | tee "$LOGS/configure.log"
     cmake --build "$SRC/build/ios-arm64" --target dolphin_libretro -j "$(sysctl -n hw.ncpu)" 2>&1 | tee "$LOGS/build.log"
     BINARY="$(find "$SRC/build/ios-arm64" -maxdepth 3 -name 'dolphin_libretro*.dylib' -print -quit)"
+    ;;
+  azahar)
+    # dynarmic trae su propia copia de oaknut: que use la misma memoria de JIT que la de Azahar.
+    if [ -f "$SRC/externals/dynarmic/externals/oaknut/include/oaknut/code_block.hpp" ]; then
+      cp "$SRC/externals/oaknut/include/oaknut/code_block.hpp" "$SRC/externals/dynarmic/externals/oaknut/include/oaknut/code_block.hpp"
+    fi
+    grep -q dual_map_hooks "$SRC/externals/oaknut/include/oaknut/code_block.hpp"
+    # Igual que el workflow libretro-ios del propio Azahar, con iOS 17 como mínimo.
+    cmake -S "$SRC" -B "$SRC/build/ios-arm64" \
+      -DCMAKE_BUILD_TYPE=Release \
+      -DENABLE_LIBRETRO=ON \
+      -DCMAKE_POSITION_INDEPENDENT_CODE=ON \
+      -DCMAKE_C_FLAGS=-DIOS \
+      -DCMAKE_CXX_FLAGS=-DIOS \
+      -DIOS=ON \
+      -DCMAKE_SYSTEM_NAME=iOS \
+      -DCMAKE_OSX_DEPLOYMENT_TARGET=17.0 \
+      -DCITRA_USE_PRECOMPILED_HEADERS=OFF \
+      -DCMAKE_OSX_ARCHITECTURES=arm64 \
+      -DENABLE_OPT=OFF 2>&1 | tee "$LOGS/configure.log"
+    cmake --build "$SRC/build/ios-arm64" --target citra_libretro --config Release -j "$(sysctl -n hw.ncpu)" 2>&1 | tee "$LOGS/build.log"
+    BINARY="$(find "$SRC/build/ios-arm64" -maxdepth 4 -name 'azahar_libretro*.dylib' -print -quit)"
+    if [ -n "$BINARY" ]; then
+      # Que lleve el parche del JIT permanente (antes de quitar los símbolos).
+      nm "$BINARY" | grep -c SetupJITMemory >/dev/null || { echo "::error::Azahar sin el parche del JIT permanente." >&2; exit 1; }
+      strip -x "$BINARY"
+    fi
     ;;
   *)
     echo "Núcleo desconocido: $CORE" >&2

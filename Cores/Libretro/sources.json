@@ -5,5 +5,12 @@
     "framework": "dolphin_omni",
     "bundleID": "com.omnistation.core.dolphin",
     "notes": "Dolphin de libretro (GPL-2.0-or-later). En iOS pide su memoria de JIT al frontend con RETRO_ENVIRONMENT_EXEC_MEM_ALLOC: con OmniStation usa el JIT permanente."
+  },
+  "azahar": {
+    "repository": "https://github.com/azahar-emu/azahar.git",
+    "revision": "18c7ff10604659edc8e82d86b7c772f6f709c466",
+    "framework": "azahar_omni",
+    "bundleID": "com.omnistation.core.azahar",
+    "notes": "Azahar (GPL-2.0-or-later). Con el parche patches/azahar, en iOS pide su memoria de JIT al frontend con RETRO_ENVIRONMENT_EXEC_MEM_ALLOC (doble vista RX/RW): con OmniStation usa el JIT permanente para la CPU y los sombreadores."
   }
 }
