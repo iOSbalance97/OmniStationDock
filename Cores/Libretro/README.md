@@ -20,6 +20,9 @@ momento esos núcleos tienen JIT siempre, aunque el depurador se vaya.
 - **Dolphin** (libretro/dolphin): ya usa esa llamada en iOS. Se compila tal cual.
 - **Azahar** (3DS): `patches/azahar` hace que oaknut (la memoria de código de dynarmic y del JIT de
   sombreadores) la pida con esa llamada y escriba por la vista RW. Sin ella, intérprete.
+  `0002` le devuelve las ROMs cifradas (como Citra): descifra al vuelo con las claves del usuario
+  (`aes_keys.txt` o `keys.txt`, y `seeddb.bin`), que la app copia de 3DS/BIOS a
+  `Partidas/Azahar/sysdata`. Sin claves, el juego se abre con el Azahar de ManicEMU.
 - **Los demás** (melonDS DS, PPSSPP, Beetle PSX, Mupen64Plus-Next, Flycast…): hay que
   cambiar su forma de reservar la memoria de JIT para que la pida con esa llamada. Esos cambios van
   como parches en `patches/<núcleo>/*.patch` y se añaden a `sources.json` y a `build_core.sh`.

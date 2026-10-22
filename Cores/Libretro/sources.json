@@ -11,6 +11,6 @@
     "revision": "18c7ff10604659edc8e82d86b7c772f6f709c466",
     "framework": "azahar_omni",
     "bundleID": "com.omnistation.core.azahar",
-    "notes": "Azahar (GPL-2.0-or-later). Con el parche patches/azahar, en iOS pide su memoria de JIT al frontend con RETRO_ENVIRONMENT_EXEC_MEM_ALLOC (doble vista RX/RW): con OmniStation usa el JIT permanente para la CPU y los sombreadores."
+    "notes": "Azahar (GPL-2.0-or-later). Parches en patches/azahar: 0001, en iOS pide su memoria de JIT al frontend con RETRO_ENVIRONMENT_EXEC_MEM_ALLOC (JIT permanente para CPU y sombreadores); 0002, vuelve a abrir ROMs cifradas con las claves del usuario (aes_keys.txt/keys.txt y seeddb.bin)."
   }
 }

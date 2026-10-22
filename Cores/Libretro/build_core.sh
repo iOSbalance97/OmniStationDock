@@ -66,6 +66,7 @@ case "$CORE" in
     if [ -n "$BINARY" ]; then
       # Que lleve el parche del JIT permanente (antes de quitar los símbolos).
       nm "$BINARY" | grep -c SetupJITMemory >/dev/null || { echo "::error::Azahar sin el parche del JIT permanente." >&2; exit 1; }
+      nm "$BINARY" | grep -c NCCHDecryptIOFile >/dev/null || { echo "::error::Azahar sin el parche de ROMs cifradas." >&2; exit 1; }
       strip -x "$BINARY"
     fi
     ;;
