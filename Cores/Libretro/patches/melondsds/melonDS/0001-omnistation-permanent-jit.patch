@@ -156,3 +156,38 @@ index 6cc06b2..098a7cb 100644
  }
  
  }
+diff --git a/src/ARMJIT_Memory.cpp b/src/ARMJIT_Memory.cpp
+index c64bad1..f5e6fc0 100644
+--- a/src/ARMJIT_Memory.cpp
++++ b/src/ARMJIT_Memory.cpp
+@@ -906,6 +906,15 @@ ARMJIT_Memory::ARMJIT_Memory(melonDS::NDS& nds) : NDS(nds)
+         ioctl(fd, ASHMEM_SET_SIZE, MemoryTotalSize);
+         MemoryFile = fd;
+     }
++#elif defined(__APPLE__)
++    // OmniStation: fast memory is never used on Apple (IsFastMemSupported), so the emulated RAM
++    // does not need a shared memory object to mirror. The iOS sandbox forbids shm_open, which
++    // left this area unmapped and crashed on the first RAM access: plain anonymous memory.
++    MemoryFile = -1;
++    if (mmap(MemoryBase, MemoryTotalSize, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANON | MAP_FIXED, -1, 0) == MAP_FAILED)
++    {
++        Log(LogLevel::Error, "Failed to map the emulated memory! (%s)", strerror(errno));
++    }
+ #else
+     char fastmemPidName[snprintf(NULL, 0, "/melondsfastmem%d", getpid()) + 1];
+     snprintf(fastmemPidName, sizeof(fastmemPidName), "/melondsfastmem%d", getpid());
+@@ -916,12 +925,14 @@ ARMJIT_Memory::ARMJIT_Memory(melonDS::NDS& nds) : NDS(nds)
+     }
+     shm_unlink(fastmemPidName);
+ #endif
++#if !defined(__APPLE__)
+     if (ftruncate(MemoryFile, MemoryTotalSize) < 0)
+     {
+         Log(LogLevel::Error, "Failed to allocate memory using ftruncate! (%s)", strerror(errno));
+     }
+ 
+     mmap(MemoryBase, MemoryTotalSize, PROT_READ | PROT_WRITE, MAP_SHARED | MAP_FIXED, MemoryFile, 0);
++#endif
+ #endif
+     FastMem9Start = MemoryBase+MemoryTotalSize;
+     FastMem7Start = static_cast<u8*>(FastMem9Start)+AddrSpaceSize;
