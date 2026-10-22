@@ -1,0 +1,169 @@
+diff --git a/Makefile.libretro b/Makefile.libretro
+index cd53109..75b52d8 100644
+--- a/Makefile.libretro
++++ b/Makefile.libretro
+@@ -228,7 +228,13 @@ endif
+ ifeq ($(platform),ios-arm64)
+ 	ARCH := arm64
+ 	BUILTIN_GPU = neon
++ifeq ($(OMNI_EXEC_MEM),1)
++	# OmniStation: dynarec with the frontend's permanent JIT region (dual-mapped).
++	DYNAREC = ari64
++	CFLAGS += -DOMNI_EXEC_MEM
++else
+ 	DYNAREC = 0
++endif
+ else
+ 	ARCH := arm
+ 	HAVE_NEON_ASM = 1
+diff --git a/frontend/libretro.c b/frontend/libretro.c
+index 9dd3502..e375267 100644
+--- a/frontend/libretro.c
++++ b/frontend/libretro.c
+@@ -96,6 +96,42 @@ static retro_video_refresh_t video_cb;
+ static retro_input_poll_t input_poll_cb;
+ static retro_input_state_t input_state_cb;
+ static retro_environment_t environ_cb;
++
++#ifdef OMNI_EXEC_MEM
++/* OmniStation: executable memory from the frontend (RETRO_ENVIRONMENT_EXEC_MEM_ALLOC, as
++ * libretro's Dolphin uses it on iOS). On iOS 26+ (TXM) the frontend keeps one region that a
++ * debugger prepared once, so the dynarec keeps working without a debugger. */
++#define OMNI_ENVIRONMENT_EXEC_MEM_ALLOC 83
++#define OMNI_ENVIRONMENT_EXEC_MEM_FREE 84
++#define OMNI_EXEC_MEM_MODE_DUAL_MAP 4
++struct omni_exec_mem_alloc { unsigned version; size_t size; unsigned mode; void *rx; void *rw; };
++struct omni_exec_mem_free { void *rx; };
++
++int omni_exec_mem_ready(void)
++{
++   struct omni_exec_mem_alloc probe = { 1, 0, 0, NULL, NULL };
++   return environ_cb && environ_cb(OMNI_ENVIRONMENT_EXEC_MEM_ALLOC, &probe) &&
++          probe.mode == OMNI_EXEC_MEM_MODE_DUAL_MAP;
++}
++
++void *omni_exec_mem_alloc(size_t size, void **rw)
++{
++   struct omni_exec_mem_alloc request = { 1, size, OMNI_EXEC_MEM_MODE_DUAL_MAP, NULL, NULL };
++   *rw = NULL;
++   if (!environ_cb || !environ_cb(OMNI_ENVIRONMENT_EXEC_MEM_ALLOC, &request) ||
++       request.mode != OMNI_EXEC_MEM_MODE_DUAL_MAP || !request.rx || !request.rw)
++      return NULL;
++   *rw = request.rw;
++   return request.rx;
++}
++
++void omni_exec_mem_free(void *rx)
++{
++   struct omni_exec_mem_free request = { rx };
++   if (environ_cb)
++      environ_cb(OMNI_ENVIRONMENT_EXEC_MEM_FREE, &request);
++}
++#endif
+ static retro_audio_sample_batch_t audio_batch_cb;
+ static retro_set_rumble_state_t rumble_cb;
+ static struct retro_log_callback logging;
+@@ -2541,6 +2577,10 @@ static void update_variables(bool in_flight)
+          Config.Cpu = CPU_INTERPRETER;
+       else if (strcmp(var.value, "enabled") == 0)
+          Config.Cpu = CPU_DYNAREC;
++#ifdef OMNI_EXEC_MEM
++      if (Config.Cpu == CPU_DYNAREC && !omni_exec_mem_ready())
++         Config.Cpu = CPU_INTERPRETER;
++#endif
+ 
+       psxCpu = (Config.Cpu == CPU_INTERPRETER) ? &psxInt : &psxRec;
+       if (psxCpu != prev_cpu)
+@@ -3916,7 +3956,7 @@ void retro_init(void)
+    msg_interface_version = 0;
+    environ_cb(RETRO_ENVIRONMENT_GET_MESSAGE_INTERFACE_VERSION, &msg_interface_version);
+ 
+-#if defined(__MACH__) && !defined(TVOS)
++#if defined(__MACH__) && !defined(TVOS) && !defined(OMNI_EXEC_MEM)
+    // magic sauce to make the dynarec work on iOS
+    syscall(SYS_ptrace, 0 /*PTRACE_TRACEME*/, 0, 0, 0);
+ #endif
+@@ -3938,6 +3978,11 @@ void retro_init(void)
+    /* emu_core_preinit sets the cpu to dynarec */
+    if (!__ctr_svchax)
+       Config.Cpu = CPU_INTERPRETER;
++#endif
++#ifdef OMNI_EXEC_MEM
++   /* the dynarec only with executable memory from the frontend */
++   if (!omni_exec_mem_ready())
++      Config.Cpu = CPU_INTERPRETER;
+ #endif
+    init_memcards();
+ 
+diff --git a/libpcsxcore/new_dynarec/new_dynarec.c b/libpcsxcore/new_dynarec/new_dynarec.c
+index fb99df6..e472bed 100644
+--- a/libpcsxcore/new_dynarec/new_dynarec.c
++++ b/libpcsxcore/new_dynarec/new_dynarec.c
+@@ -155,6 +155,11 @@ static char ndrc_bss[((sizeof(*ndrc) + 65535) & ~65535) + 65536];
+ # endif
+ static long ndrc_write_ofs;
+ #define NDRC_WRITE_OFFSET(x) (void *)((char *)(x) + ndrc_write_ofs)
++#ifdef OMNI_EXEC_MEM
++// frontend/libretro.c: RETRO_ENVIRONMENT_EXEC_MEM_ALLOC / _FREE
++void *omni_exec_mem_alloc(size_t size, void **rw);
++void omni_exec_mem_free(void *rx);
++#endif
+ #else
+ #define NDRC_WRITE_OFFSET(x) (x)
+ #endif
+@@ -705,7 +710,12 @@ void new_dyna_clear_cache(void *start, void *end)
+   #if   defined(__BLACKBERRY_QNX__)
+   msync(start, len, MS_SYNC | MS_CACHE_ONLY | MS_INVALIDATE_ICACHE);
+   #elif defined(__MACH__)
++  #ifdef TC_WRITE_OFFSET
++  // callers pass the write view; the caches are cleaned through the executable one
++  sys_cache_control(kCacheFunctionPrepareForExecution, (char *)start - ndrc_write_ofs, len);
++  #else
+   sys_cache_control(kCacheFunctionPrepareForExecution, start, len);
++  #endif
+   #elif defined(VITA)
+   sceKernelSyncVMDomain(sceBlock, start, len);
+   #elif defined(_3DS)
+@@ -6711,6 +6721,17 @@ void new_dynarec_init(void)
+   ndrc = g_jit.rx_addr;
+   ndrc_write_ofs = (char *)g_jit.rw_addr - (char *)ndrc;
+   memset(NDRC_WRITE_OFFSET(&ndrc->tramp), 0, sizeof(ndrc->tramp));
++  #elif defined(OMNI_EXEC_MEM)
++  {
++    void *rw = NULL;
++    ndrc = omni_exec_mem_alloc(sizeof(*ndrc), &rw);
++    if (ndrc == NULL || rw == NULL) {
++      SysPrintf("OmniStation: no executable memory for the dynarec\n");
++      abort();
++    }
++    ndrc_write_ofs = (char *)rw - (char *)ndrc;
++    memset(NDRC_WRITE_OFFSET(&ndrc->tramp), 0, sizeof(ndrc->tramp));
++  }
+   #else
+   uintptr_t desired_addr = 0;
+   int prot = PROT_READ | PROT_WRITE | PROT_EXEC;
+@@ -6782,6 +6803,10 @@ void new_dynarec_cleanup(void)
+   #elif defined(HAVE_LIBNX)
+   jitClose(&g_jit);
+   ndrc = NULL;
++  #elif defined(OMNI_EXEC_MEM)
++  if (ndrc)
++    omni_exec_mem_free(ndrc);
++  ndrc = NULL;
+   #else
+   if (munmap(ndrc, sizeof(*ndrc)) < 0)
+     SysPrintf("munmap() failed\n");
+diff --git a/libpcsxcore/new_dynarec/new_dynarec_config.h b/libpcsxcore/new_dynarec/new_dynarec_config.h
+index 0781e47..5f8dc48 100644
+--- a/libpcsxcore/new_dynarec/new_dynarec_config.h
++++ b/libpcsxcore/new_dynarec/new_dynarec_config.h
+@@ -24,3 +24,9 @@
+ #if defined(_3DS)
+ #define NDRC_CACHE_FLUSH_ALL 1
+ #endif
++// OmniStation (iOS 26+): the translation cache comes from the frontend's permanent JIT region,
++// dual-mapped (execute through one view, write through the other).
++#if defined(OMNI_EXEC_MEM)
++#define BASE_ADDR_DYNAMIC 1
++#define TC_WRITE_OFFSET 1
++#endif
