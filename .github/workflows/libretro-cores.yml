@@ -60,13 +60,32 @@ jobs:
           PY
 
       - name: Checkout core source
+        if: steps.source.outputs.submodules != 'false'
         uses: actions/checkout@v4
         with:
           repository: ${{ steps.source.outputs.repository }}
           ref: ${{ steps.source.outputs.revision }}
           path: .native-sources/${{ inputs.core }}
-          submodules: ${{ steps.source.outputs.submodules }}
+          submodules: recursive
           persist-credentials: false
+
+      # Sin submódulos (Mupen64Plus-Next): su submódulo roto hace fallar a actions/checkout aunque no
+      # se pidan, así que se baja con git a secas.
+      - name: Checkout core source (git, sin submódulos)
+        if: steps.source.outputs.submodules == 'false'
+        env:
+          REPO: ${{ steps.source.outputs.repository }}
+          REV: ${{ steps.source.outputs.revision }}
+        run: |
+          set -euo pipefail
+          DEST=".native-sources/$CORE"
+          rm -rf "$DEST"
+          mkdir -p "$DEST"
+          git -C "$DEST" init -q
+          git -C "$DEST" remote add origin "https://github.com/$REPO.git"
+          git -C "$DEST" fetch -q --depth 1 origin "$REV"
+          git -C "$DEST" checkout -q FETCH_HEAD
+          test "$(git -C "$DEST" rev-parse HEAD)" = "$REV"
 
       - name: Select Xcode and tools
         run: |
