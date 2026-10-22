@@ -21,6 +21,7 @@
 #import "OSLibretroEngine.h"
 #import "OSExternalDisplay.h"
 #import "OSPerfHUD.h"
+#import "OSDeltaSkin.h"
 #import "OSRetroAPI.h"   // libretro.h (MIT), en plano para que no se pierda en el repo
 // Vulkan (3DS y GameCube/Wii): sin enlazar con nada; las funciones se piden a MoltenVK.
 #define VK_NO_PROTOTYPES 1
@@ -29,6 +30,7 @@
 
 #import <AVFoundation/AVFoundation.h>
 #import <GameController/GameController.h>
+#import <UniformTypeIdentifiers/UniformTypeIdentifiers.h>
 #import <QuartzCore/QuartzCore.h>
 #import <Metal/Metal.h>
 #import <OpenGLES/EAGL.h>
@@ -141,6 +143,15 @@ static size_t gAudioCapacity; // en fotogramas de audio (pares L/R)
 static _Atomic size_t gAudioWrite;
 static _Atomic size_t gAudioRead;
 static _Atomic float gVolume = 1.0f;
+// Avance rápido: fotogramas por cada uno normal (1 = normal). Mientras va rápido, sin sonido.
+static _Atomic int gFastSpeed = 1;
+// Trucos de la partida («name», «code», «enabled»): el menú los cambia y el hilo de emulación se los
+// pasa al núcleo (retro_cheat_reset / retro_cheat_set) cuando `gCheatsDirty`.
+static NSArray<NSDictionary<NSString *, id> *> *gCheats;
+static os_unfair_lock gCheatLock = OS_UNFAIR_LOCK_INIT;
+static _Atomic bool gCheatsDirty;
+static void (*gCheatReset)(void);
+static void (*gCheatSet)(unsigned index, bool enabled, const char *code);
 // Sonido «cebado»: empieza a sonar con un poco de margen y, si se vacía (el juego va lento o se
 // para un instante al pedir JIT), vuelve a esperar ese margen en vez de sonar a trompicones.
 static _Atomic bool gAudioPrimed;
@@ -1983,11 +1994,13 @@ static void OSLRPushAudio(const int16_t *samples, size_t frames) {
 }
 
 static void OSLRAudioSample(int16_t left, int16_t right) {
+    if (atomic_load_explicit(&gFastSpeed, memory_order_relaxed) > 1) return; // avance rápido: sin sonido
     int16_t pair[2] = {left, right};
     OSLRPushAudio(pair, 1);
 }
 
 static size_t OSLRAudioSampleBatch(const int16_t *data, size_t frames) {
+    if (atomic_load_explicit(&gFastSpeed, memory_order_relaxed) > 1) return frames;
     OSLRPushAudio(data, frames);
     return frames;
 }
@@ -2308,6 +2321,277 @@ static void OSLRStyleRow(UIView *row, BOOL selected) {
     row.layer.shadowOffset = CGSizeZero;
 }
 
+// MARK: Página del menú de la partida (menú, trucos, skins): panel de la app con filas legibles
+
+/// Panel con título, filas con icono y valor, y manejo con el mando (arriba/abajo, ‹ ›, A, Y, B).
+/// Cada fila: «title», «value» (opcional), «icon» (SF Symbol), «tint» (UIColor), «adjustable» y
+/// «removable» (NSNumber BOOL), «selected» (marca ✓).
+@interface OSLRListPage : UIView
+@property (nonatomic, copy) NSString *title;
+@property (nonatomic, copy, nullable) NSString *hint;
+@property (nonatomic, copy, nullable) NSAttributedString *badge;
+@property (nonatomic, assign) BOOL showsBack;
+@property (nonatomic, assign) NSInteger selectedIndex;
+@property (nonatomic, assign) BOOL highlightSelection;
+@property (nonatomic, copy, nullable) void (^activate)(NSInteger index);
+@property (nonatomic, copy, nullable) void (^adjust)(NSInteger index, NSInteger delta);
+@property (nonatomic, copy, nullable) void (^remove)(NSInteger index);
+@property (nonatomic, copy, nullable) void (^back)(void);
+@property (nonatomic, readonly) NSUInteger rowCount;
+- (void)setRows:(NSArray<NSDictionary<NSString *, id> *> *)rows;
+- (void)layoutInBounds:(CGRect)bounds safe:(UIEdgeInsets)safe;
+- (void)moveBy:(NSInteger)delta;
+- (void)horizontal:(NSInteger)delta;
+- (void)pressA;
+- (void)pressY;
+@end
+
+@implementation OSLRListPage {
+    UILabel *_titleLabel;
+    UILabel *_badgeLabel;
+    UILabel *_hintLabel;
+    UIButton *_backButton;
+    UIScrollView *_scroll;
+    NSMutableArray<UIButton *> *_rowButtons;
+    NSArray<NSDictionary<NSString *, id> *> *_rows;
+    NSInteger _columns;
+    NSInteger _perColumn;
+}
+
+- (instancetype)initWithFrame:(CGRect)frame {
+    self = [super initWithFrame:frame];
+    if (self) {
+        OSLRApplyPanelBackground(self, 24);
+        // Más opaco que la imagen del juego: el texto se lee siempre.
+        self.backgroundColor = [UIColor colorWithRed:0.02 green:0.035 blue:0.08 alpha:0.97];
+        _titleLabel = [UILabel new];
+        _titleLabel.textColor = UIColor.whiteColor;
+        _titleLabel.font = OSLRAppFont(19, UIFontWeightBold);
+        _titleLabel.adjustsFontSizeToFitWidth = YES;
+        _titleLabel.minimumScaleFactor = 0.6;
+        _titleLabel.layer.shadowColor = OSLRCyan(1).CGColor;
+        _titleLabel.layer.shadowOpacity = 0.45;
+        _titleLabel.layer.shadowRadius = 6;
+        _titleLabel.layer.shadowOffset = CGSizeZero;
+        [self addSubview:_titleLabel];
+        _badgeLabel = [UILabel new];
+        _badgeLabel.numberOfLines = 2;
+        _badgeLabel.adjustsFontSizeToFitWidth = YES;
+        _badgeLabel.minimumScaleFactor = 0.7;
+        [self addSubview:_badgeLabel];
+        _hintLabel = [UILabel new];
+        _hintLabel.textColor = [UIColor colorWithWhite:1 alpha:0.62];
+        _hintLabel.font = OSLRAppFont(11, UIFontWeightMedium);
+        _hintLabel.numberOfLines = 2;
+        [self addSubview:_hintLabel];
+        _backButton = [UIButton buttonWithType:UIButtonTypeSystem];
+        [_backButton setImage:[UIImage systemImageNamed:@"chevron.backward.circle.fill"] forState:UIControlStateNormal];
+        _backButton.tintColor = OSLRCyan(1);
+        [_backButton addTarget:self action:@selector(backTapped) forControlEvents:UIControlEventTouchUpInside];
+        [self addSubview:_backButton];
+        _scroll = [UIScrollView new];
+        _scroll.indicatorStyle = UIScrollViewIndicatorStyleWhite;
+        _scroll.alwaysBounceVertical = NO;
+        [self addSubview:_scroll];
+        _rowButtons = [NSMutableArray new];
+        _rows = @[];
+        _columns = 1;
+        _perColumn = 1;
+    }
+    return self;
+}
+
+- (void)backTapped {
+    if (self.back) self.back();
+}
+
+- (NSUInteger)rowCount {
+    return _rows.count;
+}
+
+- (void)setTitle:(NSString *)title {
+    _title = [title copy];
+    _titleLabel.text = title;
+}
+
+- (void)setHint:(NSString *)hint {
+    _hint = [hint copy];
+    _hintLabel.text = hint;
+    _hintLabel.hidden = hint.length == 0;
+}
+
+- (void)setBadge:(NSAttributedString *)badge {
+    _badge = [badge copy];
+    _badgeLabel.attributedText = badge;
+    _badgeLabel.textAlignment = NSTextAlignmentLeft;
+    _badgeLabel.hidden = badge.length == 0;
+}
+
+- (void)setRows:(NSArray<NSDictionary<NSString *, id> *> *)rows {
+    _rows = [rows copy];
+    while (_rowButtons.count > rows.count) {
+        [_rowButtons.lastObject removeFromSuperview];
+        [_rowButtons removeLastObject];
+    }
+    while (_rowButtons.count < rows.count) {
+        UIButton *button = [UIButton buttonWithType:UIButtonTypeCustom];
+        UIImageView *icon = [UIImageView new];
+        icon.tag = 910001;
+        icon.contentMode = UIViewContentModeScaleAspectFit;
+        icon.userInteractionEnabled = NO;
+        [button addSubview:icon];
+        UILabel *title = [UILabel new];
+        title.tag = 910002;
+        title.font = OSLRAppFont(15, UIFontWeightSemibold);
+        title.adjustsFontSizeToFitWidth = YES;
+        title.minimumScaleFactor = 0.7;
+        title.userInteractionEnabled = NO;
+        [button addSubview:title];
+        UILabel *value = [UILabel new];
+        value.tag = 910003;
+        value.textAlignment = NSTextAlignmentRight;
+        value.font = OSLRAppFont(13, UIFontWeightBold);
+        value.textColor = OSLRCyan(1);
+        value.adjustsFontSizeToFitWidth = YES;
+        value.minimumScaleFactor = 0.7;
+        value.userInteractionEnabled = NO;
+        [button addSubview:value];
+        [button addTarget:self action:@selector(rowTapped:) forControlEvents:UIControlEventTouchUpInside];
+        UILongPressGestureRecognizer *hold = [[UILongPressGestureRecognizer alloc] initWithTarget:self action:@selector(rowHeld:)];
+        [button addGestureRecognizer:hold];
+        [_scroll addSubview:button];
+        [_rowButtons addObject:button];
+    }
+    for (NSUInteger index = 0; index < rows.count; index++) {
+        NSDictionary<NSString *, id> *row = rows[index];
+        UIButton *button = _rowButtons[index];
+        button.tag = (NSInteger)index;
+        UIColor *tint = [row[@"tint"] isKindOfClass:UIColor.class] ? row[@"tint"] : UIColor.whiteColor;
+        UIImageView *icon = [button viewWithTag:910001];
+        UIImageSymbolConfiguration *config = [UIImageSymbolConfiguration configurationWithPointSize:17 weight:UIImageSymbolWeightSemibold];
+        NSString *symbol = [row[@"icon"] isKindOfClass:NSString.class] ? row[@"icon"] : nil;
+        icon.image = symbol ? [UIImage systemImageNamed:symbol withConfiguration:config] : nil;
+        icon.tintColor = [tint isEqual:UIColor.whiteColor] ? OSLRCyan(1) : tint;
+        UILabel *title = [button viewWithTag:910002];
+        title.text = row[@"title"];
+        title.textColor = tint;
+        UILabel *value = [button viewWithTag:910003];
+        NSString *text = [row[@"value"] isKindOfClass:NSString.class] ? row[@"value"] : nil;
+        if ([row[@"selected"] boolValue]) text = @"✓";
+        if ([row[@"adjustable"] boolValue] && text.length > 0) text = [NSString stringWithFormat:@"‹ %@ ›", text];
+        value.text = text;
+        value.hidden = text.length == 0;
+    }
+    if (self.selectedIndex >= (NSInteger)rows.count) self.selectedIndex = MAX(0, (NSInteger)rows.count - 1);
+    [self setNeedsLayout];
+    [self refreshSelection];
+}
+
+- (void)rowTapped:(UIButton *)sender {
+    self.selectedIndex = sender.tag;
+    [self refreshSelection];
+    if (self.activate) self.activate(sender.tag);
+}
+
+- (void)rowHeld:(UILongPressGestureRecognizer *)gesture {
+    if (gesture.state != UIGestureRecognizerStateBegan) return;
+    NSInteger index = gesture.view.tag;
+    if (index < 0 || index >= (NSInteger)_rows.count || ![_rows[(NSUInteger)index][@"removable"] boolValue]) return;
+    self.selectedIndex = index;
+    [self refreshSelection];
+    if (self.remove) self.remove(index);
+}
+
+- (void)refreshSelection {
+    for (UIButton *button in _rowButtons) {
+        OSLRStyleRow(button, button.tag == self.selectedIndex && self.highlightSelection);
+    }
+    if (self.highlightSelection && self.selectedIndex >= 0 && self.selectedIndex < (NSInteger)_rowButtons.count) {
+        [_scroll scrollRectToVisible:CGRectInset(_rowButtons[(NSUInteger)self.selectedIndex].frame, 0, -20) animated:YES];
+    }
+}
+
+- (void)setHighlightSelection:(BOOL)highlightSelection {
+    _highlightSelection = highlightSelection;
+    [self refreshSelection];
+}
+
+- (void)layoutInBounds:(CGRect)bounds safe:(UIEdgeInsets)safe {
+    CGFloat availableW = bounds.size.width - safe.left - safe.right - 24;
+    CGFloat availableH = bounds.size.height - safe.top - safe.bottom - 20;
+    BOOL landscape = bounds.size.width > bounds.size.height;
+    NSUInteger count = _rows.count;
+    CGFloat rowH = 50, gap = 10;
+    CGFloat header = 14 + 28 + (_badgeLabel.hidden ? 0 : 26) + (_hintLabel.hidden ? 0 : 32) + 8;
+    // En horizontal, si no caben en una columna, dos.
+    _columns = (landscape && count > 4 && header + count * (rowH + gap) > availableH) ? 2 : 1;
+    _perColumn = (NSInteger)ceil((double)count / (double)_columns);
+    CGFloat w = MIN(availableW, _columns == 2 ? 760 : 460);
+    CGFloat rowsH = _perColumn * (rowH + gap) - gap;
+    CGFloat h = MIN(availableH, header + rowsH + 16);
+    self.frame = CGRectMake(floor(safe.left + 12 + (availableW - w) * 0.5), floor(safe.top + 10 + (availableH - h) * 0.5), w, h);
+    OSLRLayoutPanelBackground(self);
+    CGFloat left = self.showsBack ? 54 : 18;
+    _backButton.hidden = !self.showsBack;
+    _backButton.frame = CGRectMake(12, 12, 36, 36);
+    CGFloat y = 14;
+    _titleLabel.frame = CGRectMake(left, y, w - left - 18, 28);
+    y += 28;
+    if (!_badgeLabel.hidden) { _badgeLabel.frame = CGRectMake(left, y + 2, w - left - 18, 22); y += 26; }
+    if (!_hintLabel.hidden) { _hintLabel.frame = CGRectMake(left, y + 2, w - left - 18, 30); y += 32; }
+    y += 8;
+    _scroll.frame = CGRectMake(12, y, w - 24, h - y - 12);
+    CGFloat columnW = (w - 24 - (_columns - 1) * gap) / _columns;
+    for (UIButton *button in _rowButtons) {
+        NSInteger index = button.tag;
+        NSInteger column = index / MAX(1, _perColumn);
+        NSInteger line = index % MAX(1, _perColumn);
+        button.frame = CGRectMake(column * (columnW + gap), line * (rowH + gap), columnW, rowH);
+        UIView *icon = [button viewWithTag:910001];
+        UIView *title = [button viewWithTag:910002];
+        UILabel *value = [button viewWithTag:910003];
+        icon.frame = CGRectMake(14, 13, 24, 24);
+        CGFloat valueW = value.hidden ? 0 : MIN(columnW * 0.42, 170);
+        title.frame = CGRectMake(48, 0, columnW - 62 - valueW, rowH);
+        value.frame = CGRectMake(columnW - valueW - 14, 0, valueW, rowH);
+    }
+    _scroll.contentSize = CGSizeMake(w - 24, rowsH);
+    [self refreshSelection];
+}
+
+- (void)moveBy:(NSInteger)delta {
+    NSInteger count = (NSInteger)_rows.count;
+    if (count == 0) return;
+    self.selectedIndex = ((self.selectedIndex + delta) % count + count) % count;
+    [self refreshSelection];
+}
+
+- (void)horizontal:(NSInteger)delta {
+    NSInteger count = (NSInteger)_rows.count;
+    if (self.selectedIndex < 0 || self.selectedIndex >= count) return;
+    if ([_rows[(NSUInteger)self.selectedIndex][@"adjustable"] boolValue]) {
+        if (self.adjust) self.adjust(self.selectedIndex, delta);
+        return;
+    }
+    if (_columns < 2) return;
+    NSInteger target = self.selectedIndex + delta * _perColumn;
+    if (target >= 0 && target < count) {
+        self.selectedIndex = target;
+        [self refreshSelection];
+    }
+}
+
+- (void)pressA {
+    if (self.selectedIndex >= 0 && self.selectedIndex < (NSInteger)_rows.count && self.activate) self.activate(self.selectedIndex);
+}
+
+- (void)pressY {
+    if (self.selectedIndex >= 0 && self.selectedIndex < (NSInteger)_rows.count &&
+        [_rows[(NSUInteger)self.selectedIndex][@"removable"] boolValue] && self.remove) self.remove(self.selectedIndex);
+}
+
+@end
+
 @interface OSLRGameViewController : UIViewController
 @property (nonatomic, copy) NSString *language;
 @property (nonatomic, copy) NSString *layout;
@@ -2329,6 +2613,10 @@ static void OSLRStyleRow(UIView *row, BOOL selected) {
 @property (nonatomic, copy, nullable) void (^optionChanged)(NSString *key, NSString *value);
 /// Mapa de botones del juego: botón físico (RETRO id) → el que manda.
 @property (nonatomic, copy) NSDictionary<NSNumber *, NSNumber *> *buttonMap;
+/// El núcleo admite trucos (retro_cheat_set hace algo): el menú enseña «Trucos».
+@property (nonatomic, assign) BOOL cheatsAllowed;
+/// Archivo de los trucos del juego (JSON).
+@property (nonatomic, copy, nullable) NSString *cheatPath;
 - (void)showStatus:(NSString *)message;
 - (void)reloadCoreOptions:(NSArray<NSMutableDictionary<NSString *, id> *> *)options;
 - (void)openMenu;
@@ -2343,19 +2631,41 @@ typedef NS_ENUM(NSInteger, OSLRMenuAction) {
     OSLRMenuActionReset,
     OSLRMenuActionQuit,
     OSLRMenuActionDisc,
-    OSLRMenuActionOptions
+    OSLRMenuActionOptions,
+    OSLRMenuActionFastForward,
+    OSLRMenuActionSound,
+    OSLRMenuActionCheats,
+    OSLRMenuActionSkins
 };
+
+@interface OSLRGameViewController () <UIDocumentPickerDelegate>
+@end
 
 @implementation OSLRGameViewController {
     OSLRPassThroughView *_controlsView;
     NSMutableArray<UIView *> *_groups;
     UIButton *_menuButton;
+    UIButton *_fastButton;
     UILabel *_statusLabel;
     UILabel *_tvLabel;
     UIView *_menuView;
-    NSArray<UIButton *> *_menuRows;
-    NSArray<UIButton *> *_visibleRows;
-    UILabel *_jitLabel;
+    // Páginas del menú: la principal, trucos y skins (la que se ve, en _activePage).
+    OSLRListPage *_menuPage;
+    OSLRListPage *_cheatsPage;
+    OSLRListPage *_skinsPage;
+    OSLRListPage *_activePage;
+    NSArray<NSNumber *> *_menuActions;
+    NSAttributedString *_jitBadge;
+    // Mando táctil: estilo propio («style:…») o skin de Delta.
+    NSString *_style;
+    OSDeltaSkinView *_skinView;
+    NSArray<OSDeltaSkin *> *_installedSkins;
+    NSArray<NSString *> *_skinChoices;
+    // Pantallas de la skin por separado (NDS): copias de la imagen del juego, cada una con su trozo.
+    NSMutableArray<UIView *> *_screenMirrors;
+    BOOL _mirrorsActive;
+    int _lastFastSpeed;
+    int _tvLogged;
     // Opciones del núcleo (una página del menú).
     UIView *_optionsView;
     UILabel *_optionsTitle;
@@ -2366,12 +2676,11 @@ typedef NS_ENUM(NSInteger, OSLRMenuAction) {
     BOOL _optionsVisible;
     NSInteger _optionIndex;
     BOOL _prevLeft, _prevRight;
-    NSInteger _menuIndex;
     BOOL _menuVisible;
     CADisplayLink *_displayLink;
     uint64_t _lastSerial;
     NSUInteger _statusToken;
-    BOOL _prevHome, _prevCombo, _prevUp, _prevDown, _prevA, _prevB;
+    BOOL _prevHome, _prevCombo, _prevUp, _prevDown, _prevA, _prevB, _prevY;
     NSMutableArray<id> *_observers;
     UIImpactFeedbackGenerator *_haptic;
     UIView *_tvHost;
@@ -2421,9 +2730,34 @@ typedef NS_ENUM(NSInteger, OSLRMenuAction) {
     button.layer.cornerRadius = 19;
     button.exclusiveTouch = NO;
     [button setTitle:title forState:UIControlStateNormal];
+    [self styleTouchView:button];
     [button addTarget:self action:@selector(padDown:) forControlEvents:UIControlEventTouchDown];
     [button addTarget:self action:@selector(padUp:) forControlEvents:UIControlEventTouchUpInside | UIControlEventTouchUpOutside | UIControlEventTouchCancel];
     return button;
+}
+
+/// Estilo propio del mando táctil (clásico, neón o transparente).
+- (void)styleTouchView:(UIView *)view {
+    BOOL button = [view isKindOfClass:UIButton.class];
+    if ([_style isEqualToString:OSSkinStyleNeon]) {
+        view.backgroundColor = OSLRCyan(button ? 0.12 : 0.08);
+        view.layer.borderWidth = 1.5;
+        view.layer.borderColor = OSLRCyan(0.95).CGColor;
+        view.layer.shadowColor = OSLRCyan(1).CGColor;
+        view.layer.shadowOpacity = 0.7;
+        view.layer.shadowRadius = 6;
+        view.layer.shadowOffset = CGSizeZero;
+        if (button) {
+            [(UIButton *)view setTitleColor:OSLRCyan(1) forState:UIControlStateNormal];
+            [(UIButton *)view setTitleColor:UIColor.whiteColor forState:UIControlStateHighlighted];
+        }
+    } else if ([_style isEqualToString:OSSkinStyleClear]) {
+        view.backgroundColor = [UIColor colorWithWhite:0 alpha:0.12];
+        view.layer.borderWidth = 1.0;
+        view.layer.borderColor = [UIColor colorWithWhite:1 alpha:0.22].CGColor;
+        view.layer.shadowOpacity = 0;
+        if (button) [(UIButton *)view setTitleColor:[UIColor colorWithWhite:1 alpha:0.55] forState:UIControlStateNormal];
+    }
 }
 
 - (void)padDown:(UIButton *)sender {
@@ -2534,6 +2868,7 @@ typedef NS_ENUM(NSInteger, OSLRMenuAction) {
     if (stick) {
         OSLRStickView *pad = [[OSLRStickView alloc] initWithFrame:CGRectMake(0, 0, 120, 120)];
         pad.tag = 1003;
+        [self styleTouchView:pad];
         [_groups addObject:pad];
     }
     if (n64) {
@@ -2594,6 +2929,10 @@ typedef NS_ENUM(NSInteger, OSLRMenuAction) {
     }
     BOOL show = !_onTV ? (self.touchAlways || !physical) : !physical;
     _controlsView.hidden = !show;
+    // En la tele con mando: solo queda el botón del menú.
+    _fastButton.hidden = _onTV && physical;
+    if (!show) [_skinView releaseAll];
+    if (self.isViewLoaded) [self.view setNeedsLayout];
     if (!show) {
         atomic_store(&gTouchBits, 0);
         atomic_store(&gTouchCBits, 0);
@@ -2625,7 +2964,14 @@ typedef NS_ENUM(NSInteger, OSLRMenuAction) {
     _controlsView.backgroundColor = UIColor.clearColor;
     _controlsView.multipleTouchEnabled = YES;
     [root addSubview:_controlsView];
+    NSString *selected = [OSDeltaSkin selectedForLayout:self.layout];
+    _style = [selected hasPrefix:@"style:"] ? selected : OSSkinStyleClassic;
     [self buildControls];
+    [self applySkinSelection];
+    _lastFastSpeed = 2;
+    atomic_store(&gFastSpeed, 1);
+    atomic_store(&gVolume, [NSUserDefaults.standardUserDefaults boolForKey:@"retroMuted"] ? 0.0f : 1.0f);
+    if (self.cheatsAllowed) [self loadCheats];
 
     if (self.hud) {
         [root addSubview:self.hud];
@@ -2643,6 +2989,13 @@ typedef NS_ENUM(NSInteger, OSLRMenuAction) {
     [_menuButton setImage:[UIImage systemImageNamed:@"line.3.horizontal"] forState:UIControlStateNormal];
     [_menuButton addTarget:self action:@selector(openMenu) forControlEvents:UIControlEventTouchUpInside];
     [root addSubview:_menuButton];
+    // Avance rápido a mano (toca: ×2 o la última velocidad elegida; otra vez: normal).
+    _fastButton = [UIButton buttonWithType:UIButtonTypeSystem];
+    _fastButton.layer.cornerRadius = 20;
+    [_fastButton setImage:[UIImage systemImageNamed:@"forward.fill"] forState:UIControlStateNormal];
+    [_fastButton addTarget:self action:@selector(toggleFastForward) forControlEvents:UIControlEventTouchUpInside];
+    [root addSubview:_fastButton];
+    [self updateFastButton];
 
     _statusLabel = [UILabel new];
     _statusLabel.textColor = UIColor.whiteColor;
@@ -2661,10 +3014,11 @@ typedef NS_ENUM(NSInteger, OSLRMenuAction) {
 }
 
 - (void)updateJITLabel {
-    _jitLabel.hidden = self.jitText.length == 0;
-    if (self.jitText.length > 0) {
+    if (self.jitText.length == 0) {
+        _jitBadge = nil;
+    } else {
         UIColor *color = self.jitOn ? [UIColor colorWithRed:0.30 green:0.95 blue:0.45 alpha:1.0] : [UIColor colorWithRed:1.0 green:0.42 blue:0.38 alpha:1.0];
-        UIImageSymbolConfiguration *config = [UIImageSymbolConfiguration configurationWithPointSize:13 weight:UIImageSymbolWeightBold];
+        UIImageSymbolConfiguration *config = [UIImageSymbolConfiguration configurationWithPointSize:12 weight:UIImageSymbolWeightBold];
         UIImage *symbol = [[UIImage systemImageNamed:self.jitOn ? @"bolt.fill" : @"bolt.slash.fill" withConfiguration:config] imageWithTintColor:color renderingMode:UIImageRenderingModeAlwaysOriginal];
         NSMutableAttributedString *text = [NSMutableAttributedString new];
         if (symbol) {
@@ -2675,47 +3029,415 @@ typedef NS_ENUM(NSInteger, OSLRMenuAction) {
         }
         [text appendAttributedString:[[NSAttributedString alloc] initWithString:self.jitText attributes:@{
             NSForegroundColorAttributeName: color,
-            NSFontAttributeName: OSLRAppFont(14, UIFontWeightBold)}]];
-        _jitLabel.attributedText = text;
+            NSFontAttributeName: OSLRAppFont(12, UIFontWeightBold)}]];
+        _jitBadge = text;
     }
+    _menuPage.badge = _jitBadge;
 }
 
 - (void)buildMenu {
     _menuView = [[UIView alloc] initWithFrame:self.view.bounds];
-    _menuView.backgroundColor = [UIColor colorWithRed:0.01 green:0.02 blue:0.05 alpha:0.80];
+    _menuView.backgroundColor = [UIColor colorWithRed:0.0 green:0.01 blue:0.03 alpha:0.86];
     _menuView.hidden = YES;
-    // Si el núcleo puede ir con o sin JIT, arriba se ve cómo arrancó.
-    _jitLabel = [UILabel new];
-    _jitLabel.textAlignment = NSTextAlignmentCenter;
-    _jitLabel.numberOfLines = 2;
+    __weak OSLRGameViewController *weakSelf = self;
+    _menuPage = [OSLRListPage new];
+    _menuPage.title = self.title.length > 0 ? self.title : [self t:@"Pausa" en:@"Paused"];
+    _menuPage.activate = ^(NSInteger index) { [weakSelf menuPageActivated:index]; };
+    _menuPage.adjust = ^(NSInteger index, NSInteger delta) { [weakSelf menuPageAdjusted:index by:delta]; };
+    [_menuView addSubview:_menuPage];
+    _cheatsPage = [OSLRListPage new];
+    _cheatsPage.title = [self t:@"Trucos" en:@"Cheats"];
+    _cheatsPage.hint = [self t:@"Toca o A para activar · mantén pulsado o Y para borrar · B para volver"
+                            en:@"Tap or A to toggle · hold or Y to delete · B to go back"];
+    _cheatsPage.showsBack = YES;
+    _cheatsPage.activate = ^(NSInteger index) { [weakSelf cheatActivated:index]; };
+    _cheatsPage.remove = ^(NSInteger index) { [weakSelf cheatRemove:index]; };
+    _cheatsPage.back = ^{ [weakSelf showPage:nil]; };
+    _cheatsPage.hidden = YES;
+    [_menuView addSubview:_cheatsPage];
+    _skinsPage = [OSLRListPage new];
+    _skinsPage.title = [self t:@"Skin del mando" en:@"Controller skin"];
+    _skinsPage.hint = [self t:@"Skins de Delta (.deltaskin) · mantén pulsado o Y para borrar una · B para volver"
+                           en:@"Delta skins (.deltaskin) · hold or Y to delete one · B to go back"];
+    _skinsPage.showsBack = YES;
+    _skinsPage.activate = ^(NSInteger index) { [weakSelf skinActivated:index]; };
+    _skinsPage.remove = ^(NSInteger index) { [weakSelf skinRemove:index]; };
+    _skinsPage.back = ^{ [weakSelf showPage:nil]; };
+    _skinsPage.hidden = YES;
+    [_menuView addSubview:_skinsPage];
+    _activePage = _menuPage;
     [self updateJITLabel];
-    [_menuView addSubview:_jitLabel];
-    NSArray<NSString *> *titles = @[[self t:@"Continuar" en:@"Resume"],
-                                    [self t:@"Guardar estado" en:@"Save state"],
-                                    [self t:@"Cargar estado" en:@"Load state"],
-                                    [self t:@"Reiniciar" en:@"Reset"],
-                                    [self t:@"Cambiar de disco" en:@"Change disc"],
-                                    [self t:@"Opciones del núcleo" en:@"Core options"],
-                                    [self t:@"Salir del juego" en:@"Quit game"]];
-    NSArray<NSNumber *> *actions = @[@(OSLRMenuActionResume), @(OSLRMenuActionSaveState), @(OSLRMenuActionLoadState),
-                                     @(OSLRMenuActionReset), @(OSLRMenuActionDisc), @(OSLRMenuActionOptions), @(OSLRMenuActionQuit)];
-    NSMutableArray<UIButton *> *rows = [NSMutableArray new];
-    for (NSUInteger index = 0; index < titles.count; index++) {
-        UIButton *row = [UIButton buttonWithType:UIButtonTypeSystem];
-        row.tag = actions[index].integerValue;
-        OSLRStyleRow(row, NO);
-        row.titleLabel.font = OSLRAppFont(16, UIFontWeightSemibold);
-        [row setTitle:titles[index] forState:UIControlStateNormal];
-        UIColor *color = row.tag == OSLRMenuActionQuit ? [UIColor colorWithRed:1.0 green:0.55 blue:0.45 alpha:1.0] : UIColor.whiteColor;
-        [row setTitleColor:color forState:UIControlStateNormal];
-        [row addTarget:self action:@selector(menuRowTapped:) forControlEvents:UIControlEventTouchUpInside];
-        [_menuView addSubview:row];
-        [rows addObject:row];
-    }
-    _menuRows = rows;
     [self updateVisibleRows];
     [self.view addSubview:_menuView];
     [self buildOptionsPage];
+}
+
+/// Filas del menú principal (según lo que admite el juego) con sus valores de ahora.
+- (void)updateVisibleRows {
+    BOOL discs = atomic_load(&gDiskCount) > 1;
+    BOOL muted = atomic_load(&gVolume) == 0.0f;
+    int speed = atomic_load(&gFastSpeed);
+    UIColor *red = [UIColor colorWithRed:1.0 green:0.55 blue:0.45 alpha:1.0];
+    NSMutableArray<NSDictionary<NSString *, id> *> *rows = [NSMutableArray new];
+    NSMutableArray<NSNumber *> *actions = [NSMutableArray new];
+    void (^add)(OSLRMenuAction, NSString *, NSString *, NSString *, BOOL, UIColor *) =
+        ^(OSLRMenuAction action, NSString *title, NSString *icon, NSString *value, BOOL adjustable, UIColor *tint) {
+        NSMutableDictionary<NSString *, id> *row = [@{@"title": title, @"icon": icon} mutableCopy];
+        if (value) row[@"value"] = value;
+        if (adjustable) row[@"adjustable"] = @YES;
+        if (tint) row[@"tint"] = tint;
+        [rows addObject:row];
+        [actions addObject:@(action)];
+    };
+    add(OSLRMenuActionResume, [self t:@"Continuar" en:@"Resume"], @"play.fill", nil, NO, nil);
+    add(OSLRMenuActionSaveState, [self t:@"Guardar estado" en:@"Save state"], @"square.and.arrow.down.fill", nil, NO, nil);
+    add(OSLRMenuActionLoadState, [self t:@"Cargar estado" en:@"Load state"], @"square.and.arrow.up.fill", nil, NO, nil);
+    add(OSLRMenuActionFastForward, [self t:@"Avance rápido" en:@"Fast forward"], @"forward.fill",
+        speed > 1 ? [NSString stringWithFormat:@"×%d", speed] : [self t:@"No" en:@"Off"], YES, nil);
+    add(OSLRMenuActionSound, [self t:@"Sonido" en:@"Sound"], muted ? @"speaker.slash.fill" : @"speaker.wave.2.fill",
+        muted ? [self t:@"Silenciado" en:@"Muted"] : [self t:@"Activado" en:@"On"], YES, nil);
+    if (self.cheatsAllowed) {
+        NSUInteger on = 0;
+        os_unfair_lock_lock(&gCheatLock);
+        for (NSDictionary *cheat in gCheats) if ([cheat[@"enabled"] boolValue]) on++;
+        os_unfair_lock_unlock(&gCheatLock);
+        add(OSLRMenuActionCheats, [self t:@"Trucos" en:@"Cheats"], @"wand.and.stars", on > 0 ? [NSString stringWithFormat:@"%lu", (unsigned long)on] : nil, NO, nil);
+    }
+    add(OSLRMenuActionSkins, [self t:@"Skin del mando" en:@"Controller skin"], @"gamecontroller.fill", [self currentSkinName], NO, nil);
+    if (self.coreOptions.count > 0) add(OSLRMenuActionOptions, [self t:@"Opciones del núcleo" en:@"Core options"], @"slider.horizontal.3", nil, NO, nil);
+    if (discs) add(OSLRMenuActionDisc, [self t:@"Cambiar de disco" en:@"Change disc"], @"opticaldisc.fill", nil, NO, nil);
+    add(OSLRMenuActionReset, [self t:@"Reiniciar" en:@"Reset"], @"arrow.counterclockwise", nil, NO, nil);
+    add(OSLRMenuActionQuit, [self t:@"Salir del juego" en:@"Quit game"], @"xmark.circle.fill", nil, NO, red);
+    _menuActions = actions;
+    [_menuPage setRows:rows];
+    [self.view setNeedsLayout];
+}
+
+- (void)menuPageActivated:(NSInteger)index {
+    if (index < 0 || index >= (NSInteger)_menuActions.count) return;
+    OSLRMenuAction action = (OSLRMenuAction)_menuActions[(NSUInteger)index].integerValue;
+    if (action == OSLRMenuActionFastForward || action == OSLRMenuActionSound) {
+        [self menuPageAdjusted:index by:1];
+        return;
+    }
+    [self activateRow:action];
+}
+
+- (void)menuPageAdjusted:(NSInteger)index by:(NSInteger)delta {
+    if (index < 0 || index >= (NSInteger)_menuActions.count) return;
+    OSLRMenuAction action = (OSLRMenuAction)_menuActions[(NSUInteger)index].integerValue;
+    if (action == OSLRMenuActionFastForward) {
+        int speed = atomic_load(&gFastSpeed) + (int)delta;
+        if (speed > 4) speed = 1;
+        if (speed < 1) speed = 4;
+        [self setFastSpeed:speed announce:NO];
+    } else if (action == OSLRMenuActionSound) {
+        BOOL muted = atomic_load(&gVolume) == 0.0f;
+        atomic_store(&gVolume, muted ? 1.0f : 0.0f);
+        [NSUserDefaults.standardUserDefaults setBool:!muted forKey:@"retroMuted"];
+    }
+    [self updateVisibleRows];
+}
+
+// MARK: Avance rápido
+
+- (void)setFastSpeed:(int)speed announce:(BOOL)announce {
+    speed = MAX(1, MIN(4, speed));
+    if (speed > 1) _lastFastSpeed = speed;
+    atomic_store(&gFastSpeed, speed);
+    [self updateFastButton];
+    if (announce) [self showStatus:speed > 1 ? [NSString stringWithFormat:@"%@ ×%d", [self t:@"Avance rápido" en:@"Fast forward"], speed]
+                                              : [self t:@"Velocidad normal" en:@"Normal speed"]];
+}
+
+- (void)toggleFastForward {
+    int speed = atomic_load(&gFastSpeed);
+    [self setFastSpeed:speed > 1 ? 1 : MAX(2, _lastFastSpeed) announce:YES];
+}
+
+- (void)updateFastButton {
+    BOOL on = atomic_load(&gFastSpeed) > 1;
+    _fastButton.backgroundColor = on ? OSLRCyan(0.55) : [UIColor colorWithWhite:0 alpha:0.5];
+    _fastButton.tintColor = on ? UIColor.blackColor : UIColor.whiteColor;
+}
+
+// MARK: Páginas
+
+/// Enseña una página del menú (nil: la principal).
+- (void)showPage:(nullable OSLRListPage *)page {
+    OSLRListPage *target = page ?: _menuPage;
+    if (target == _menuPage) [self updateVisibleRows];
+    for (OSLRListPage *candidate in @[_menuPage, _cheatsPage, _skinsPage]) candidate.hidden = candidate != target;
+    target.selectedIndex = target == _menuPage ? target.selectedIndex : 0;
+    _activePage = target;
+    target.highlightSelection = _controller != nil;
+    [self.view setNeedsLayout];
+}
+
+// MARK: Trucos
+
+- (void)loadCheats {
+    NSArray *list = nil;
+    if (self.cheatPath.length > 0) {
+        NSData *data = [NSData dataWithContentsOfFile:self.cheatPath];
+        id parsed = data ? [NSJSONSerialization JSONObjectWithData:data options:0 error:nil] : nil;
+        if ([parsed isKindOfClass:NSArray.class]) list = parsed;
+    }
+    NSMutableArray<NSDictionary<NSString *, id> *> *cheats = [NSMutableArray new];
+    for (NSDictionary *entry in list) {
+        if (![entry isKindOfClass:NSDictionary.class] || ![entry[@"code"] isKindOfClass:NSString.class]) continue;
+        [cheats addObject:@{@"name": [entry[@"name"] isKindOfClass:NSString.class] ? entry[@"name"] : entry[@"code"],
+                            @"code": entry[@"code"], @"enabled": @([entry[@"enabled"] boolValue])}];
+    }
+    os_unfair_lock_lock(&gCheatLock);
+    gCheats = cheats;
+    os_unfair_lock_unlock(&gCheatLock);
+    BOOL any = NO;
+    for (NSDictionary *cheat in cheats) if ([cheat[@"enabled"] boolValue]) any = YES;
+    if (any) atomic_store(&gCheatsDirty, true);
+}
+
+- (void)storeCheats:(NSArray<NSDictionary<NSString *, id> *> *)cheats {
+    os_unfair_lock_lock(&gCheatLock);
+    gCheats = [cheats copy];
+    os_unfair_lock_unlock(&gCheatLock);
+    atomic_store(&gCheatsDirty, true);
+    if (self.cheatPath.length > 0) {
+        NSData *data = [NSJSONSerialization dataWithJSONObject:cheats options:NSJSONWritingPrettyPrinted error:nil];
+        [data writeToFile:self.cheatPath atomically:YES];
+    }
+    [self reloadCheatsPage];
+}
+
+- (NSArray<NSDictionary<NSString *, id> *> *)currentCheats {
+    os_unfair_lock_lock(&gCheatLock);
+    NSArray *cheats = gCheats ?: @[];
+    os_unfair_lock_unlock(&gCheatLock);
+    return cheats;
+}
+
+- (void)reloadCheatsPage {
+    NSMutableArray<NSDictionary<NSString *, id> *> *rows = [NSMutableArray new];
+    for (NSDictionary *cheat in [self currentCheats]) {
+        BOOL on = [cheat[@"enabled"] boolValue];
+        [rows addObject:@{@"title": cheat[@"name"], @"icon": on ? @"checkmark.circle.fill" : @"circle",
+                          @"value": on ? [self t:@"Activado" en:@"On"] : [self t:@"No" en:@"Off"], @"removable": @YES}];
+    }
+    [rows addObject:@{@"title": [self t:@"Añadir truco…" en:@"Add cheat…"], @"icon": @"plus.circle.fill",
+                      @"tint": [UIColor colorWithRed:0.45 green:1.0 blue:0.65 alpha:1.0]}];
+    [_cheatsPage setRows:rows];
+    [self.view setNeedsLayout];
+}
+
+- (void)openCheats {
+    [self reloadCheatsPage];
+    [self showPage:_cheatsPage];
+}
+
+- (void)cheatActivated:(NSInteger)index {
+    NSMutableArray<NSDictionary<NSString *, id> *> *cheats = [[self currentCheats] mutableCopy];
+    if (index >= 0 && index < (NSInteger)cheats.count) {
+        NSMutableDictionary *cheat = [cheats[(NSUInteger)index] mutableCopy];
+        cheat[@"enabled"] = @(![cheat[@"enabled"] boolValue]);
+        cheats[(NSUInteger)index] = cheat;
+        [self storeCheats:cheats];
+        return;
+    }
+    // «Añadir truco…»: nombre y código (como en RetroArch: varias líneas con «+»).
+    UIAlertController *alert = [UIAlertController alertControllerWithTitle:[self t:@"Nuevo truco" en:@"New cheat"]
+                                                                   message:[self t:@"Código del juego (Game Genie, Action Replay, GameShark, CWCheat…). Varios códigos: sepáralos con «+»."
+                                                                                en:@"Game code (Game Genie, Action Replay, GameShark, CWCheat…). Several codes: separate them with \"+\"."]
+                                                            preferredStyle:UIAlertControllerStyleAlert];
+    [alert addTextFieldWithConfigurationHandler:^(UITextField *field) {
+        field.placeholder = [self t:@"Nombre (opcional)" en:@"Name (optional)"];
+    }];
+    [alert addTextFieldWithConfigurationHandler:^(UITextField *field) {
+        field.placeholder = [self t:@"Código" en:@"Code"];
+        field.autocapitalizationType = UITextAutocapitalizationTypeAllCharacters;
+        field.autocorrectionType = UITextAutocorrectionTypeNo;
+        field.spellCheckingType = UITextSpellCheckingTypeNo;
+    }];
+    __weak OSLRGameViewController *weakSelf = self;
+    __weak UIAlertController *weakAlert = alert;
+    [alert addAction:[UIAlertAction actionWithTitle:[self t:@"Cancelar" en:@"Cancel"] style:UIAlertActionStyleCancel handler:nil]];
+    [alert addAction:[UIAlertAction actionWithTitle:[self t:@"Añadir" en:@"Add"] style:UIAlertActionStyleDefault handler:^(UIAlertAction *action) {
+        NSString *name = [weakAlert.textFields[0].text stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceAndNewlineCharacterSet];
+        NSString *code = [weakAlert.textFields[1].text stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceAndNewlineCharacterSet];
+        if (code.length == 0) return;
+        OSLRGameViewController *strongSelf = weakSelf;
+        NSMutableArray *list = [[strongSelf currentCheats] mutableCopy];
+        [list addObject:@{@"name": name.length > 0 ? name : code, @"code": code, @"enabled": @YES}];
+        [strongSelf storeCheats:list];
+    }]];
+    [self presentViewController:alert animated:YES completion:nil];
+}
+
+- (void)cheatRemove:(NSInteger)index {
+    NSArray<NSDictionary<NSString *, id> *> *cheats = [self currentCheats];
+    if (index < 0 || index >= (NSInteger)cheats.count) return;
+    UIAlertController *alert = [UIAlertController alertControllerWithTitle:[self t:@"¿Borrar el truco?" en:@"Delete the cheat?"]
+                                                                   message:cheats[(NSUInteger)index][@"name"]
+                                                            preferredStyle:UIAlertControllerStyleAlert];
+    __weak OSLRGameViewController *weakSelf = self;
+    [alert addAction:[UIAlertAction actionWithTitle:[self t:@"Cancelar" en:@"Cancel"] style:UIAlertActionStyleCancel handler:nil]];
+    [alert addAction:[UIAlertAction actionWithTitle:[self t:@"Borrar" en:@"Delete"] style:UIAlertActionStyleDestructive handler:^(UIAlertAction *action) {
+        OSLRGameViewController *strongSelf = weakSelf;
+        NSMutableArray *list = [[strongSelf currentCheats] mutableCopy];
+        if (index < (NSInteger)list.count) [list removeObjectAtIndex:(NSUInteger)index];
+        [strongSelf storeCheats:list];
+    }]];
+    [self presentViewController:alert animated:YES completion:nil];
+}
+
+// MARK: Skins
+
+- (NSString *)currentSkinName {
+    NSString *selected = [OSDeltaSkin selectedForLayout:self.layout];
+    if ([selected isEqualToString:OSSkinStyleNeon]) return [self t:@"Neón" en:@"Neon"];
+    if ([selected isEqualToString:OSSkinStyleClear]) return [self t:@"Transparente" en:@"Clear"];
+    if ([selected hasPrefix:@"style:"]) return [self t:@"Clásico" en:@"Classic"];
+    OSDeltaSkin *skin = [OSDeltaSkin skinNamed:selected];
+    return skin.name ?: [self t:@"Clásico" en:@"Classic"];
+}
+
+- (void)reloadSkinsPage {
+    _installedSkins = [OSDeltaSkin installedSkinsForLayout:self.layout];
+    NSString *selected = [OSDeltaSkin selectedForLayout:self.layout];
+    NSMutableArray<NSString *> *choices = [NSMutableArray new];
+    NSMutableArray<NSDictionary<NSString *, id> *> *rows = [NSMutableArray new];
+    NSArray<NSArray<NSString *> *> *styles = @[@[OSSkinStyleClassic, [self t:@"Clásico (OmniStation)" en:@"Classic (OmniStation)"]],
+                                               @[OSSkinStyleNeon, [self t:@"Neón (OmniStation)" en:@"Neon (OmniStation)"]],
+                                               @[OSSkinStyleClear, [self t:@"Transparente (OmniStation)" en:@"Clear (OmniStation)"]]];
+    for (NSArray<NSString *> *style in styles) {
+        [choices addObject:style[0]];
+        [rows addObject:@{@"title": style[1], @"icon": @"circle.hexagongrid.fill", @"selected": @([selected isEqualToString:style[0]])}];
+    }
+    for (OSDeltaSkin *skin in _installedSkins) {
+        [choices addObject:skin.folderName];
+        [rows addObject:@{@"title": skin.name, @"icon": @"paintpalette.fill", @"removable": @YES,
+                          @"selected": @([selected isEqualToString:skin.folderName])}];
+    }
+    [choices addObject:@"import"];
+    [rows addObject:@{@"title": [self t:@"Importar skin (.deltaskin)…" en:@"Import skin (.deltaskin)…"], @"icon": @"square.and.arrow.down.on.square.fill",
+                      @"tint": [UIColor colorWithRed:0.45 green:1.0 blue:0.65 alpha:1.0]}];
+    _skinChoices = choices;
+    [_skinsPage setRows:rows];
+    [self.view setNeedsLayout];
+}
+
+- (void)openSkins {
+    [self reloadSkinsPage];
+    [self showPage:_skinsPage];
+}
+
+- (void)skinActivated:(NSInteger)index {
+    if (index < 0 || index >= (NSInteger)_skinChoices.count) return;
+    NSString *choice = _skinChoices[(NSUInteger)index];
+    if ([choice isEqualToString:@"import"]) {
+        UIDocumentPickerViewController *picker = [[UIDocumentPickerViewController alloc] initForOpeningContentTypes:@[UTTypeItem] asCopy:YES];
+        picker.delegate = self;
+        picker.allowsMultipleSelection = YES;
+        [self presentViewController:picker animated:YES completion:nil];
+        return;
+    }
+    [OSDeltaSkin setSelected:choice forLayout:self.layout];
+    [self applySkinSelection];
+    [self reloadSkinsPage];
+}
+
+- (void)skinRemove:(NSInteger)index {
+    NSInteger skinIndex = index - 3;
+    if (skinIndex < 0 || skinIndex >= (NSInteger)_installedSkins.count) return;
+    OSDeltaSkin *skin = _installedSkins[(NSUInteger)skinIndex];
+    UIAlertController *alert = [UIAlertController alertControllerWithTitle:[self t:@"¿Borrar la skin?" en:@"Delete the skin?"]
+                                                                   message:skin.name preferredStyle:UIAlertControllerStyleAlert];
+    __weak OSLRGameViewController *weakSelf = self;
+    [alert addAction:[UIAlertAction actionWithTitle:[self t:@"Cancelar" en:@"Cancel"] style:UIAlertActionStyleCancel handler:nil]];
+    [alert addAction:[UIAlertAction actionWithTitle:[self t:@"Borrar" en:@"Delete"] style:UIAlertActionStyleDestructive handler:^(UIAlertAction *action) {
+        [OSDeltaSkin removeSkin:skin];
+        [weakSelf applySkinSelection];
+        [weakSelf reloadSkinsPage];
+    }]];
+    [self presentViewController:alert animated:YES completion:nil];
+}
+
+- (void)documentPicker:(UIDocumentPickerViewController *)controller didPickDocumentsAtURLs:(NSArray<NSURL *> *)urls {
+    NSUInteger imported = 0;
+    NSString *lastError = nil;
+    OSDeltaSkin *forThis = nil;
+    for (NSURL *url in urls) {
+        NSString *error = nil;
+        OSDeltaSkin *skin = [OSDeltaSkin importArchiveAtURL:url error:&error];
+        if (skin == nil) { lastError = error; continue; }
+        imported++;
+        BOOL sameSystem = [skin.layout isEqualToString:self.layout] ||
+            (([skin.layout isEqualToString:@"gc"] || [skin.layout isEqualToString:@"wii"]) && ([self.layout isEqualToString:@"gc"] || [self.layout isEqualToString:@"wii"]));
+        if (sameSystem) forThis = skin;
+    }
+    if (forThis != nil) {
+        // La recién importada de este sistema se pone ya.
+        [OSDeltaSkin setSelected:forThis.folderName forLayout:self.layout];
+        [self applySkinSelection];
+        [self showStatus:[NSString stringWithFormat:@"%@: %@", [self t:@"Skin importada" en:@"Skin imported"], forThis.name]];
+    } else if (imported > 0) {
+        [self showStatus:[self t:@"Skin importada (es de otro sistema: aparecerá en sus juegos)" en:@"Skin imported (it is for another system: it will show in its games)"]];
+    } else {
+        NSString *reason = [lastError isEqualToString:@"system"] ? [self t:@"es de un sistema que OmniStation no tiene" en:@"it is for a system OmniStation does not have"]
+            : ([lastError isEqualToString:@"info"] ? [self t:@"no tiene info.json de Delta" en:@"it has no Delta info.json"]
+            : [self t:@"no es un .deltaskin válido" en:@"it is not a valid .deltaskin"]);
+        [self showStatus:[NSString stringWithFormat:@"%@: %@", [self t:@"No se pudo importar" en:@"Could not import"], reason]];
+    }
+    [self reloadSkinsPage];
+}
+
+/// Pone el estilo o la skin elegidos para este sistema (se puede cambiar en plena partida).
+- (void)applySkinSelection {
+    NSString *selected = [OSDeltaSkin selectedForLayout:self.layout];
+    [_skinView releaseAll];
+    [_skinView removeFromSuperview];
+    _skinView = nil;
+    OSDeltaSkin *skin = [selected hasPrefix:@"style:"] ? nil : [OSDeltaSkin skinNamed:selected];
+    NSString *style = skin != nil || [selected hasPrefix:@"style:"] ? (skin ? OSSkinStyleClassic : selected) : OSSkinStyleClassic;
+    if (![style isEqualToString:_style]) {
+        _style = style;
+        for (UIView *group in _groups) [group removeFromSuperview];
+        [_groups removeAllObjects];
+        [self buildControls];
+    }
+    if (skin != nil) {
+        OSDeltaSkinView *view = [[OSDeltaSkinView alloc] initWithSkin:skin layout:self.layout];
+        view.opacity = 0.75;
+        view.buttonsChanged = ^(uint32_t bits, uint32_t cBits) {
+            atomic_store(&gTouchBits, bits);
+            atomic_store(&gTouchCBits, cBits);
+        };
+        view.stickChanged = ^(CGFloat x, CGFloat y, BOOL active) {
+            atomic_store(&gTouchAxis[0], (int32_t)(x * 32767.0));
+            atomic_store(&gTouchAxis[1], (int32_t)(y * 32767.0));
+            atomic_store(&gTouchStickActive, active);
+        };
+        view.pointerChanged = ^(CGFloat x, CGFloat y, BOOL down) {
+            atomic_store(&gPointerX, (int32_t)(x * 0x7FFF));
+            atomic_store(&gPointerY, (int32_t)(y * 0x7FFF));
+            atomic_store(&gPointerDown, down);
+        };
+        __weak OSLRGameViewController *weakSelf = self;
+        view.special = ^(NSString *name, BOOL pressed) {
+            OSLRGameViewController *strongSelf = weakSelf;
+            if (strongSelf == nil) return;
+            if ([name isEqualToString:@"menu"] && pressed) [strongSelf openMenu];
+            else if ([name isEqualToString:@"toggleFastForward"] && pressed) [strongSelf toggleFastForward];
+            else if ([name isEqualToString:@"fastForward"]) [strongSelf setFastSpeed:pressed ? MAX(2, strongSelf->_lastFastSpeed) : 1 announce:NO];
+            else if ([name isEqualToString:@"quickSave"] && pressed && strongSelf.menuAction) strongSelf.menuAction(OSLRMenuActionSaveState);
+            else if ([name isEqualToString:@"quickLoad"] && pressed && strongSelf.menuAction) strongSelf.menuAction(OSLRMenuActionLoadState);
+        };
+        _skinView = view;
+        [_controlsView addSubview:view];
+    }
+    atomic_store(&gTouchBits, 0);
+    atomic_store(&gTouchCBits, 0);
+    atomic_store(&gTouchStickActive, false);
+    [self.view setNeedsLayout];
 }
 
 // MARK: Opciones del núcleo en la partida
@@ -2723,6 +3445,7 @@ typedef NS_ENUM(NSInteger, OSLRMenuAction) {
 - (void)buildOptionsPage {
     _optionsView = [[UIView alloc] initWithFrame:CGRectZero];
     OSLRApplyPanelBackground(_optionsView, 22);
+    _optionsView.backgroundColor = [UIColor colorWithRed:0.02 green:0.035 blue:0.08 alpha:0.97];
     _optionsView.hidden = YES;
     _optionsTitle = [UILabel new];
     _optionsTitle.text = [self t:@"Opciones del núcleo" en:@"Core options"];
@@ -2877,6 +3600,7 @@ typedef NS_ENUM(NSInteger, OSLRMenuAction) {
     _optionsView.hidden = YES;
     _menuView.hidden = NO;
     [self.view bringSubviewToFront:_menuView];
+    [self showPage:nil];
     [self refreshMenu];
 }
 
@@ -2910,16 +3634,37 @@ typedef NS_ENUM(NSInteger, OSLRMenuAction) {
     if (self.optionChanged) self.optionChanged(key, value);
 }
 
-/// Filas que se ven: «Cambiar de disco» solo si el juego tiene varios discos.
-- (void)updateVisibleRows {
-    BOOL discs = atomic_load(&gDiskCount) > 1;
-    NSMutableArray<UIButton *> *visible = [NSMutableArray new];
-    for (UIButton *row in _menuRows) {
-        BOOL show = (row.tag != OSLRMenuActionDisc || discs) && (row.tag != OSLRMenuActionOptions || self.coreOptions.count > 0);
-        row.hidden = !show;
-        if (show) [visible addObject:row];
+- (void)updateScreenMirrors:(BOOL)active {
+    _mirrorsActive = active;
+    if (!active) {
+        for (UIView *mirror in _screenMirrors) [mirror removeFromSuperview];
+        [_screenMirrors removeAllObjects];
+        self.videoView.hidden = NO;
+        return;
     }
-    _visibleRows = visible;
+    if (_screenMirrors == nil) _screenMirrors = [NSMutableArray new];
+    NSArray<NSValue *> *outputs = _skinView.screenOutputs;
+    NSArray<NSValue *> *sources = _skinView.screenSources;
+    while (_screenMirrors.count > outputs.count) {
+        [_screenMirrors.lastObject removeFromSuperview];
+        [_screenMirrors removeLastObject];
+    }
+    while (_screenMirrors.count < outputs.count) {
+        UIView *mirror = [UIView new];
+        mirror.userInteractionEnabled = NO;
+        mirror.backgroundColor = UIColor.blackColor;
+        mirror.layer.contentsGravity = kCAGravityResize;
+        mirror.layer.contents = self.videoView.layer.contents;
+        [self.view insertSubview:mirror aboveSubview:self.videoView];
+        [_screenMirrors addObject:mirror];
+    }
+    for (NSUInteger index = 0; index < outputs.count; index++) {
+        UIView *mirror = _screenMirrors[index];
+        mirror.frame = outputs[index].CGRectValue;
+        mirror.layer.contentsRect = sources[index].CGRectValue;
+        mirror.layer.magnificationFilter = self.smooth ? kCAFilterLinear : kCAFilterNearest;
+    }
+    self.videoView.hidden = YES;
 }
 
 - (CGRect)videoFrameInBounds:(CGRect)bounds safe:(UIEdgeInsets)safe portrait:(BOOL)portrait {
@@ -2958,11 +3703,34 @@ typedef NS_ENUM(NSInteger, OSLRMenuAction) {
     CGFloat h = root.bounds.size.height;
     UIEdgeInsets safe = root.safeAreaInsets;
     BOOL portrait = h > w;
+    // Skin de Delta: si tiene esta orientación, manda ella (y dice dónde va el juego).
+    BOOL skinActive = NO;
+    if (_skinView != nil) {
+        _skinView.frame = root.bounds;
+        skinActive = [_skinView applyForSize:root.bounds.size edgeToEdge:safe.bottom > 0];
+        _skinView.hidden = !skinActive;
+    }
+    for (UIView *group in _groups) group.hidden = skinActive;
+    // Skin con las pantallas separadas: solo con la imagen por CPU (las de GPU van en su capa).
+    BOOL mirrors = skinActive && !_controlsView.hidden && !_onTV && _skinView.screenOutputs.count > 0 &&
+        self.videoView.glLayer == nil && self.videoView.metalLayer == nil;
+    [self updateScreenMirrors:mirrors];
     if (!_onTV) {
-        self.videoView.frame = [self videoFrameInBounds:root.bounds safe:safe portrait:portrait];
+        CGRect screen = skinActive && !_controlsView.hidden ? _skinView.gameScreenFrame : CGRectNull;
+        if (!CGRectIsNull(screen) && screen.size.width > 8 && screen.size.height > 8) {
+            // Dentro del hueco de la skin, con su proporción.
+            double aspect = atomic_load(&gAspect);
+            CGFloat vw = screen.size.width, vh = floor(vw / aspect);
+            if (vh > screen.size.height) { vh = screen.size.height; vw = floor(vh * aspect); }
+            if (self.stretch) { vw = screen.size.width; vh = screen.size.height; }
+            self.videoView.frame = CGRectMake(floor(CGRectGetMidX(screen) - vw * 0.5), floor(CGRectGetMidY(screen) - vh * 0.5), vw, vh);
+        } else {
+            self.videoView.frame = [self videoFrameInBounds:root.bounds safe:safe portrait:portrait];
+        }
     }
     // Opción que va con la orientación (NDS: una pantalla encima de otra o al lado). En la tele, al lado.
-    if (gOrientKey != nil) atomic_store(&gOrientWanted, (portrait && !_onTV) ? 1 : 0);
+    // Con las pantallas separadas de una skin, siempre una encima de otra (como las espera la skin).
+    if (gOrientKey != nil) atomic_store(&gOrientWanted, (_mirrorsActive || (portrait && !_onTV)) ? 1 : 0);
     _controlsView.frame = root.bounds;
     CGFloat bottom = safe.bottom + 14;
     UIView *dpad = [_controlsView viewWithTag:1001];
@@ -2994,6 +3762,7 @@ typedef NS_ENUM(NSInteger, OSLRMenuAction) {
     }
     center.frame = CGRectMake(floor((w - 168) * 0.5), h - bottom - 34, 168, 34);
     _menuButton.frame = CGRectMake(safe.left + 14, safe.top + 12, 40, 40);
+    _fastButton.frame = CGRectMake(safe.left + 62, safe.top + 12, 40, 40);
     if (self.hud) {
         CGSize size = [self.hud fittingSize];
         self.hud.frame = CGRectMake(w - safe.right - 10 - size.width, safe.top + 12, size.width, size.height);
@@ -3002,15 +3771,7 @@ typedef NS_ENUM(NSInteger, OSLRMenuAction) {
     CGFloat labelWidth = MIN(w * 0.7, 420);
     _statusLabel.frame = CGRectMake((w - labelWidth) * 0.5, safe.top + 14, labelWidth, 54);
     _menuView.frame = root.bounds;
-    CGFloat rowWidth = MIN(w - 40, 340);
-    CGFloat rowHeight = 48;
-    CGFloat total = rowHeight * (CGFloat)_visibleRows.count + 12 * (CGFloat)(_visibleRows.count - 1);
-    CGFloat y = (h - total) * 0.5;
-    _jitLabel.frame = CGRectMake((w - rowWidth) * 0.5, y - 58, rowWidth, 44);
-    for (UIButton *row in _visibleRows) {
-        row.frame = CGRectMake((w - rowWidth) * 0.5, y, rowWidth, rowHeight);
-        y += rowHeight + 12;
-    }
+    [_activePage layoutInBounds:root.bounds safe:safe];
     if (_optionsVisible) [self layoutOptionsPage];
     if (_onTV) [self layoutTV];
 }
@@ -3157,6 +3918,7 @@ typedef NS_ENUM(NSInteger, OSLRMenuAction) {
         [CATransaction begin];
         [CATransaction setDisableActions:YES];
         self.videoView.layer.contents = (__bridge id)image;
+        for (UIView *mirror in _screenMirrors) mirror.layer.contents = (__bridge id)image;
         [CATransaction commit];
         CGImageRelease(image);
     }
@@ -3189,7 +3951,13 @@ typedef NS_ENUM(NSInteger, OSLRMenuAction) {
     float x = pad.dpad.xAxis.value;
     if (fabsf(x) < 0.5f) x = pad.leftThumbstick.xAxis.value;
     BOOL left = x < -0.5f, right = x > 0.5f;
-    BOOL a = pad.buttonA.isPressed, b = pad.buttonB.isPressed;
+    BOOL a = pad.buttonA.isPressed, b = pad.buttonB.isPressed, yButton = pad.buttonY.isPressed;
+    // Con una alerta o el selector de archivos delante, el mando no toca el menú.
+    if (self.presentedViewController != nil) {
+        _prevHome = home; _prevCombo = combo; _prevUp = up; _prevDown = down; _prevA = a; _prevB = b;
+        _prevLeft = left; _prevRight = right; _prevY = yButton;
+        return;
+    }
     if (_menuVisible && _optionsVisible && !self.closing) {
         NSInteger count = (NSInteger)_optionRows.count;
         if (count > 0) {
@@ -3201,31 +3969,34 @@ typedef NS_ENUM(NSInteger, OSLRMenuAction) {
         if (b && !_prevB) [self closeOptionsPage];
         if (home && !_prevHome) { [self closeOptionsPage]; [self closeMenu]; }
         _prevHome = home; _prevCombo = combo; _prevUp = up; _prevDown = down; _prevA = a; _prevB = b;
-        _prevLeft = left; _prevRight = right;
+        _prevLeft = left; _prevRight = right; _prevY = yButton;
         return;
     }
     if (!_menuVisible) {
         if ((home && !_prevHome) || (combo && !_prevCombo)) [self openMenu];
     } else if (!self.closing) {
-        NSInteger count = (NSInteger)_visibleRows.count;
-        if (count > 0) {
-            if (up && !_prevUp) { _menuIndex = (_menuIndex + count - 1) % count; [self refreshMenu]; }
-            if (down && !_prevDown) { _menuIndex = (_menuIndex + 1) % count; [self refreshMenu]; }
-            if (a && !_prevA && _menuIndex < count) [self activateRow:_visibleRows[_menuIndex].tag];
+        OSLRListPage *page = _activePage ?: _menuPage;
+        page.highlightSelection = YES;
+        if (up && !_prevUp) [page moveBy:-1];
+        if (down && !_prevDown) [page moveBy:1];
+        if (left && !_prevLeft) [page horizontal:-1];
+        if (right && !_prevRight) [page horizontal:1];
+        if (a && !_prevA) [page pressA];
+        if (yButton && !_prevY) [page pressY];
+        if (b && !_prevB) {
+            if (page == _menuPage) [self closeMenu];
+            else [self showPage:nil];
         }
-        if ((b && !_prevB) || (home && !_prevHome)) [self closeMenu];
+        if (home && !_prevHome) [self closeMenu];
     }
     _prevHome = home; _prevCombo = combo; _prevUp = up; _prevDown = down; _prevA = a; _prevB = b;
-    _prevLeft = left; _prevRight = right;
+    _prevLeft = left; _prevRight = right; _prevY = yButton;
 }
 
 // MARK: Menú
 
 - (void)refreshMenu {
-    UIButton *current = _menuIndex < (NSInteger)_visibleRows.count ? _visibleRows[_menuIndex] : nil;
-    for (UIButton *row in _menuRows) {
-        OSLRStyleRow(row, row == current && _controller != nil);
-    }
+    _menuPage.highlightSelection = _controller != nil;
 }
 
 - (void)openMenu {
@@ -3242,10 +4013,10 @@ typedef NS_ENUM(NSInteger, OSLRMenuAction) {
         [self updateJITLabel];
     }
     _menuVisible = YES;
-    _menuIndex = 0;
-    [self updateVisibleRows];
-    [self.view setNeedsLayout];
+    _menuPage.selectedIndex = 0;
+    [self showPage:nil];
     [self refreshMenu];
+    [_skinView releaseAll];
     _menuView.hidden = NO;
     [self.view bringSubviewToFront:_menuView];
     atomic_store(&gTouchBits, 0);
@@ -3270,6 +4041,14 @@ typedef NS_ENUM(NSInteger, OSLRMenuAction) {
 - (void)activateRow:(NSInteger)action {
     if (action == OSLRMenuActionOptions) {
         [self openOptionsPage];
+        return;
+    }
+    if (action == OSLRMenuActionCheats) {
+        [self openCheats];
+        return;
+    }
+    if (action == OSLRMenuActionSkins) {
+        [self openSkins];
         return;
     }
     if (action != OSLRMenuActionQuit) [self closeMenu];
@@ -3297,12 +4076,20 @@ typedef NS_ENUM(NSInteger, OSLRMenuAction) {
 
 - (void)updateExternalDisplay {
     BOOL wantTV = OSExternalDisplay.enabled && OSExternalDisplay.shared.connected;
+    // En el registro, para saber si iOS le dio a la app la pantalla de la tele (AirPlay/HDMI).
+    int state = (OSExternalDisplay.shared.connected ? 1 : 0) | (OSExternalDisplay.enabled ? 2 : 0) | 4;
+    if (state != _tvLogged) {
+        _tvLogged = state;
+        OSLRTrace([NSString stringWithFormat:@"tele: %@, ajuste %@", OSExternalDisplay.shared.connected ? @"conectada" : @"no (iOS solo duplica la pantalla)",
+                   OSExternalDisplay.enabled ? @"sí" : @"no"], NO);
+    }
     if (wantTV && !_onTV) {
         if (_tvHost == nil) {
             _tvHost = [[UIView alloc] initWithFrame:CGRectMake(0, 0, 1920, 1080)];
             _tvHost.backgroundColor = UIColor.blackColor;
             _tvHost.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
         }
+        [self updateScreenMirrors:NO];
         [_tvHost addSubview:self.videoView];
         if ([OSExternalDisplay.shared hostView:_tvHost]) {
             _onTV = YES;
@@ -3316,6 +4103,7 @@ typedef NS_ENUM(NSInteger, OSLRMenuAction) {
         [self releaseExternalDisplay];
     }
     [self updateControlsVisibility];
+    [self.view setNeedsLayout];
 }
 
 - (void)returnVideoToPhone {
@@ -3572,6 +4360,9 @@ typedef NS_ENUM(NSInteger, OSLRMenuAction) {
     OSLR_SYMBOL(getMemoryData, "retro_get_memory_data");
     OSLR_SYMBOL(getMemorySize, "retro_get_memory_size");
     #undef OSLR_SYMBOL
+    // Trucos (opcionales: no todos los núcleos hacen algo con ellos).
+    gCheatReset = (void (*)(void))dlsym(handle, "retro_cheat_reset");
+    gCheatSet = (void (*)(unsigned, bool, const char *))dlsym(handle, "retro_cheat_set");
     if (missing.count > 0) {
         if (error) *error = [@"El núcleo no es libretro o está incompleto. Falta: " stringByAppendingString:[missing componentsJoinedByString:@", "]];
         return NO;
@@ -3825,12 +4616,29 @@ typedef NS_ENUM(NSInteger, OSLRMenuAction) {
                 gUserOptions = options;
                 atomic_store(&gVariablesChanged, true);
             }
+            // Trucos cambiados en el menú (o los guardados, al empezar): se le pasan todos de nuevo.
+            if (atomic_exchange(&gCheatsDirty, false) && gCheatReset != NULL && gCheatSet != NULL) {
+                os_unfair_lock_lock(&gCheatLock);
+                NSArray<NSDictionary<NSString *, id> *> *cheats = [gCheats copy];
+                os_unfair_lock_unlock(&gCheatLock);
+                gCheatReset();
+                unsigned index = 0;
+                for (NSDictionary<NSString *, id> *cheat in cheats) {
+                    if (![cheat[@"enabled"] boolValue]) continue;
+                    NSString *code = cheat[@"code"];
+                    if (code.length > 0) gCheatSet(index++, true, code.UTF8String);
+                }
+            }
             frameTime = 1.0 / gFPS;
-            if (gHasFrameTimeCallback) gFrameTimeCallback.callback(gFrameTimeCallback.reference);
-            gCore.run();
+            // Avance rápido: varios fotogramas seguidos (sin sonido) por cada uno normal.
+            int speed = atomic_load(&gFastSpeed);
+            for (int step = 0; step < MAX(1, speed); step++) {
+                if (gHasFrameTimeCallback) gFrameTimeCallback.callback(gFrameTimeCallback.reference);
+                gCore.run();
+            }
             // Ritmo del juego; si el sonido se llena o se vacía, se corrige un poco.
             double fill = OSLRAudioFill();
-            double adjust = fill > 0.6 ? 1.02 : (fill < 0.2 ? 0.98 : 1.0);
+            double adjust = speed > 1 ? 1.0 : (fill > 0.6 ? 1.02 : (fill < 0.2 ? 0.98 : 1.0));
             next += frameTime * adjust;
             double now = OSLRNow();
             if (next > now) {
@@ -3844,7 +4652,7 @@ typedef NS_ENUM(NSInteger, OSLRMenuAction) {
             // El sonido manda: si el núcleo va más deprisa que lo que suena (algunos, como el de
             // 3DS, entregan el sonido a ráfagas), se espera a que haya sitio en vez de tirarlo.
             BOOL audioAlive = OSLRNow() - atomic_load(&gLastAudioPull) < 0.15;
-            for (int wait = 0; audioAlive && wait < 25 && OSLRAudioFill() > 0.75 && atomic_load(&gRunning); wait++) {
+            for (int wait = 0; speed <= 1 && audioAlive && wait < 25 && OSLRAudioFill() > 0.75 && atomic_load(&gRunning); wait++) {
                 [NSThread sleepForTimeInterval:0.002];
                 next = OSLRNow();
             }
@@ -4132,6 +4940,12 @@ typedef NS_ENUM(NSInteger, OSLRMenuAction) {
         if (from >= 0 && to >= 0) map[@(from)] = @(to);
     }
     controller.buttonMap = map;
+    controller.cheatsAllowed = [hostOptions[@"cheats"] isEqualToString:@"true"] && gCheatSet != NULL && gCheatReset != NULL;
+    controller.cheatPath = [saveDirectory stringByAppendingPathComponent:[base stringByAppendingPathExtension:@"cheats.json"]];
+    os_unfair_lock_lock(&gCheatLock);
+    gCheats = @[];
+    os_unfair_lock_unlock(&gCheatLock);
+    atomic_store(&gCheatsDirty, false);
     // Opciones del núcleo para el menú de la partida (con el valor con el que arranca).
     controller.coreOptions = OSLRMenuOptions(self.menuOptions);
     void (^changed)(NSString *, NSString *) = self.menuOptionChanged;
