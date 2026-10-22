@@ -1,5 +1,5 @@
 diff --git a/src/citra_libretro/core_settings.cpp b/src/citra_libretro/core_settings.cpp
-index 7b43e31..0357126 100644
+index 7b43e31c3..035712651 100644
 --- a/src/citra_libretro/core_settings.cpp
 +++ b/src/citra_libretro/core_settings.cpp
 @@ -843,10 +843,18 @@ void RegisterCoreOptions(void) {
@@ -36,7 +36,7 @@ index 7b43e31..0357126 100644
          config::enabled;
  #endif
 diff --git a/src/citra_libretro/environment.cpp b/src/citra_libretro/environment.cpp
-index 01ffecf..fa57a23 100644
+index 01ffecfc9..fa57a23a0 100644
 --- a/src/citra_libretro/environment.cpp
 +++ b/src/citra_libretro/environment.cpp
 @@ -16,6 +16,10 @@
@@ -120,7 +120,7 @@ index 01ffecf..fa57a23 100644
  
  void OnConfigureEnvironment() {
 diff --git a/src/citra_libretro/environment.h b/src/citra_libretro/environment.h
-index a6a29c4..90b979c 100644
+index a6a29c468..90b979caa 100644
 --- a/src/citra_libretro/environment.h
 +++ b/src/citra_libretro/environment.h
 @@ -127,6 +127,9 @@ void SetVFSCallback(struct retro_vfs_interface_info* vfs_iface_info);
@@ -134,7 +134,7 @@ index a6a29c4..90b979c 100644
  
  } // namespace LibRetro
 diff --git a/src/core/arm/dynarmic/arm_dynarmic.cpp b/src/core/arm/dynarmic/arm_dynarmic.cpp
-index 216b409..0450761 100644
+index 216b4094c..0450761da 100644
 --- a/src/core/arm/dynarmic/arm_dynarmic.cpp
 +++ b/src/core/arm/dynarmic/arm_dynarmic.cpp
 @@ -370,6 +370,11 @@ std::unique_ptr<Dynarmic::A32::Jit> ARM_Dynarmic::MakeJit() {
@@ -150,7 +150,7 @@ index 216b409..0450761 100644
  }
  
 diff --git a/src/video_core/shader/shader_jit_a64_compiler.cpp b/src/video_core/shader/shader_jit_a64_compiler.cpp
-index bdc0f85..ffb15c5 100644
+index bdc0f8541..ffb15c5a9 100644
 --- a/src/video_core/shader/shader_jit_a64_compiler.cpp
 +++ b/src/video_core/shader/shader_jit_a64_compiler.cpp
 @@ -1054,7 +1054,7 @@ void JitShader::Compile(const std::array<u32, MAX_PROGRAM_CODE_LENGTH>* program_

@@ -1,0 +1,484 @@
+diff --git a/src/citra_libretro/citra_libretro.cpp b/src/citra_libretro/citra_libretro.cpp
+index c9123085b..83d4cf6e4 100644
+--- a/src/citra_libretro/citra_libretro.cpp
++++ b/src/citra_libretro/citra_libretro.cpp
+@@ -534,7 +534,8 @@ bool retro_load_game(const struct retro_game_info* info) {
+             switch (result) {
+             case Loader::ResultStatus::ErrorEncrypted:
+                 LibRetro::DisplayMessage(
+-                    "This ROM is encrypted and must be decrypted before use with Azahar.");
++                    "This ROM is encrypted and its keys are missing: put aes_keys.txt (and "
++                    "seeddb.bin) in Azahar's sysdata folder, or decrypt the ROM.");
+                 break;
+             case Loader::ResultStatus::ErrorInvalidFormat:
+                 LibRetro::DisplayMessage("The ROM format is not supported.");
+diff --git a/src/common/file_derived.cpp b/src/common/file_derived.cpp
+index d05f013db..8fbfda8eb 100644
+--- a/src/common/file_derived.cpp
++++ b/src/common/file_derived.cpp
+@@ -970,10 +970,59 @@ void Z3DSReadIOFile::serialize(Archive& ar, const unsigned int) {
+     is_serializing = false;
+ }
+ 
++NCCHDecryptIOFile::NCCHDecryptIOFile() {
++    Child() = std::make_unique<NullIOFile>();
++}
++
++NCCHDecryptIOFile::NCCHDecryptIOFile(std::unique_ptr<IOFileBase>&& child_file,
++                                     std::vector<Region> regions_)
++    : regions(std::move(regions_)) {
++    Child() = std::move(child_file);
++}
++
++NCCHDecryptIOFile::~NCCHDecryptIOFile() = default;
++
++std::unique_ptr<IOFileBase> NCCHDecryptIOFile::OpenCopy() const {
++    return std::make_unique<NCCHDecryptIOFile>(Child()->OpenCopy(), regions);
++}
++
++void NCCHDecryptIOFile::Decrypt(u8* data, std::size_t size, u64 offset) const {
++    if (size == 0) {
++        return;
++    }
++    const u64 last = offset + size;
++    for (const auto& region : regions) {
++        const u64 begin = std::max<u64>(offset, region.begin);
++        const u64 end = std::min<u64>(last, region.end);
++        if (begin >= end || region.key.size() != 16 || region.ctr.size() != 16) {
++            continue;
++        }
++        CryptoPP::CTR_Mode<CryptoPP::AES>::Decryption d(region.key.data(), region.key.size(),
++                                                        region.ctr.data());
++        d.Seek(begin - region.origin);
++        u8* ptr = data + (begin - offset);
++        d.ProcessData(ptr, ptr, static_cast<std::size_t>(end - begin));
++    }
++}
++
++std::size_t NCCHDecryptIOFile::ReadImpl(void* data, std::size_t length, std::size_t elem_size) {
++    const u64 position = Tell();
++    const std::size_t items = IOFileBase::ReadImpl(data, length, elem_size);
++    Decrypt(static_cast<u8*>(data), items * elem_size, position);
++    return items;
++}
++
++std::size_t NCCHDecryptIOFile::ReadAtImpl(void* data, std::size_t byte_count, std::size_t offset) {
++    const std::size_t bytes = IOFileBase::ReadAtImpl(data, byte_count, offset);
++    Decrypt(static_cast<u8*>(data), bytes, offset);
++    return bytes;
++}
++
+ } // namespace FileUtil
+ 
+ SERIALIZE_EXPORT_IMPL(FileUtil::NullIOFile);
+ SERIALIZE_EXPORT_IMPL(FileUtil::SubIOFile);
+ SERIALIZE_EXPORT_IMPL(FileUtil::CryptoIOFile);
+ SERIALIZE_EXPORT_IMPL(FileUtil::Z3DSReadIOFile);
+-SERIALIZE_EXPORT_IMPL(FileUtil::Z3DSWriteIOFile);
+\ No newline at end of file
++SERIALIZE_EXPORT_IMPL(FileUtil::Z3DSWriteIOFile);
++SERIALIZE_EXPORT_IMPL(FileUtil::NCCHDecryptIOFile);
+\ No newline at end of file
+diff --git a/src/common/file_derived.h b/src/common/file_derived.h
+index a55893de2..f39e4a3d9 100644
+--- a/src/common/file_derived.h
++++ b/src/common/file_derived.h
+@@ -384,10 +384,66 @@ private:
+     friend class boost::serialization::access;
+     bool is_serializing = false;
+ };
++/**
++ * OmniStation: read-only view of an NCCH whose encrypted parts are decrypted on the fly
++ * (AES-CTR with the console keys, as Citra did). Bytes outside the regions are plain.
++ */
++class NCCHDecryptIOFile : public IOFileBase {
++public:
++    struct Region {
++        u64 begin = 0;  ///< First byte (offset inside the NCCH)
++        u64 end = 0;    ///< One past the last byte
++        u64 origin = 0; ///< Offset where the CTR stream starts
++        std::vector<u8> key;
++        std::vector<u8> ctr;
++
++        template <class Archive>
++        void serialize(Archive& ar, const unsigned int) {
++            ar & begin;
++            ar & end;
++            ar & origin;
++            ar & key;
++            ar & ctr;
++        }
++    };
++
++    NCCHDecryptIOFile();
++    NCCHDecryptIOFile(std::unique_ptr<IOFileBase>&& child_file, std::vector<Region> regions);
++    ~NCCHDecryptIOFile() override;
++
++    std::unique_ptr<IOFileBase> OpenCopy() const override;
++    bool Resize(u64 size) override {
++        return false;
++    }
++
++protected:
++    std::size_t ReadImpl(void* data, std::size_t length, std::size_t elem_size) override;
++    std::size_t ReadAtImpl(void* data, std::size_t byte_count, std::size_t offset) override;
++    std::size_t WriteImpl(const void* data, std::size_t length, std::size_t elem_size) override {
++        return 0;
++    }
++    IOType::Type MyType() const override {
++        return IOType::Type::NCCHDecryptIOFile;
++    }
++
++private:
++    void Decrypt(u8* data, std::size_t size, u64 offset) const;
++
++    std::vector<Region> regions;
++
++    template <class Archive>
++    void serialize(Archive& ar, const unsigned int) {
++        ar& boost::serialization::base_object<IOFileBase>(*this);
++        ar & regions;
++    }
++    friend class boost::serialization::access;
++};
++
+ } // namespace FileUtil
+ 
+ BOOST_CLASS_EXPORT_KEY(FileUtil::NullIOFile)
+ BOOST_CLASS_EXPORT_KEY(FileUtil::SubIOFile)
+ BOOST_CLASS_EXPORT_KEY(FileUtil::CryptoIOFile)
+ BOOST_CLASS_EXPORT_KEY(FileUtil::Z3DSWriteIOFile)
+-BOOST_CLASS_EXPORT_KEY(FileUtil::Z3DSReadIOFile)
+\ No newline at end of file
++BOOST_CLASS_EXPORT_KEY(FileUtil::Z3DSReadIOFile)
++BOOST_CLASS_EXPORT_KEY(FileUtil::NCCHDecryptIOFile)
+\ No newline at end of file
+diff --git a/src/common/file_util.h b/src/common/file_util.h
+index ee21f22be..1357a5f2e 100644
+--- a/src/common/file_util.h
++++ b/src/common/file_util.h
+@@ -307,6 +307,7 @@ public:
+         Z3DSWriteIOFile,
+         Z3DSReadIOFile,
+         TarIOFile,
++        NCCHDecryptIOFile,
+ 
+         MAX,
+     };
+@@ -337,6 +338,7 @@ public:
+             "Z3DSWriteIOFile",
+             "Z3DSReadIOFile",
+             "TarIOFile",
++            "NCCHDecryptIOFile",
+         }};
+ 
+         std::string ret;
+diff --git a/src/core/file_sys/ncch_container.cpp b/src/core/file_sys/ncch_container.cpp
+index bf4abb023..25358560c 100644
+--- a/src/core/file_sys/ncch_container.cpp
++++ b/src/core/file_sys/ncch_container.cpp
+@@ -2,6 +2,7 @@
+ // Licensed under GPLv3 or any later version
+ // Refer to the LICENSE.txt file included.
+ 
++#include <algorithm>
+ #include <cstring>
+ #include <memory>
+ #include <span>
+@@ -219,6 +220,205 @@ Loader::ResultStatus NCCHContainer::OpenFile(const std::string& filepath_, u32 n
+     return Loader::ResultStatus::Success;
+ }
+ 
++/**
++ * OmniStation: encrypted NCCH support, as Citra had it (keys from the user's aes_keys.txt or
++ * keys.txt, seeds from seeddb.bin). Replaces `file` by a view that decrypts on the fly.
++ * Returns Success when `file` can now be read as a decrypted NCCH.
++ */
++static Loader::ResultStatus OpenDecryptedNCCH(std::unique_ptr<FileUtil::IOFileBase>& file,
++                                              const NCCH_Header& ncch_header) {
++    using namespace HW::AES;
++
++    // Some tools decrypt the NCCH but leave the flag: then the exheader reads as plain.
++    // This ID check is masked to low 32-bit as a toleration to ill-formed ROM created
++    // by merging games and its updates.
++    if (ncch_header.extended_header_size) {
++        ExHeader_Header raw_exheader;
++        if (file->ReadAtBytes(&raw_exheader, sizeof(raw_exheader), sizeof(NCCH_Header)) ==
++                sizeof(raw_exheader) &&
++            (raw_exheader.system_info.jump_id & 0xFFFFFFFF) ==
++                (ncch_header.program_id & 0xFFFFFFFF)) {
++            LOG_WARNING(Service_FS, "NCCH is marked as encrypted but with decrypted "
++                                    "exheader. Force no crypto scheme.");
++            return Loader::ResultStatus::Success;
++        }
++    }
++
++    // Keys: read again if the user folder changed (the libretro core sets it at load).
++    static std::string keys_folder;
++    const std::string sysdata = FileUtil::GetUserPath(FileUtil::UserPath::SysDataDir);
++    InitKeys(keys_folder != sysdata);
++    keys_folder = sysdata;
++
++    AESKey primary_key{};
++    AESKey secondary_key{};
++    bool failed_to_decrypt = false;
++
++    if (ncch_header.fixed_key) {
++        LOG_DEBUG(Service_FS, "Fixed-key crypto");
++    } else {
++        AESKey key_y_primary;
++        AESKey key_y_secondary;
++        std::copy(ncch_header.signature, ncch_header.signature + key_y_primary.size(),
++                  key_y_primary.begin());
++
++        if (!ncch_header.seed_crypto) {
++            key_y_secondary = key_y_primary;
++        } else {
++            auto opt{FileSys::GetSeed(ncch_header.program_id)};
++            if (!opt.has_value()) {
++                LOG_ERROR(Service_FS, "Seed for program {:016X} not found",
++                          ncch_header.program_id);
++                failed_to_decrypt = true;
++            } else {
++                auto seed{*opt};
++                std::array<u8, 32> input;
++                std::memcpy(input.data(), key_y_primary.data(), key_y_primary.size());
++                std::memcpy(input.data() + key_y_primary.size(), seed.data(), seed.size());
++                CryptoPP::SHA256 sha;
++                std::array<u8, CryptoPP::SHA256::DIGESTSIZE> hash;
++                sha.CalculateDigest(hash.data(), input.data(), input.size());
++                std::memcpy(key_y_secondary.data(), hash.data(), key_y_secondary.size());
++            }
++        }
++
++        SetKeyY(KeySlotID::NCCHSecure1, key_y_primary);
++        if (!IsNormalKeyAvailable(KeySlotID::NCCHSecure1)) {
++            LOG_ERROR(Service_FS, "Secure1 KeyX missing");
++            failed_to_decrypt = true;
++        }
++        primary_key = GetNormalKey(KeySlotID::NCCHSecure1);
++
++        std::size_t secondary_slot = KeySlotID::NCCHSecure1;
++        switch (ncch_header.secondary_key_slot) {
++        case 0:
++            secondary_slot = KeySlotID::NCCHSecure1;
++            break;
++        case 1:
++            secondary_slot = KeySlotID::NCCHSecure2;
++            break;
++        case 10:
++            secondary_slot = KeySlotID::NCCHSecure3;
++            break;
++        case 11:
++            secondary_slot = KeySlotID::NCCHSecure4;
++            break;
++        default:
++            LOG_ERROR(Service_FS, "Unknown secondary key slot {}", ncch_header.secondary_key_slot);
++            failed_to_decrypt = true;
++            break;
++        }
++        SetKeyY(secondary_slot, key_y_secondary);
++        if (!IsNormalKeyAvailable(secondary_slot)) {
++            LOG_ERROR(Service_FS, "KeyX for slot {:#X} missing", secondary_slot);
++            failed_to_decrypt = true;
++        }
++        secondary_key = GetNormalKey(secondary_slot);
++    }
++
++    // Find CTR for each section
++    // Written with reference to
++    // https://github.com/d0k3/GodMode9/blob/99af6a73be48fa7872649aaa7456136da0df7938/arm9/source/game/ncch.c#L34-L52
++    std::array<u8, 16> exheader_ctr{};
++    std::array<u8, 16> exefs_ctr{};
++    std::array<u8, 16> romfs_ctr{};
++    if (ncch_header.version == 0 || ncch_header.version == 2) {
++        LOG_DEBUG(Loader, "NCCH version 0/2");
++        // In this version, CTR for each section is a magic number prefixed by partition ID
++        // (reverse order)
++        std::reverse_copy(ncch_header.partition_id, ncch_header.partition_id + 8,
++                          exheader_ctr.begin());
++        exefs_ctr = romfs_ctr = exheader_ctr;
++        exheader_ctr[8] = 1;
++        exefs_ctr[8] = 2;
++        romfs_ctr[8] = 3;
++    } else if (ncch_header.version == 1) {
++        LOG_DEBUG(Loader, "NCCH version 1");
++        // In this version, CTR for each section is the section offset prefixed by partition
++        // ID, as if the entire NCCH image is encrypted using a single CTR stream.
++        std::copy(ncch_header.partition_id, ncch_header.partition_id + 8, exheader_ctr.begin());
++        exefs_ctr = romfs_ctr = exheader_ctr;
++        auto u32ToBEArray = [](u32 value) -> std::array<u8, 4> {
++            return std::array<u8, 4>{
++                static_cast<u8>(value >> 24),
++                static_cast<u8>((value >> 16) & 0xFF),
++                static_cast<u8>((value >> 8) & 0xFF),
++                static_cast<u8>(value & 0xFF),
++            };
++        };
++        auto offset_exheader = u32ToBEArray(0x200); // exheader offset
++        auto offset_exefs = u32ToBEArray(ncch_header.exefs_offset * kBlockSize);
++        auto offset_romfs = u32ToBEArray(ncch_header.romfs_offset * kBlockSize);
++        std::copy(offset_exheader.begin(), offset_exheader.end(), exheader_ctr.begin() + 12);
++        std::copy(offset_exefs.begin(), offset_exefs.end(), exefs_ctr.begin() + 12);
++        std::copy(offset_romfs.begin(), offset_romfs.end(), romfs_ctr.begin() + 12);
++    } else {
++        LOG_ERROR(Service_FS, "Unknown NCCH version {}", ncch_header.version);
++        failed_to_decrypt = true;
++    }
++
++    if (failed_to_decrypt) {
++        LOG_ERROR(Service_FS, "Failed to decrypt (missing keys in aes_keys.txt / keys.txt?)");
++        return Loader::ResultStatus::ErrorEncrypted;
++    }
++
++    using Region = FileUtil::NCCHDecryptIOFile::Region;
++    const auto to_vector = [](const std::array<u8, 16>& array) {
++        return std::vector<u8>(array.begin(), array.end());
++    };
++    std::vector<Region> regions;
++
++    // Extended header (and access descriptor)
++    if (ncch_header.extended_header_size) {
++        regions.push_back({sizeof(NCCH_Header), sizeof(NCCH_Header) + sizeof(ExHeader_Header),
++                           sizeof(NCCH_Header), to_vector(primary_key), to_vector(exheader_ctr)});
++    }
++
++    // ExeFS: its header, icon and banner use the primary key; the rest the secondary one.
++    if (ncch_header.exefs_size) {
++        const u64 exefs_offset = static_cast<u64>(ncch_header.exefs_offset) * kBlockSize;
++        const u64 exefs_end = exefs_offset + static_cast<u64>(ncch_header.exefs_size) * kBlockSize;
++        ExeFs_Header exefs_header;
++        if (file->ReadAtBytes(&exefs_header, sizeof(exefs_header), exefs_offset) !=
++            sizeof(exefs_header)) {
++            return Loader::ResultStatus::Error;
++        }
++        CryptoPP::CTR_Mode<CryptoPP::AES>::Decryption(primary_key.data(), primary_key.size(),
++                                                      exefs_ctr.data())
++            .ProcessData(reinterpret_cast<CryptoPP::byte*>(&exefs_header),
++                         reinterpret_cast<CryptoPP::byte*>(&exefs_header), sizeof(exefs_header));
++        regions.push_back({exefs_offset, exefs_offset + sizeof(ExeFs_Header), exefs_offset,
++                           to_vector(primary_key), to_vector(exefs_ctr)});
++        for (const auto& section : exefs_header.section) {
++            if (section.name[0] == '\0' || section.size == 0) {
++                continue;
++            }
++            const u64 begin = exefs_offset + sizeof(ExeFs_Header) + section.offset;
++            const u64 end = std::min<u64>(begin + section.size, exefs_end);
++            if (begin >= end) {
++                continue;
++            }
++            const bool primary = std::strncmp(section.name, "icon", 8) == 0 ||
++                                 std::strncmp(section.name, "banner", 8) == 0;
++            regions.push_back({begin, end, exefs_offset,
++                               to_vector(primary ? primary_key : secondary_key),
++                               to_vector(exefs_ctr)});
++        }
++    }
++
++    // RomFS
++    if (ncch_header.romfs_offset != 0 && ncch_header.romfs_size != 0) {
++        const u64 romfs_offset = static_cast<u64>(ncch_header.romfs_offset) * kBlockSize;
++        const u64 romfs_end = romfs_offset + static_cast<u64>(ncch_header.romfs_size) * kBlockSize;
++        regions.push_back({romfs_offset, romfs_end, romfs_offset, to_vector(secondary_key),
++                           to_vector(romfs_ctr)});
++    }
++
++    LOG_INFO(Service_FS, "Encrypted NCCH: decrypting on the fly ({} regions)", regions.size());
++    file = std::make_unique<FileUtil::NCCHDecryptIOFile>(std::move(file), std::move(regions));
++    return Loader::ResultStatus::Success;
++}
++
+ Loader::ResultStatus NCCHContainer::LoadHeader() {
+     if (has_header) {
+         return Loader::ResultStatus::Success;
+@@ -259,8 +459,11 @@ Loader::ResultStatus NCCHContainer::LoadHeader() {
+     LOG_DEBUG(Service_FS, "NCCH type: {}", file->GetType().to_string());
+ 
+     if (!ncch_header.no_crypto) {
+-        // Encrypted NCCH are not supported
+-        return Loader::ResultStatus::ErrorEncrypted;
++        // OmniStation: encrypted NCCH are read through a decrypting view.
++        const auto crypto_result = OpenDecryptedNCCH(file, ncch_header);
++        if (crypto_result != Loader::ResultStatus::Success) {
++            return crypto_result;
++        }
+     }
+ 
+     has_header = true;
+@@ -289,11 +492,6 @@ Loader::ResultStatus NCCHContainer::Load() {
+             block_size = 1;
+         }
+ 
+-        if (!ncch_header.no_crypto) {
+-            // Encrypted NCCH are not supported
+-            return Loader::ResultStatus::ErrorEncrypted;
+-        }
+-
+         // System archives and DLC don't have an extended header but have RomFS
+         // Proto apps don't have an ext header size
+         if (ncch_header.extended_header_size || is_proto) {
+diff --git a/src/core/hw/aes/key.cpp b/src/core/hw/aes/key.cpp
+index 64748e41c..f45f41824 100644
+--- a/src/core/hw/aes/key.cpp
++++ b/src/core/hw/aes/key.cpp
+@@ -290,27 +290,48 @@ void LoadPresetKeys() {
+ } // namespace
+ 
+ std::istringstream GetKeysStream() {
+-    const std::string filepath = FileUtil::GetUserPath(FileUtil::UserPath::SysDataDir) + KEYS_FILE;
+-    FileUtil::CreateFullPath(filepath); // Create path if not already created
+-
+-    boost::iostreams::stream<boost::iostreams::file_descriptor_source> file;
+-    FileUtil::OpenFStream<std::ios_base::in>(file, filepath);
+-    std::istringstream ret;
+-    if (file.is_open()) {
+-        return std::istringstream(std::string(std::istreambuf_iterator<char>(file), {}));
+-    } else {
++    // OmniStation: the built-in keys first, then the user's own files, so the user's keys add to
++    // (and replace) the built-in ones instead of hiding them. Besides keys.txt, Citra's old
++    // aes_keys.txt (AES keys only, without section headers) is read too.
++    std::string all;
+ #ifdef ENABLE_BUILTIN_KEYBLOB
++    {
+         // The key data is encrypted in the source to prevent easy access to it for unintended
+         // purposes.
+         std::vector<u8> kiv(16);
+         std::string s(default_keys_enc_size, ' ');
+         CryptoPP::CBC_Mode<CryptoPP::AES>::Decryption(kiv.data(), kiv.size(), kiv.data())
+             .ProcessData(reinterpret_cast<u8*>(s.data()), default_keys_enc, s.size());
+-        return std::istringstream(s);
+-#else
+-        return std::istringstream("");
++        all += s;
++        all += "\n";
++    }
+ #endif // ENABLE_BUILTIN_KEYBLOB
++
++    const std::string sysdata = FileUtil::GetUserPath(FileUtil::UserPath::SysDataDir);
++    FileUtil::CreateFullPath(sysdata + KEYS_FILE); // Create path if not already created
++    const auto read_file = [](const std::string& path, std::string& out) {
++        boost::iostreams::stream<boost::iostreams::file_descriptor_source> file;
++        FileUtil::OpenFStream<std::ios_base::in>(file, path);
++        if (!file.is_open()) {
++            return false;
++        }
++        out = std::string(std::istreambuf_iterator<char>(file), {});
++        return true;
++    };
++    std::string contents;
++    if (read_file(sysdata + KEYS_FILE, contents)) {
++        all += contents;
++        all += "\n";
++    }
++    if (read_file(sysdata + "aes_keys.txt", contents)) {
++        LOG_INFO(HW_AES, "Loading aes_keys.txt");
++        all += ":AES\n";
++        all += contents;
++        all += "\n";
+     }
++    // Files saved on Windows end their lines with \r\n.
++    all.erase(std::remove(all.begin(), all.end(), '\r'), all.end());
++    return std::istringstream(all);
+ }
+ 
+ void InitKeys(bool force) {
