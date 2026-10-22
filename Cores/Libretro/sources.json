@@ -37,5 +37,20 @@
     "framework": "ppsspp_omni",
     "bundleID": "com.omnistation.core.ppsspp",
     "notes": "PPSSPP v1.20.4 (GPL-2.0-or-later). Con patches/ppsspp, en iOS todos sus JIT (CPU, vértices, render por software) piden la memoria a OmniStation con RETRO_ENVIRONMENT_EXEC_MEM_ALLOC y escriben por la vista RW y ejecutan por la RX (como en Switch): JIT permanente."
+  },
+  "mupen64plus_next": {
+    "repository": "https://github.com/libretro/mupen64plus-libretro-nx.git",
+    "revision": "12edd2c74a517ff86dfa8cfc71ad75e4c10486d5",
+    "framework": "mupen64plus_next_omni",
+    "bundleID": "com.omnistation.core.mupen64plusnext",
+    "submodules": false,
+    "notes": "Mupen64Plus-Next (GPL-2.0). Lo trae todo dentro (sin submódulos). Con patches/mupen64plus_next, en iOS el dynarec aarch64 (que el de libretro no compila para iOS) va en la memoria de JIT de OmniStation en doble vista (como en Switch), su ensamblador portado a Mach-O y sin usar x18 (registro reservado de Apple): JIT permanente."
+  },
+  "flycast": {
+    "repository": "https://github.com/flyinghead/flycast.git",
+    "revision": "5aa091fde632fb332c8d8c34e280d62dc951954c",
+    "framework": "flycast_omni",
+    "bundleID": "com.omnistation.core.flycast",
+    "notes": "Flycast v2.7 (GPL-2.0). Con patches/flycast, en iOS sus tres JIT (SH4, ARM7 y DSP) van en la memoria de JIT de OmniStation en doble vista (FEAT_NO_RWX_PAGES, como en Switch). En Apple prepara el emulador una sola vez: sus bloques de JIT se quedan toda la vida de la app (versión 2 de la petición). Solo arranca con JIT permanente; sin él, la app usa Flycast sin JIT."
   }
 }

@@ -130,6 +130,36 @@ PY
       strip -x "$BINARY"
     fi
     ;;
+  mupen64plus_next)
+    # Makefile de libretro para iOS, con el dynarec y la memoria de JIT de OmniStation.
+    make -C "$SRC" platform=ios-arm64 OMNI_EXEC_MEM=1 STRINGS="strings -a" \
+      -j "$(sysctl -n hw.ncpu)" 2>&1 | tee "$LOGS/build.log"
+    BINARY="$SRC/mupen64plus_next_libretro_ios.dylib"
+    if [ -f "$BINARY" ]; then
+      LC_ALL=C grep -c -a "OmniStation: dynarec in dual-mapped executable memory from the frontend" "$BINARY" >/dev/null || { echo "::error::Mupen64Plus-Next sin el parche del JIT permanente." >&2; exit 1; }
+      strip -x "$BINARY"
+    fi
+    ;;
+  flycast)
+    # Como el CI de libretro para iOS (LIBRETRO=ON, sin OpenMP), con el JIT permanente de OmniStation.
+    # Sin Homebrew en la búsqueda: sus bibliotecas son de macOS.
+    cmake -S "$SRC" -B "$SRC/build/ios-arm64" \
+      -DCMAKE_SYSTEM_NAME=iOS \
+      -DCMAKE_OSX_ARCHITECTURES=arm64 \
+      -DCMAKE_OSX_DEPLOYMENT_TARGET=13.0 \
+      -DCMAKE_BUILD_TYPE=Release \
+      -DLIBRETRO=ON \
+      -DUSE_OPENMP=OFF \
+      -DCMAKE_C_FLAGS="-DIOS -DOMNI_EXEC_MEM" \
+      -DCMAKE_CXX_FLAGS="-DIOS -DOMNI_EXEC_MEM" \
+      -DCMAKE_IGNORE_PREFIX_PATH="/opt/homebrew;/usr/local" \
+      -DCMAKE_POLICY_VERSION_MINIMUM=3.5 2>&1 | tee "$LOGS/configure.log"
+    cmake --build "$SRC/build/ios-arm64" --target flycast_libretro --config Release -j "$(sysctl -n hw.ncpu)" 2>&1 | tee "$LOGS/build.log"
+    BINARY="$(find "$SRC/build/ios-arm64" -name 'flycast_libretro*.dylib' -print -quit)"
+    if [ -n "$BINARY" ]; then
+      LC_ALL=C grep -c -a "OmniStation: JIT with dual-mapped executable memory from the frontend" "$BINARY" >/dev/null || { echo "::error::Flycast sin el parche del JIT permanente." >&2; exit 1; }
+    fi
+    ;;
   *)
     echo "Núcleo desconocido: $CORE" >&2
     exit 1
