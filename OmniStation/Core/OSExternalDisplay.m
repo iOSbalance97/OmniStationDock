@@ -50,6 +50,24 @@ static NSString *const kOSTVOutputKey = @"tvGameOutput";
     return _scene != nil;
 }
 
+- (CGFloat)screenScale {
+    UIWindowScene *scene = _scene;
+    CGFloat scale = scene.screen.scale;
+    return scale > 0 ? scale : 1;
+}
+
+- (NSString *)stateDescription {
+    UIWindowScene *scene = _scene;
+    if (scene == nil) return @"sin escena";
+    NSString *activation = @[@"unattached", @"foregroundActive", @"foregroundInactive", @"background"][MAX(0, MIN(3, (NSInteger)scene.activationState + 1))];
+    CGRect bounds = scene.coordinateSpace.bounds;
+    UIView *root = _window.rootViewController.view;
+    return [NSString stringWithFormat:@"escena %@ %.0fx%.0f @%.0fx, ventana %@ %@ %.0fx%.0f, raíz %.0fx%.0f, vista %@",
+            activation, bounds.size.width, bounds.size.height, scene.screen.scale,
+            _window ? @"sí" : @"no", _window.hidden ? @"oculta" : @"visible", _window.bounds.size.width, _window.bounds.size.height,
+            root.bounds.size.width, root.bounds.size.height, _hostedView ? NSStringFromCGRect(_hostedView.frame) : @"-"];
+}
+
 - (void)sceneConnected:(UIWindowScene *)scene {
     _scene = scene;
     [NSNotificationCenter.defaultCenter postNotificationName:OSExternalDisplayDidChangeNotification object:self];
@@ -75,12 +93,15 @@ static NSString *const kOSTVOutputKey = @"tvGameOutput";
         window.rootViewController = [OSExternalRootController new];
         _window = window;
     }
+    _window.frame = scene.coordinateSpace.bounds;
+    _window.hidden = NO;
     UIView *root = _window.rootViewController.view;
+    root.frame = _window.bounds;
     view.frame = root.bounds;
     view.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
     [root addSubview:view];
     _hostedView = view;
-    _window.hidden = NO;
+    [_window layoutIfNeeded];
     [view setNeedsLayout];
     return YES;
 }

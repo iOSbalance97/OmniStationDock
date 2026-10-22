@@ -28,6 +28,12 @@ extern NSNotificationName const OSExternalDisplayDidChangeNotification;
 /// Quita la ventana de la tele (la tele vuelve a duplicar el iPhone). El que llama recoloca `view`.
 - (void)releaseView:(UIView *)view;
 
+/// Escala de la pantalla de la tele (1 si no hay).
+@property (nonatomic, readonly) CGFloat screenScale;
+
+/// Cómo está la escena y la ventana de la tele (para el registro).
+@property (nonatomic, readonly, copy) NSString *stateDescription;
+
 @end
 
 /// Lo usa AppDelegate para la escena de la pantalla externa.

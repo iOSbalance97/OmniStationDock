@@ -166,6 +166,10 @@ static size_t gSessionMinFree;
 static _Atomic uint32_t gPadBits;
 static _Atomic uint32_t gTouchBits;
 static _Atomic int32_t gAxis[4];
+/// Jugadores 2 a 4 (un mando físico cada uno; sin mando táctil).
+#define OSLR_EXTRA_PLAYERS 3
+static _Atomic uint32_t gExtraPadBits[OSLR_EXTRA_PLAYERS];
+static _Atomic int32_t gExtraAxis[OSLR_EXTRA_PLAYERS][4];
 static _Atomic int32_t gPointerX, gPointerY;
 static _Atomic bool gPointerDown;
 static _Atomic bool gInputSuspended;
@@ -2017,8 +2021,31 @@ static double OSLRAudioFill(void) {
 
 static void OSLRInputPoll(void) {}
 
+static int16_t OSLRExtraInputState(unsigned slot, unsigned device, unsigned index, unsigned identifier) {
+    uint32_t bits = atomic_load(&gExtraPadBits[slot]);
+    switch (device & RETRO_DEVICE_MASK) {
+        case RETRO_DEVICE_JOYPAD:
+            if (identifier == RETRO_DEVICE_ID_JOYPAD_MASK) return (int16_t)(bits & 0xFFFF);
+            return identifier < 16 ? (int16_t)((bits >> identifier) & 1) : 0;
+        case RETRO_DEVICE_ANALOG:
+            if (index == RETRO_DEVICE_INDEX_ANALOG_LEFT || index == RETRO_DEVICE_INDEX_ANALOG_RIGHT) {
+                unsigned axis = index * 2 + (identifier == RETRO_DEVICE_ID_ANALOG_Y ? 1 : 0);
+                return (int16_t)atomic_load(&gExtraAxis[slot][axis]);
+            }
+            if (index == RETRO_DEVICE_INDEX_ANALOG_BUTTON && identifier < 16) {
+                return ((bits >> identifier) & 1) ? 0x7FFF : 0;
+            }
+            return 0;
+        default:
+            return 0;
+    }
+}
+
 static int16_t OSLRInputState(unsigned port, unsigned device, unsigned index, unsigned identifier) {
-    if (port != 0 || atomic_load(&gInputSuspended)) return 0;
+    if (atomic_load(&gInputSuspended)) return 0;
+    if (port != 0) {
+        return (port <= OSLR_EXTRA_PLAYERS) ? OSLRExtraInputState(port - 1, device, index, identifier) : 0;
+    }
     uint32_t bits = atomic_load(&gPadBits) | atomic_load(&gTouchBits);
     switch (device & RETRO_DEVICE_MASK) {
         case RETRO_DEVICE_JOYPAD:
@@ -2072,6 +2099,33 @@ static int OSLRRetroButtonForMapID(NSString *name) {
     });
     NSNumber *value = table[name];
     return value ? value.intValue : -1;
+}
+
+/// Botones físicos de un mando → bits de libretro (posicional, como RetroArch).
+static uint32_t OSLRPadBits(GCExtendedGamepad *pad) {
+    uint32_t physical = 0;
+    #define OSLR_SET(condition, button) if (condition) physical |= (1u << (button))
+    OSLR_SET(pad.buttonA.isPressed, RETRO_DEVICE_ID_JOYPAD_B);
+    OSLR_SET(pad.buttonB.isPressed, RETRO_DEVICE_ID_JOYPAD_A);
+    OSLR_SET(pad.buttonX.isPressed, RETRO_DEVICE_ID_JOYPAD_Y);
+    OSLR_SET(pad.buttonY.isPressed, RETRO_DEVICE_ID_JOYPAD_X);
+    OSLR_SET(pad.leftShoulder.isPressed, RETRO_DEVICE_ID_JOYPAD_L);
+    OSLR_SET(pad.rightShoulder.isPressed, RETRO_DEVICE_ID_JOYPAD_R);
+    OSLR_SET(pad.leftTrigger.isPressed, RETRO_DEVICE_ID_JOYPAD_L2);
+    OSLR_SET(pad.rightTrigger.isPressed, RETRO_DEVICE_ID_JOYPAD_R2);
+    OSLR_SET(pad.leftThumbstickButton.isPressed, RETRO_DEVICE_ID_JOYPAD_L3);
+    OSLR_SET(pad.rightThumbstickButton.isPressed, RETRO_DEVICE_ID_JOYPAD_R3);
+    OSLR_SET(pad.buttonMenu.isPressed, RETRO_DEVICE_ID_JOYPAD_START);
+    OSLR_SET(pad.buttonOptions.isPressed, RETRO_DEVICE_ID_JOYPAD_SELECT);
+    // La cruceta y el stick izquierdo mueven igual (los juegos 2D no usan el stick).
+    float x = pad.dpad.xAxis.value, y = pad.dpad.yAxis.value;
+    float lx = pad.leftThumbstick.xAxis.value, ly = pad.leftThumbstick.yAxis.value;
+    OSLR_SET(y > 0.5f || ly > 0.6f, RETRO_DEVICE_ID_JOYPAD_UP);
+    OSLR_SET(y < -0.5f || ly < -0.6f, RETRO_DEVICE_ID_JOYPAD_DOWN);
+    OSLR_SET(x < -0.5f || lx < -0.6f, RETRO_DEVICE_ID_JOYPAD_LEFT);
+    OSLR_SET(x > 0.5f || lx > 0.6f, RETRO_DEVICE_ID_JOYPAD_RIGHT);
+    #undef OSLR_SET
+    return physical;
 }
 
 // MARK: - Vistas
@@ -2686,6 +2740,8 @@ typedef NS_ENUM(NSInteger, OSLRMenuAction) {
     UIView *_tvHost;
     BOOL _onTV;
     GCController *_controller;
+    /// Mandos de los jugadores 2 a 4 (por orden de conexión).
+    NSArray<GCController *> *_extraControllers;
     uint32_t _physicalBits;
     double _hudTime;
     uint64_t _hudFrames;
@@ -3830,6 +3886,7 @@ typedef NS_ENUM(NSInteger, OSLRMenuAction) {
 - (void)dealloc {
     for (id token in _observers) [NSNotificationCenter.defaultCenter removeObserver:token];
     [self wireController:_controller enabled:NO];
+    for (GCController *extra in _extraControllers) [self wireExtraController:extra slot:-1];
 }
 
 // MARK: Mando físico
@@ -3841,10 +3898,74 @@ typedef NS_ENUM(NSInteger, OSLRMenuAction) {
             if (controller.extendedGamepad != nil) { preferred = controller; break; }
         }
     }
-    if (preferred == _controller) return;
-    [self wireController:_controller enabled:NO];
-    _controller = preferred;
-    [self wireController:_controller enabled:YES];
+    // El resto de mandos: jugadores 2, 3 y 4.
+    NSMutableArray<GCController *> *extras = [NSMutableArray array];
+    for (GCController *controller in GCController.controllers) {
+        if (controller == preferred || controller.extendedGamepad == nil) continue;
+        if (extras.count >= OSLR_EXTRA_PLAYERS) break;
+        [extras addObject:controller];
+    }
+    BOOL sameExtras = [extras isEqualToArray:(_extraControllers ?: @[])];
+    if (preferred != _controller) {
+        [self wireController:_controller enabled:NO];
+        _controller = preferred;
+        [self wireController:_controller enabled:YES];
+    }
+    if (preferred != nil) preferred.playerIndex = GCControllerPlayerIndex1;
+    if (sameExtras) return;
+    for (GCController *old in _extraControllers) {
+        if (![extras containsObject:old]) [self wireExtraController:old slot:-1];
+    }
+    for (int slot = 0; slot < OSLR_EXTRA_PLAYERS; slot++) {
+        atomic_store(&gExtraPadBits[slot], 0);
+        for (int axis = 0; axis < 4; axis++) atomic_store(&gExtraAxis[slot][axis], 0);
+    }
+    _extraControllers = [extras copy];
+    for (NSUInteger slot = 0; slot < extras.count; slot++) {
+        [self wireExtraController:extras[slot] slot:(int)slot];
+    }
+    if (extras.count > 0) OSLRTrace([NSString stringWithFormat:@"mandos: %lu jugador(es) más", (unsigned long)extras.count], NO);
+}
+
+/// Jugadores 2-4: cada mando escribe en su puerto. `slot` < 0 lo desconecta.
+- (void)wireExtraController:(GCController *)controller slot:(int)slot {
+    GCExtendedGamepad *pad = controller.extendedGamepad;
+    if (pad == nil) return;
+    if (slot < 0) {
+        pad.valueChangedHandler = nil;
+        return;
+    }
+    controller.playerIndex = (GCControllerPlayerIndex)(GCControllerPlayerIndex2 + slot);
+    if (pad.buttonHome != nil) pad.buttonHome.preferredSystemGestureState = GCSystemGestureStateDisabled;
+    __weak OSLRGameViewController *weakSelf = self;
+    pad.valueChangedHandler = ^(GCExtendedGamepad *gamepad, GCControllerElement *element) {
+        [weakSelf readExtraGamepad:gamepad slot:slot];
+    };
+    [self readExtraGamepad:pad slot:slot];
+}
+
+- (void)readExtraGamepad:(GCExtendedGamepad *)pad slot:(int)slot {
+    if (pad == nil || slot < 0 || slot >= OSLR_EXTRA_PLAYERS) return;
+    uint32_t physical = OSLRPadBits(pad);
+    atomic_store(&gExtraPadBits[slot], [self mappedBits:physical]);
+    atomic_store(&gExtraAxis[slot][0], (int32_t)(pad.leftThumbstick.xAxis.value * 32767.0f));
+    atomic_store(&gExtraAxis[slot][1], (int32_t)(-pad.leftThumbstick.yAxis.value * 32767.0f));
+    atomic_store(&gExtraAxis[slot][2], (int32_t)(pad.rightThumbstick.xAxis.value * 32767.0f));
+    atomic_store(&gExtraAxis[slot][3], (int32_t)(-pad.rightThumbstick.yAxis.value * 32767.0f));
+}
+
+/// Mapa de botones del juego (solo los botones, no la cruceta).
+- (uint32_t)mappedBits:(uint32_t)physical {
+    if (self.buttonMap.count == 0) return physical;
+    uint32_t directions = (1u << RETRO_DEVICE_ID_JOYPAD_UP) | (1u << RETRO_DEVICE_ID_JOYPAD_DOWN) |
+                          (1u << RETRO_DEVICE_ID_JOYPAD_LEFT) | (1u << RETRO_DEVICE_ID_JOYPAD_RIGHT);
+    uint32_t output = physical & directions;
+    for (unsigned button = 0; button < 16; button++) {
+        if (!(physical & (1u << button)) || (directions & (1u << button))) continue;
+        NSNumber *target = self.buttonMap[@(button)];
+        output |= 1u << (target ? target.unsignedIntValue : button);
+    }
+    return output;
 }
 
 - (void)wireController:(GCController *)controller enabled:(BOOL)enabled {
@@ -3866,42 +3987,10 @@ typedef NS_ENUM(NSInteger, OSLRMenuAction) {
 
 - (void)readGamepad:(GCExtendedGamepad *)pad {
     if (pad == nil) return;
-    uint32_t physical = 0;
-    #define OSLR_SET(condition, button) if (condition) physical |= (1u << (button))
-    OSLR_SET(pad.buttonA.isPressed, RETRO_DEVICE_ID_JOYPAD_B);
-    OSLR_SET(pad.buttonB.isPressed, RETRO_DEVICE_ID_JOYPAD_A);
-    OSLR_SET(pad.buttonX.isPressed, RETRO_DEVICE_ID_JOYPAD_Y);
-    OSLR_SET(pad.buttonY.isPressed, RETRO_DEVICE_ID_JOYPAD_X);
-    OSLR_SET(pad.leftShoulder.isPressed, RETRO_DEVICE_ID_JOYPAD_L);
-    OSLR_SET(pad.rightShoulder.isPressed, RETRO_DEVICE_ID_JOYPAD_R);
-    OSLR_SET(pad.leftTrigger.isPressed, RETRO_DEVICE_ID_JOYPAD_L2);
-    OSLR_SET(pad.rightTrigger.isPressed, RETRO_DEVICE_ID_JOYPAD_R2);
-    OSLR_SET(pad.leftThumbstickButton.isPressed, RETRO_DEVICE_ID_JOYPAD_L3);
-    OSLR_SET(pad.rightThumbstickButton.isPressed, RETRO_DEVICE_ID_JOYPAD_R3);
-    OSLR_SET(pad.buttonMenu.isPressed, RETRO_DEVICE_ID_JOYPAD_START);
-    OSLR_SET(pad.buttonOptions.isPressed, RETRO_DEVICE_ID_JOYPAD_SELECT);
-    // La cruceta y el stick izquierdo mueven igual (los juegos 2D no usan el stick).
-    float x = pad.dpad.xAxis.value, y = pad.dpad.yAxis.value;
-    float lx = pad.leftThumbstick.xAxis.value, ly = pad.leftThumbstick.yAxis.value;
-    OSLR_SET(y > 0.5f || ly > 0.6f, RETRO_DEVICE_ID_JOYPAD_UP);
-    OSLR_SET(y < -0.5f || ly < -0.6f, RETRO_DEVICE_ID_JOYPAD_DOWN);
-    OSLR_SET(x < -0.5f || lx < -0.6f, RETRO_DEVICE_ID_JOYPAD_LEFT);
-    OSLR_SET(x > 0.5f || lx > 0.6f, RETRO_DEVICE_ID_JOYPAD_RIGHT);
-    #undef OSLR_SET
+    uint32_t physical = OSLRPadBits(pad);
     _physicalBits = physical;
-    // Mapa de botones del juego (solo los botones, no la cruceta).
-    uint32_t output = physical;
-    if (self.buttonMap.count > 0) {
-        uint32_t directions = (1u << RETRO_DEVICE_ID_JOYPAD_UP) | (1u << RETRO_DEVICE_ID_JOYPAD_DOWN) |
-                              (1u << RETRO_DEVICE_ID_JOYPAD_LEFT) | (1u << RETRO_DEVICE_ID_JOYPAD_RIGHT);
-        output = physical & directions;
-        for (unsigned button = 0; button < 16; button++) {
-            if (!(physical & (1u << button)) || (directions & (1u << button))) continue;
-            NSNumber *target = self.buttonMap[@(button)];
-            output |= 1u << (target ? target.unsignedIntValue : button);
-        }
-    }
-    atomic_store(&gPadBits, output);
+    atomic_store(&gPadBits, [self mappedBits:physical]);
+    float lx = pad.leftThumbstick.xAxis.value, ly = pad.leftThumbstick.yAxis.value;
     atomic_store(&gAxis[0], (int32_t)(lx * 32767.0f));
     atomic_store(&gAxis[1], (int32_t)(-ly * 32767.0f));
     atomic_store(&gAxis[2], (int32_t)(pad.rightThumbstick.xAxis.value * 32767.0f));
@@ -4094,8 +4183,22 @@ typedef NS_ENUM(NSInteger, OSLRMenuAction) {
         if ([OSExternalDisplay.shared hostView:_tvHost]) {
             _onTV = YES;
             _tvLabel.hidden = NO;
+            [self setVideoScale:OSExternalDisplay.shared.screenScale];
             [self layoutTV];
             dispatch_async(dispatch_get_main_queue(), ^{ [self layoutTV]; });
+            OSLRTrace([@"tele: juego en la tele; " stringByAppendingString:OSExternalDisplay.shared.stateDescription], NO);
+            __weak OSLRGameViewController *weakSelf = self;
+            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(2 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+                OSLRGameViewController *strongSelf = weakSelf;
+                if (strongSelf == nil || !strongSelf->_onTV) return;
+                OSLRVideoView *video = strongSelf.videoView;
+                OSLRTrace([NSString stringWithFormat:@"tele (2 s): %@; imagen %@ en %@, oculta %@, capa %@, fotogramas %llu",
+                           OSExternalDisplay.shared.stateDescription, NSStringFromCGRect(video.frame),
+                           video.window == nil ? @"ninguna ventana" : [NSString stringWithFormat:@"ventana %@ (%@)", NSStringFromCGRect(video.window.bounds), video.window.windowScene.session.role],
+                           video.hidden ? @"sí" : @"no",
+                           video.glLayer ? (video.glLayer.hidden ? @"GL oculta" : @"GL") : (video.metalLayer ? (video.metalLayer.hidden ? @"Metal oculta" : @"Metal") : (video.layer.contents ? @"CPU con imagen" : @"CPU sin imagen")),
+                           atomic_load(&gFrameCount)], NO);
+            });
         } else {
             [self returnVideoToPhone];
         }
@@ -4104,6 +4207,16 @@ typedef NS_ENUM(NSInteger, OSLRMenuAction) {
     }
     [self updateControlsVisibility];
     [self.view setNeedsLayout];
+}
+
+/// Escala de las capas de imagen (la de la tele suele ser 1; la del iPhone, 3).
+- (void)setVideoScale:(CGFloat)scale {
+    if (scale <= 0) scale = UIScreen.mainScreen.nativeScale;
+    if (self.videoView.glLayer) self.videoView.glLayer.contentsScale = scale;
+    if (self.videoView.metalLayer) self.videoView.metalLayer.contentsScale = scale;
+    [self.videoView setNeedsLayout];
+    atomic_store(&gGLLayerChanged, true);
+    atomic_store(&gMetalLayerChanged, true);
 }
 
 - (void)returnVideoToPhone {
@@ -4115,6 +4228,7 @@ typedef NS_ENUM(NSInteger, OSLRMenuAction) {
     if (!_onTV) return;
     _onTV = NO;
     _tvLabel.hidden = YES;
+    [self setVideoScale:UIScreen.mainScreen.nativeScale];
     [self returnVideoToPhone];
     [OSExternalDisplay.shared releaseView:_tvHost];
 }
@@ -4765,6 +4879,7 @@ typedef NS_ENUM(NSInteger, OSLRMenuAction) {
         gAudioCapacity = 0;
         gMessageHandler = nil;
         atomic_store(&gPadBits, 0);
+        for (int slot = 0; slot < OSLR_EXTRA_PLAYERS; slot++) atomic_store(&gExtraPadBits[slot], 0);
         atomic_store(&gTouchBits, 0);
         atomic_store(&gTouchCBits, 0);
         atomic_store(&gTouchStickActive, false);
