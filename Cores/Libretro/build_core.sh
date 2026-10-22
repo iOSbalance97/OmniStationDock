@@ -116,6 +116,20 @@ PY
       LC_ALL=C grep -c -a "OmniStation: no executable memory for the dynarec" "$BINARY" >/dev/null || { echo "::error::PCSX ReARMed sin el parche del JIT permanente." >&2; exit 1; }
     fi
     ;;
+  ppsspp)
+    # Como el CI de libretro para iOS (su toolchain de iOS y LIBRETRO=ON), solo el núcleo.
+    cmake -S "$SRC" -B "$SRC/build/ios-arm64" \
+      -DCMAKE_TOOLCHAIN_FILE="$SRC/cmake/Toolchains/ios.cmake" \
+      -DLIBRETRO=ON \
+      -DCMAKE_BUILD_TYPE=Release \
+      -DCMAKE_POLICY_VERSION_MINIMUM=3.5 2>&1 | tee "$LOGS/configure.log"
+    cmake --build "$SRC/build/ios-arm64" --target ppsspp_libretro -j "$(sysctl -n hw.ncpu)" 2>&1 | tee "$LOGS/build.log"
+    BINARY="$(find "$SRC/build/ios-arm64" -name 'ppsspp_libretro*.dylib' -print -quit)"
+    if [ -n "$BINARY" ]; then
+      LC_ALL=C grep -c -a "OmniStation: JIT with dual-mapped executable memory from the frontend" "$BINARY" >/dev/null || { echo "::error::PPSSPP sin el parche del JIT permanente." >&2; exit 1; }
+      strip -x "$BINARY"
+    fi
+    ;;
   *)
     echo "Núcleo desconocido: $CORE" >&2
     exit 1

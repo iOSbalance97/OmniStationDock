@@ -30,5 +30,12 @@
     "framework": "pcsx_rearmed_omni",
     "bundleID": "com.omnistation.core.pcsxrearmed",
     "notes": "PCSX ReARMed (GPL-2.0). Con patches/pcsx_rearmed, en iOS el dynarec (ari64) usa la memoria de JIT de OmniStation en doble vista (TC_WRITE_OFFSET, como en Switch): JIT permanente."
+  },
+  "ppsspp": {
+    "repository": "https://github.com/hrydgard/ppsspp.git",
+    "revision": "fa50bb1976065c4f8b1b47af227d367fe9771555",
+    "framework": "ppsspp_omni",
+    "bundleID": "com.omnistation.core.ppsspp",
+    "notes": "PPSSPP v1.20.4 (GPL-2.0-or-later). Con patches/ppsspp, en iOS todos sus JIT (CPU, vértices, render por software) piden la memoria a OmniStation con RETRO_ENVIRONMENT_EXEC_MEM_ALLOC y escriben por la vista RW y ejecutan por la RX (como en Switch): JIT permanente."
   }
 }
