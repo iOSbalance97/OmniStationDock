@@ -3,7 +3,7 @@ name: Build libretro cores (OmniStation)
 # Compila núcleos libretro desde su código (Cores/Libretro/sources.json) y los publica como release
 # «libretro-cores» de este repositorio. El workflow de la app los descarga de ahí (no los vuelve a
 # compilar). De momento: Dolphin (GameCube/Wii), Azahar (3DS), melonDS DS (NDS), PCSX ReARMed
-# (PS1) y PPSSPP (PSP), que piden su memoria de JIT a OmniStation y usan el JIT permanente. Tarda bastante (30-90 min de Mac): lánzalo solo cuando
+# (PS1), PPSSPP (PSP), Mupen64Plus-Next (N64) y Flycast (Dreamcast), que piden su memoria de JIT a OmniStation y usan el JIT permanente. Tarda bastante (30-90 min de Mac): lánzalo solo cuando
 # quieras un núcleo nuevo. Cada núcleo se compila aparte; la release guarda todos.
 on:
   workflow_dispatch:
@@ -17,7 +17,9 @@ on:
           - melondsds
           - pcsx_rearmed
           - ppsspp
-        default: ppsspp
+          - mupen64plus_next
+          - flycast
+        default: flycast
 
 permissions:
   contents: write
@@ -53,6 +55,8 @@ jobs:
               print('repository=' + repo, file=output)
               print('revision=' + info['revision'], file=output)
               print('framework=' + info['framework'], file=output)
+              # Mupen64Plus-Next lo trae todo dentro (y un submódulo roto sin URL): sin submódulos.
+              print('submodules=' + ('recursive' if info.get('submodules', True) else 'false'), file=output)
           PY
 
       - name: Checkout core source
@@ -61,7 +65,7 @@ jobs:
           repository: ${{ steps.source.outputs.repository }}
           ref: ${{ steps.source.outputs.revision }}
           path: .native-sources/${{ inputs.core }}
-          submodules: recursive
+          submodules: ${{ steps.source.outputs.submodules }}
           persist-credentials: false
 
       - name: Select Xcode and tools
