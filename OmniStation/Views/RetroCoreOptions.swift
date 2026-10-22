@@ -71,7 +71,7 @@ enum RetroCoreOptions {
                     CuratedOption(key: "vbam_interframeblending", tab: g, title: "Estela de la pantalla LCD"),
                     CuratedOption(key: "vbam_usebios", tab: s, title: "Usar la BIOS si está"),
                     CuratedOption(key: "vbam_forceRTCenable", tab: s, title: "Reloj del cartucho (RTC)")]
-        case "melondsds":
+        case "melondsds", "melondsds_omni":
             return [CuratedOption(key: "melonds_screen_gap", tab: g, title: "Separación entre pantallas"),
                     CuratedOption(key: "melonds_hybrid_ratio", tab: g, title: "Tamaño en modo híbrido"),
                     CuratedOption(key: "melonds_console_mode", tab: s, title: "Consola (DS o DSi)"),
@@ -91,7 +91,7 @@ enum RetroCoreOptions {
                     CuratedOption(key: "desmume_frameskip", tab: s, title: "Saltar fotogramas"),
                     CuratedOption(key: "desmume_load_to_memory", tab: s, title: "Cargar el juego en memoria"),
                     CuratedOption(key: "desmume_mic_mode", tab: i, title: "Micrófono")]
-        case "pcsx_rearmed":
+        case "pcsx_rearmed", "pcsx_rearmed_omni":
             return [CuratedOption(key: "pcsx_rearmed_neon_enhancement_enable", tab: g, title: "Doble de resolución", detail: "Mejora NEON: imagen más nítida y gasta más."),
                     CuratedOption(key: "pcsx_rearmed_neon_interlace_enable", tab: g, title: "Entrelazado"),
                     CuratedOption(key: "pcsx_rearmed_dithering", tab: g, title: "Tramado (dithering)"),

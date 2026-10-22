@@ -132,10 +132,14 @@ enum RetroSystem: String, CaseIterable, Identifiable {
                     RetroCore(id: "gpsp", name: "gpSP", framework: "gpsp.libretro.framework", jit: false),
                     RetroCore(id: "vbam", name: "VBA-M", framework: "vbam.libretro.framework", jit: false)]
         case .nds:
-            return [RetroCore(id: "melondsds", name: "melonDS DS", framework: "melondsds.libretro.framework", jit: true),
+            // El compilado por OmniStation (JIT permanente) primero; el de ManicEMU, si el nuestro no está.
+            return [RetroCore(id: "melondsds_omni", name: "melonDS DS", framework: "melondsds_omni.libretro.framework", jit: true, execMem: true),
+                    RetroCore(id: "melondsds", name: "melonDS DS (ManicEMU)", framework: "melondsds.libretro.framework", jit: true),
                     RetroCore(id: "desmume", name: "DeSmuME", framework: "desmume.libretro.framework", jit: false)]
         case .ps1:
-            return [RetroCore(id: "pcsx_rearmed", name: "PCSX ReARMed", framework: "pcsx.rearmed.libretro.framework", jit: false),
+            // El nuestro, con dynarec (JIT permanente); el de ManicEMU va sin dynarec.
+            return [RetroCore(id: "pcsx_rearmed_omni", name: "PCSX ReARMed", framework: "pcsx_rearmed_omni.libretro.framework", jit: true, execMem: true),
+                    RetroCore(id: "pcsx_rearmed", name: "PCSX ReARMed (ManicEMU)", framework: "pcsx.rearmed.libretro.framework", jit: false),
                     RetroCore(id: "beetle_psx_hw", name: "Beetle PSX HW", framework: "mednafen.psx.hw.libretro.framework", jit: true, gpu: true)]
         case .n64:
             return [RetroCore(id: "mupen64plus_next", name: "Mupen64Plus-Next", framework: "mupen64plus.next.libretro.framework", jit: true, gpu: true)]
@@ -496,7 +500,7 @@ enum RetroConfig {
         host["jitPool"] = core.execMem ? "true" : "false"
         // Lo que cada núcleo necesita para ir bien aquí (como lo deja ManicEMU), con o sin JIT.
         switch core.id {
-        case "melondsds":
+        case "melondsds", "melondsds_omni":
             coreOptions["melonds_jit_enable"] = useJIT ? "enabled" : "disabled"
             coreOptions["melonds_number_of_screen_layouts"] = "1"
             coreOptions["melonds_show_cursor"] = "disabled"
@@ -513,6 +517,9 @@ enum RetroConfig {
             host["orient.landscape"] = "left/right"
         case "pcsx_rearmed":
             coreOptions["pcsx_rearmed_drc"] = "disabled"
+        case "pcsx_rearmed_omni":
+            // Dynarec solo si OmniStation le da memoria de JIT (el núcleo lo vuelve a mirar).
+            coreOptions["pcsx_rearmed_drc"] = useJIT ? "enabled" : "disabled"
         case "beetle_psx_hw":
             coreOptions["beetle_psx_hw_cpu_dynarec"] = useJIT ? "execute" : "disabled"
             coreOptions["beetle_psx_hw_renderer"] = "hardware_gl"
