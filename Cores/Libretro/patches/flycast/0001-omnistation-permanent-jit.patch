@@ -74,6 +74,23 @@ index 9492f6f..be7dcc5 100644
      if (enable)
      	virtmem::region_set_exec(recompiler::ICache, recompiler::ICacheSize);
      else
+diff --git a/core/hw/sh4/dyna/driver.cpp b/core/hw/sh4/dyna/driver.cpp
+index 4e1fbf3..e72e9b1 100644
+--- a/core/hw/sh4/dyna/driver.cpp
++++ b/core/hw/sh4/dyna/driver.cpp
+@@ -360,6 +360,12 @@ void Sh4Recompiler::Init()
+ 	verify(CodeCache != nullptr);
+ 
+ 	TempCodeCache = CodeCache + CODE_SIZE;
++	// The code buffer is static: after a Term() (OmniStation tears the emulator down after each
++	// game) it must start again at the beginning of the new code cache.
++	codeBuffer.reset(false);
++	codeBuffer.reset(true);
++	codeBuffer.useTempBuffer(false);
++	smc_hotspots.clear();
+ 	sh4Dynarec->init(*getContext(), codeBuffer);
+ 	bm_ResetCache();
+ }
 diff --git a/core/linux/posix_vmem.cpp b/core/linux/posix_vmem.cpp
 index 2d42410..7e3d76b 100644
 --- a/core/linux/posix_vmem.cpp
