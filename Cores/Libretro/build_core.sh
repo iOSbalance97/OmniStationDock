@@ -104,6 +104,7 @@ PY
     if [ -n "$BINARY" ]; then
       # (Los símbolos van ocultos: se busca un texto que solo está con el parche.)
       LC_ALL=C grep -c -a "dual-mapped executable memory from the frontend" "$BINARY" >/dev/null || { echo "::error::melonDS DS sin el parche del JIT permanente." >&2; exit 1; }
+      LC_ALL=C grep -c -a "Failed to map the emulated memory!" "$BINARY" >/dev/null || { echo "::error::melonDS sin el parche de memoria para iOS." >&2; exit 1; }
     fi
     ;;
   pcsx_rearmed)
