@@ -102,7 +102,8 @@ PY
     cmake --build "$SRC/build/ios-arm64" --target melondsds_libretro -j "$(sysctl -n hw.ncpu)" 2>&1 | tee "$LOGS/build.log"
     BINARY="$(find "$SRC/build/ios-arm64" -name 'melondsds_libretro*.dylib' -print -quit)"
     if [ -n "$BINARY" ]; then
-      nm "$BINARY" | grep -c SetCodeMemoryProvider >/dev/null || { echo "::error::melonDS DS sin el parche del JIT permanente." >&2; exit 1; }
+      # (Los símbolos van ocultos: se busca un texto que solo está con el parche.)
+      LC_ALL=C grep -c -a "dual-mapped executable memory from the frontend" "$BINARY" >/dev/null || { echo "::error::melonDS DS sin el parche del JIT permanente." >&2; exit 1; }
     fi
     ;;
   pcsx_rearmed)
@@ -111,7 +112,7 @@ PY
       MINVERSION=-miphoneos-version-min=17.0 -j "$(sysctl -n hw.ncpu)" 2>&1 | tee "$LOGS/build.log"
     BINARY="$SRC/pcsx_rearmed_libretro_ios.dylib"
     if [ -f "$BINARY" ]; then
-      nm "$BINARY" | grep -c omni_exec_mem_alloc >/dev/null || { echo "::error::PCSX ReARMed sin el parche del JIT permanente." >&2; exit 1; }
+      LC_ALL=C grep -c -a "OmniStation: no executable memory for the dynarec" "$BINARY" >/dev/null || { echo "::error::PCSX ReARMed sin el parche del JIT permanente." >&2; exit 1; }
     fi
     ;;
   *)
