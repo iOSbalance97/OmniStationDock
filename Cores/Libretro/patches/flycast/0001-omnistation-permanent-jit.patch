@@ -58,7 +58,7 @@ index 9492f6f..be7dcc5 100644
      	virtmem::region_set_exec(recompiler::ICache, recompiler::ICacheSize);
      else
 diff --git a/core/linux/posix_vmem.cpp b/core/linux/posix_vmem.cpp
-index 2d42410..9c9ef6c 100644
+index 2d42410..9466b31 100644
 --- a/core/linux/posix_vmem.cpp
 +++ b/core/linux/posix_vmem.cpp
 @@ -286,6 +286,53 @@ void release_jit_block(void *code_area, size_t size)
@@ -100,7 +100,7 @@ index 2d42410..9c9ef6c 100644
 +	}
 +	*code_area_rw = request.rw;
 +	*rx_offset = (char *)request.rx - (char *)request.rw;
-+	INFO_LOG(DYNAREC, "OmniStation: JIT with dual-mapped executable memory from the frontend, rx %p rw %p", request.rx, request.rw);
++	NOTICE_LOG(DYNAREC, "OmniStation: JIT with dual-mapped executable memory from the frontend, rx %p rw %p", request.rx, request.rw);
 +	return true;
 +}
 +
