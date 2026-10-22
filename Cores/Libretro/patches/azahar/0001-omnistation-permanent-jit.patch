@@ -1,0 +1,297 @@
+diff --git a/src/citra_libretro/core_settings.cpp b/src/citra_libretro/core_settings.cpp
+index 7b43e31..0357126 100644
+--- a/src/citra_libretro/core_settings.cpp
++++ b/src/citra_libretro/core_settings.cpp
+@@ -843,10 +843,18 @@ void RegisterCoreOptions(void) {
+ }
+ 
+ static void ParseCpuOptions(void) {
+-    Settings::values.use_cpu_jit =
+ #ifdef IOS
+-        false;
++    // OmniStation: JIT when the frontend gives executable memory (see SetupJITMemory).
++    const bool can_jit = LibRetro::SetupJITMemory();
++    Settings::values.use_cpu_jit =
++        can_jit &&
++        LibRetro::FetchVariable(config::cpu::use_cpu_jit, config::enabled) == config::enabled;
++    Settings::values.use_shader_jit =
++        can_jit &&
++        LibRetro::FetchVariable(config::graphics::use_shader_jit, config::enabled) ==
++            config::enabled;
+ #else
++    Settings::values.use_cpu_jit =
+         LibRetro::FetchVariable(config::cpu::use_cpu_jit, config::enabled) == config::enabled;
+ #endif
+ 
+@@ -988,10 +996,8 @@ static void ParseGraphicsOptions(void) {
+     Settings::values.use_hw_shader = LibRetro::FetchVariable(config::graphics::use_hw_shader,
+                                                              config::enabled) == config::enabled;
+ 
++#ifndef IOS
+     Settings::values.use_shader_jit =
+-#ifdef IOS
+-        false;
+-#else
+         LibRetro::FetchVariable(config::graphics::use_shader_jit, config::enabled) ==
+         config::enabled;
+ #endif
+diff --git a/src/citra_libretro/environment.cpp b/src/citra_libretro/environment.cpp
+index 01ffecf..fa57a23 100644
+--- a/src/citra_libretro/environment.cpp
++++ b/src/citra_libretro/environment.cpp
+@@ -16,6 +16,10 @@
+ #include "streams/file_stream.h"
+ #endif
+ 
++#ifdef IOS
++#include <oaknut/code_block.hpp>
++#endif
++
+ using namespace LibRetro;
+ 
+ namespace LibRetro {
+@@ -232,6 +236,68 @@ bool CanUseJIT() {
+     bool can_jit = false;
+     return environ_cb(RETRO_ENVIRONMENT_GET_JIT_CAPABLE, &can_jit) && can_jit;
+ }
++
++// OmniStation: JIT memory from the frontend (RETRO_ENVIRONMENT_EXEC_MEM_ALLOC, as libretro's
++// Dolphin uses it on iOS). On iOS 26+ (TXM) the frontend keeps one region that a debugger
++// prepared once, so the JIT keeps working after the debugger is gone.
++namespace {
++constexpr unsigned ENVIRONMENT_EXEC_MEM_ALLOC = 83;
++constexpr unsigned ENVIRONMENT_EXEC_MEM_FREE = 84;
++constexpr unsigned EXEC_MEM_MODE_UNAVAILABLE = 0;
++constexpr unsigned EXEC_MEM_MODE_UNRESTRICTED = 1;
++constexpr unsigned EXEC_MEM_MODE_DUAL_MAP = 4;
++
++struct ExecMemAlloc {
++    unsigned version;
++    size_t size;
++    unsigned mode;
++    void* rx;
++    void* rw;
++};
++
++struct ExecMemFree {
++    void* rx;
++};
++
++void* FrontendExecAlloc(std::size_t size, void** rw) {
++    ExecMemAlloc request{1, size, EXEC_MEM_MODE_DUAL_MAP, nullptr, nullptr};
++    if (!environ_cb || !environ_cb(ENVIRONMENT_EXEC_MEM_ALLOC, &request) ||
++        request.mode != EXEC_MEM_MODE_DUAL_MAP || request.rx == nullptr || request.rw == nullptr) {
++        *rw = nullptr;
++        return nullptr;
++    }
++    *rw = request.rw;
++    return request.rx;
++}
++
++void FrontendExecFree(void* rx) {
++    ExecMemFree request{rx};
++    if (environ_cb)
++        environ_cb(ENVIRONMENT_EXEC_MEM_FREE, &request);
++}
++} // namespace
++
++bool SetupJITMemory() {
++    auto& hooks = oaknut::dual_map_hooks();
++    ExecMemAlloc probe{1, 0, EXEC_MEM_MODE_UNAVAILABLE, nullptr, nullptr};
++    const bool answered = environ_cb && environ_cb(ENVIRONMENT_EXEC_MEM_ALLOC, &probe);
++    if (answered && probe.mode == EXEC_MEM_MODE_DUAL_MAP) {
++        hooks.alloc = FrontendExecAlloc;
++        hooks.release = FrontendExecFree;
++        LOG_INFO(Frontend, "JIT: dual-mapped executable memory from the frontend");
++        return true;
++    }
++    hooks.alloc = nullptr;
++    hooks.release = nullptr;
++    // Before TXM the debugger's JIT lets the core map its own memory. A frontend that answers
++    // "unavailable" means it: no JIT (mapping it here would fail under TXM).
++    if (answered ? probe.mode == EXEC_MEM_MODE_UNRESTRICTED : CanUseJIT()) {
++        LOG_INFO(Frontend, "JIT: the core maps its own executable memory");
++        return true;
++    }
++    LOG_WARNING(Frontend, "JIT: not available, using the interpreter");
++    return false;
++}
+ #endif
+ 
+ void OnConfigureEnvironment() {
+diff --git a/src/citra_libretro/environment.h b/src/citra_libretro/environment.h
+index a6a29c4..90b979c 100644
+--- a/src/citra_libretro/environment.h
++++ b/src/citra_libretro/environment.h
+@@ -127,6 +127,9 @@ void SetVFSCallback(struct retro_vfs_interface_info* vfs_iface_info);
+ 
+ #ifdef IOS
+ bool CanUseJIT();
++
++/// OmniStation: sets up where JIT code goes. Returns whether the JIT can be used.
++bool SetupJITMemory();
+ #endif
+ 
+ } // namespace LibRetro
+diff --git a/src/core/arm/dynarmic/arm_dynarmic.cpp b/src/core/arm/dynarmic/arm_dynarmic.cpp
+index 216b409..0450761 100644
+--- a/src/core/arm/dynarmic/arm_dynarmic.cpp
++++ b/src/core/arm/dynarmic/arm_dynarmic.cpp
+@@ -370,6 +370,11 @@ std::unique_ptr<Dynarmic::A32::Jit> ARM_Dynarmic::MakeJit() {
+     config.processor_id = GetID();
+     config.global_monitor = &exclusive_monitor.monitor;
+ 
++#ifdef IOS
++    // OmniStation: JIT memory on iOS is one shared region (one JIT per core and process).
++    config.code_cache_size = GetID() == 0 ? 64 * 1024 * 1024 : 16 * 1024 * 1024;
++#endif
++
+     return std::make_unique<Dynarmic::A32::Jit>(config);
+ }
+ 
+diff --git a/src/video_core/shader/shader_jit_a64_compiler.cpp b/src/video_core/shader/shader_jit_a64_compiler.cpp
+index bdc0f85..ffb15c5 100644
+--- a/src/video_core/shader/shader_jit_a64_compiler.cpp
++++ b/src/video_core/shader/shader_jit_a64_compiler.cpp
+@@ -1054,7 +1054,7 @@ void JitShader::Compile(const std::array<u32, MAX_PROGRAM_CODE_LENGTH>* program_
+                                                 program_offset);
+ 
+     // Copy to executable memory
+-    std::memcpy(code_mem->ptr(), code_vec.data(), code_vec.size() * sizeof(u32));
++    std::memcpy(code_mem->wptr(), code_vec.data(), code_vec.size() * sizeof(u32));
+ 
+     // Memory is ready to execute
+     code_mem->protect();
+diff --git a/externals/oaknut/include/oaknut/code_block.hpp b/externals/oaknut/include/oaknut/code_block.hpp
+index bfa87d9..87dd03e 100644
+--- a/externals/oaknut/include/oaknut/code_block.hpp
++++ b/externals/oaknut/include/oaknut/code_block.hpp
+@@ -23,6 +23,22 @@
+ 
+ namespace oaknut {
+ 
++#if defined(__APPLE__) && TARGET_OS_IPHONE
++// OmniStation: on iOS 26+ (TXM) a frontend can hand out JIT memory that a debugger already
++// prepared, as two views of the same pages (RX to run, RW to write). When these hooks are set,
++// every CodeBlock comes from them. alloc returns the RX view and stores the RW view in *rw.
++struct DualMapHooks {
++    void* (*alloc)(std::size_t size, void** rw) = nullptr;
++    void (*release)(void* rx) = nullptr;
++};
++
++inline DualMapHooks& dual_map_hooks()
++{
++    static DualMapHooks hooks;
++    return hooks;
++}
++#endif
++
+ class CodeBlock {
+ public:
+     explicit CodeBlock(std::size_t size)
+@@ -32,7 +48,18 @@ public:
+         m_memory = (std::uint32_t*)VirtualAlloc(nullptr, size, MEM_COMMIT, PAGE_EXECUTE_READWRITE);
+ #elif defined(__APPLE__)
+ #    if TARGET_OS_IPHONE
++        if (dual_map_hooks().alloc != nullptr) {
++            void* rw = nullptr;
++            m_memory = (std::uint32_t*)dual_map_hooks().alloc(size, &rw);
++            if (m_memory == nullptr || rw == nullptr)
++                throw std::bad_alloc{};
++            m_wmemory = (std::uint32_t*)rw;
++            m_release = dual_map_hooks().release;
++            return;
++        }
+         m_memory = (std::uint32_t*)mmap(nullptr, size, PROT_READ | PROT_EXEC, MAP_ANON | MAP_PRIVATE, -1, 0);
++        if (m_memory == (std::uint32_t*)MAP_FAILED)
++            m_memory = nullptr;
+ #    else
+         m_memory = (std::uint32_t*)mmap(nullptr, size, PROT_READ | PROT_WRITE | PROT_EXEC, MAP_ANON | MAP_PRIVATE | MAP_JIT, -1, 0);
+ #    endif
+@@ -46,6 +73,7 @@ public:
+ 
+         if (m_memory == nullptr)
+             throw std::bad_alloc{};
++        m_wmemory = m_memory;
+     }
+ 
+     ~CodeBlock()
+@@ -53,6 +81,12 @@ public:
+         if (m_memory == nullptr)
+             return;
+ 
++        if (m_wmemory != m_memory) {
++            if (m_release != nullptr)
++                m_release(m_memory);
++            return;
++        }
++
+ #if defined(_WIN32)
+         VirtualFree((void*)m_memory, 0, MEM_RELEASE);
+ #else
+@@ -70,8 +104,16 @@ public:
+         return m_memory;
+     }
+ 
++    // Where to write the code (the same as ptr() unless the memory is dual-mapped).
++    std::uint32_t* wptr() const
++    {
++        return m_wmemory;
++    }
++
+     void protect()
+     {
++        if (m_wmemory != m_memory)
++            return;
+ #if defined(__APPLE__) && !TARGET_OS_IPHONE
+         pthread_jit_write_protect_np(1);
+ #elif defined(__APPLE__) || defined(__NetBSD__) || defined(__OpenBSD__)
+@@ -81,6 +123,8 @@ public:
+ 
+     void unprotect()
+     {
++        if (m_wmemory != m_memory)
++            return;
+ #if defined(__APPLE__) && !TARGET_OS_IPHONE
+         pthread_jit_write_protect_np(0);
+ #elif defined(__APPLE__) || defined(__NetBSD__) || defined(__OpenBSD__)
+@@ -137,6 +181,8 @@ public:
+ 
+ protected:
+     std::uint32_t* m_memory;
++    std::uint32_t* m_wmemory = nullptr;
++    void (*m_release)(void*) = nullptr;
+     std::size_t m_size = 0;
+ };
+ 
+diff --git a/externals/dynarmic/src/dynarmic/backend/arm64/address_space.cpp b/externals/dynarmic/src/dynarmic/backend/arm64/address_space.cpp
+index 2c7ae777..029799c8 100644
+--- a/externals/dynarmic/src/dynarmic/backend/arm64/address_space.cpp
++++ b/externals/dynarmic/src/dynarmic/backend/arm64/address_space.cpp
+@@ -23,7 +23,7 @@ namespace Dynarmic::Backend::Arm64 {
+ AddressSpace::AddressSpace(size_t code_cache_size)
+         : code_cache_size(code_cache_size)
+         , mem(code_cache_size)
+-        , code(mem.ptr(), mem.ptr())
++        , code(mem.wptr(), mem.ptr())
+         , fastmem_manager(exception_handler) {
+     ASSERT_MSG(code_cache_size <= 128 * 1024 * 1024, "code_cache_size > 128 MiB not currently supported");
+ 
+@@ -136,7 +136,7 @@ void AddressSpace::Link(EmittedBlockInfo& block_info) {
+     using namespace oaknut::util;
+ 
+     for (auto [ptr_offset, target] : block_info.relocations) {
+-        CodeGenerator c{mem.ptr(), mem.ptr()};
++        CodeGenerator c{mem.wptr(), mem.ptr()};
+         c.set_xptr(reinterpret_cast<u32*>(block_info.entry_point + ptr_offset));
+ 
+         switch (target) {
+@@ -276,7 +276,7 @@ void AddressSpace::LinkBlockLinks(const CodePtr entry_point, const CodePtr targe
+     using namespace oaknut::util;
+ 
+     for (auto [ptr_offset, type] : block_relocations_list) {
+-        CodeGenerator c{mem.ptr(), mem.ptr()};
++        CodeGenerator c{mem.wptr(), mem.ptr()};
+         c.set_xptr(reinterpret_cast<u32*>(entry_point + ptr_offset));
+ 
+         switch (type) {
