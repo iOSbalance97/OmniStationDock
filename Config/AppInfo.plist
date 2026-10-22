@@ -63,6 +63,25 @@
 			<string>ExtendedGamepad</string>
 		</dict>
 	</array>
+	<!-- Tele por AirPlay o HDMI: la escena de la pantalla externa es de OSExternalDisplay (en una app
+	     de SwiftUI, sin esto el sistema solo duplica la pantalla del iPhone). -->
+	<key>UIApplicationSceneManifest</key>
+	<dict>
+		<key>UIApplicationSupportsMultipleScenes</key>
+		<true/>
+		<key>UISceneConfigurations</key>
+		<dict>
+			<key>UIWindowSceneSessionRoleExternalDisplayNonInteractive</key>
+			<array>
+				<dict>
+					<key>UISceneConfigurationName</key>
+					<string>OmniStation TV</string>
+					<key>UISceneDelegateClassName</key>
+					<string>OSExternalDisplaySceneDelegate</string>
+				</dict>
+			</array>
+		</dict>
+	</dict>
 	<key>UIBackgroundModes</key>
 	<array>
 		<string>audio</string>
