@@ -295,3 +295,41 @@ index 2c7ae777..029799c8 100644
          c.set_xptr(reinterpret_cast<u32*>(entry_point + ptr_offset));
  
          switch (type) {
+diff --git a/externals/dynarmic/src/dynarmic/common/spin_lock_arm64.cpp b/externals/dynarmic/src/dynarmic/common/spin_lock_arm64.cpp
+index ccf807e2..2ede0847 100644
+--- a/externals/dynarmic/src/dynarmic/common/spin_lock_arm64.cpp
++++ b/externals/dynarmic/src/dynarmic/common/spin_lock_arm64.cpp
+@@ -35,6 +35,26 @@ void EmitSpinLockUnlock(oaknut::CodeGenerator& code, oaknut::XReg ptr) {
+     code.STLR(WZR, ptr);
+ }
+ 
++#if defined(__APPLE__) && defined(IOS)
++
++// OmniStation: on iOS the lock used from C++ must not be JIT code. This one was made in a code
++// block created when the library loads, before the frontend hands out executable memory, so it
++// ended up in a page that cannot run (the game crashed as soon as the CPU JIT started). Same lock
++// as the JIT-emitted one (exclusive load/store on `storage`, acquire/release), in plain C++.
++void SpinLock::Lock() {
++    while (__atomic_exchange_n(const_cast<int*>(&storage), 1, __ATOMIC_ACQUIRE) != 0) {
++        while (__atomic_load_n(const_cast<int*>(&storage), __ATOMIC_RELAXED) != 0) {
++            __asm__ volatile("yield");
++        }
++    }
++}
++
++void SpinLock::Unlock() {
++    __atomic_store_n(const_cast<int*>(&storage), 0, __ATOMIC_RELEASE);
++}
++
++#else
++
+ namespace {
+ 
+ struct SpinLockImpl {
+@@ -83,4 +103,6 @@ void SpinLock::Unlock() {
+     impl.unlock(&storage);
+ }
+ 
++#endif
++
+ }  // namespace Dynarmic
