@@ -504,6 +504,10 @@ enum RetroConfig {
         host["gpu"] = core.vulkan ? "vulkan" : (core.gpu ? "true" : "false")
         // Núcleo que pide su memoria de JIT a OmniStation: puede usar el JIT permanente.
         host["jitPool"] = core.execMem ? "true" : "false"
+        // Trucos en el menú de la partida: los núcleos cuyo retro_cheat_set hace algo (Flycast,
+        // Azahar y Dolphin no admiten códigos sueltos).
+        let noCheats: Set<String> = ["flycast", "flycast_jitless", "flycast_omni", "azahar", "azahar_omni", "dolphin_omni"]
+        host["cheats"] = noCheats.contains(core.id) ? "false" : "true"
         // Lo que cada núcleo necesita para ir bien aquí (como lo deja ManicEMU), con o sin JIT.
         switch core.id {
         case "melondsds", "melondsds_omni":
