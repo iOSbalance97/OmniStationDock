@@ -1,0 +1,158 @@
+diff --git a/src/ARMJIT.cpp b/src/ARMJIT.cpp
+index 4c46eea..0d01968 100644
+--- a/src/ARMJIT.cpp
++++ b/src/ARMJIT.cpp
+@@ -1158,7 +1158,9 @@ void ARMJIT::ResetBlockCache() noexcept
+ 
+ void ARMJIT::JitEnableWrite() noexcept
+ {
+-    #if defined(__APPLE__) && defined(__aarch64__)
++    #if defined(__APPLE__) && defined(__aarch64__) && TARGET_OS_IPHONE
++        // iOS: no MAP_JIT toggling (the code memory is dual-mapped or plain RWX).
++    #elif defined(__APPLE__) && defined(__aarch64__)
+         if (__builtin_available(macOS 11.0, *))
+             pthread_jit_write_protect_np(false);
+     #elif defined(__NetBSD__)
+@@ -1168,7 +1170,9 @@ void ARMJIT::JitEnableWrite() noexcept
+ 
+ void ARMJIT::JitEnableExecute() noexcept
+ {
+-    #if defined(__APPLE__) && defined(__aarch64__)
++    #if defined(__APPLE__) && defined(__aarch64__) && TARGET_OS_IPHONE
++        // iOS: nothing to toggle (see JitEnableWrite).
++    #elif defined(__APPLE__) && defined(__aarch64__)
+         if (__builtin_available(macOS 11.0, *))
+             pthread_jit_write_protect_np(true);
+     #elif defined(__NetBSD__)
+diff --git a/src/ARMJIT.h b/src/ARMJIT.h
+index 41e111f..71a308d 100644
+--- a/src/ARMJIT.h
++++ b/src/ARMJIT.h
+@@ -32,6 +32,7 @@
+ 
+ #if defined(__APPLE__) && defined(__aarch64__)
+     #include <pthread.h>
++    #include <TargetConditionals.h>
+ #endif
+ 
+ #include "ARMJIT_Compiler.h"
+diff --git a/src/ARMJIT_A64/ARMJIT_Compiler.cpp b/src/ARMJIT_A64/ARMJIT_Compiler.cpp
+index ca0ea12..1539aca 100644
+--- a/src/ARMJIT_A64/ARMJIT_Compiler.cpp
++++ b/src/ARMJIT_A64/ARMJIT_Compiler.cpp
+@@ -247,10 +247,18 @@ Compiler::Compiler(melonDS::NDS& nds) : Arm64Gen::ARM64XEmitter(), NDS(nds)
+ #else
+     ARMJIT_Global::Init();
+ 
+-    CodeMemBase = ARMJIT_Global::AllocateCodeMem();
++    // OmniStation: dual-mapped memory from the host when it gives it (write RW, run RX).
++    void* codeMemRW = nullptr;
++    CodeMemBase = ARMJIT_Global::AllocateCodeMemDualMapped(&codeMemRW);
++    CodeMemDualMapped = CodeMemBase != nullptr;
++    if (!CodeMemDualMapped)
++    {
++        CodeMemBase = ARMJIT_Global::AllocateCodeMem();
++        codeMemRW = CodeMemBase;
++    }
+     nds.JIT.JitEnableWrite();
+ 
+-    SetCodeBase(reinterpret_cast<u8*>(CodeMemBase), reinterpret_cast<u8*>(CodeMemBase));
++    SetCodeBase(reinterpret_cast<u8*>(codeMemRW), reinterpret_cast<u8*>(CodeMemBase));
+     JitMemMainSize = ARMJIT_Global::CodeMemorySliceSize;
+ #endif
+     SetCodePtr(0);
+@@ -463,7 +471,10 @@ Compiler::~Compiler()
+     }
+ #endif
+ 
+-    ARMJIT_Global::FreeCodeMem(CodeMemBase);
++    if (CodeMemDualMapped)
++        ARMJIT_Global::FreeCodeMemDualMapped(CodeMemBase);
++    else
++        ARMJIT_Global::FreeCodeMem(CodeMemBase);
+     ARMJIT_Global::DeInit();
+ }
+ 
+diff --git a/src/ARMJIT_A64/ARMJIT_Compiler.h b/src/ARMJIT_A64/ARMJIT_Compiler.h
+index 5a79d8b..b0f8ee5 100644
+--- a/src/ARMJIT_A64/ARMJIT_Compiler.h
++++ b/src/ARMJIT_A64/ARMJIT_Compiler.h
+@@ -276,6 +276,8 @@ public:
+     void* JitRXStart;
+ #endif
+     void* CodeMemBase;
++    // OmniStation: CodeMemBase is the RX view of host memory (written through its RW view).
++    bool CodeMemDualMapped = false;
+ 
+     void* ReadBanked, *WriteBanked;
+ 
+diff --git a/src/ARMJIT_Global.cpp b/src/ARMJIT_Global.cpp
+index e4aa42f..1d3fba4 100644
+--- a/src/ARMJIT_Global.cpp
++++ b/src/ARMJIT_Global.cpp
+@@ -42,6 +42,44 @@ u8* GetAlignedCodeMemoryStart()
+ 
+ int RefCounter = 0;
+ 
++static CodeMemoryAlloc ProviderAlloc = nullptr;
++static CodeMemoryFree ProviderFree = nullptr;
++
++void SetCodeMemoryProvider(CodeMemoryAlloc alloc, CodeMemoryFree release)
++{
++    std::lock_guard guard(globalMutex);
++    ProviderAlloc = alloc;
++    ProviderFree = release;
++}
++
++bool HasCodeMemoryProvider()
++{
++    std::lock_guard guard(globalMutex);
++    return ProviderAlloc != nullptr;
++}
++
++void* AllocateCodeMemDualMapped(void** rw)
++{
++    std::lock_guard guard(globalMutex);
++    *rw = nullptr;
++    if (!ProviderAlloc)
++        return nullptr;
++    void* rx = ProviderAlloc(CodeMemorySliceSize, rw);
++    if (!rx || !*rw)
++    {
++        *rw = nullptr;
++        return nullptr;
++    }
++    return rx;
++}
++
++void FreeCodeMemDualMapped(void* rx)
++{
++    std::lock_guard guard(globalMutex);
++    if (ProviderFree && rx)
++        ProviderFree(rx);
++}
++
+ void* AllocateCodeMem()
+ {
+     std::lock_guard guard(globalMutex);
+diff --git a/src/ARMJIT_Global.h b/src/ARMJIT_Global.h
+index 6cc06b2..098a7cb 100644
+--- a/src/ARMJIT_Global.h
++++ b/src/ARMJIT_Global.h
+@@ -37,6 +37,16 @@ void DeInit();
+ void* AllocateCodeMem();
+ void FreeCodeMem(void* codeMem);
+ 
++// OmniStation: executable memory from the host (iOS 26+ permanent JIT region). One region seen
++// twice: RX to run it, RW to write it. When set, the JIT takes its code memory from it.
++using CodeMemoryAlloc = void* (*)(size_t size, void** rw);
++using CodeMemoryFree = void (*)(void* rx);
++void SetCodeMemoryProvider(CodeMemoryAlloc alloc, CodeMemoryFree release);
++bool HasCodeMemoryProvider();
++// RX pointer (and *rw), or nullptr if there is no provider or it has no room.
++void* AllocateCodeMemDualMapped(void** rw);
++void FreeCodeMemDualMapped(void* rx);
++
+ }
+ 
+ }
