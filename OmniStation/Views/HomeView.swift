@@ -828,7 +828,7 @@ struct HomeView: View {
         let status: String = OSLibretroEngine.persistentJITStatus
         switch status {
         case "ready": return tr("JIT permanente listo")
-        case "": return tr("JIT permanente: se prepara al abrir un juego de Dolphin (OmniStation) con JIT")
+        case "": return tr("JIT permanente: aún no se ha preparado (se hace al abrir la app)")
         case "no-debugger": return tr("JIT permanente: falta el depurador al prepararlo")
         case "unanswered": return tr("JIT permanente: el depurador no contestó (revisa el script en StikDebug)")
         default: return tr("JIT permanente: falló (%@)", status)
@@ -2632,6 +2632,8 @@ struct HomeView: View {
     /// Verde si el JIT funciona ahora mismo: en LiveContainer, si la app corre con JIT; con el JIT
     /// integrado (SideStore), si está listo para dárselo a los juegos (OmniStation no lo necesita).
     private var jitIndicatorOn: Bool {
+        // JIT permanente preparado: los núcleos tienen JIT aunque el depurador ya se haya soltado.
+        if OSLibretroEngine.persistentJITReady { return true }
         if usesBuiltInJIT { return jitStatus.isReady }
         // En iOS 26 el JIT solo vale si el depurador sigue enganchado (no basta con que se activara).
         return jitEnabled && OSLibretroEngine.jitActive
@@ -2639,6 +2641,10 @@ struct HomeView: View {
 
     private func explainJITIndicator() {
         refreshJITStatus(announce: false)
+        if OSLibretroEngine.persistentJITReady {
+            showToast(tr("JIT permanente listo: los juegos arrancan con JIT"), seconds: 3)
+            return
+        }
         guard usesBuiltInJIT else {
             if jitEnabled && !OSLibretroEngine.jitActive {
                 showToast(tr("Se activó el JIT, pero el depurador ya no está enganchado y desde iOS 26 hace falta. En StikDebug, pon el script «universal» a LiveContainer y vuelve a activar el JIT."), seconds: 7)
@@ -2846,7 +2852,7 @@ struct HomeView: View {
             if emulator == .melonx && melonxIntegrated { return melonxCoreSettings }
             return emulatorSettings(emulator)
         }
-        if let retro = retroSettings { groups.append(retro) }
+        groups += retroGroups
         return groups
     }
 
@@ -2880,16 +2886,7 @@ struct HomeView: View {
         }))
         items.append(emulatorConfigItem(.armsx2))
         items.append(toggleSetting("armsx2CoreTouch", tr("Controles táctiles siempre"), tr("Si no, se ocultan con un mando conectado"), "hand.tap.fill", SettingTint.blue, $armsx2TouchAlways))
-        items.append(SettingItem(id: "armsx2CoreBoot", title: tr("Arrancar la BIOS"), subtitle: tr("Prueba el núcleo sin juego"), symbol: "play.circle.fill", tint: SettingTint.blue, control: .symbol("play.fill"), action: {
-            startIntegratedARMSX2(gamePath: nil, title: "PS2 BIOS", gameID: nil)
-        }))
-        items.append(SettingItem(id: "armsx2CoreFolder", title: tr("Carpeta ARMSX2"), subtitle: tr("Abrir en Archivos"), symbol: "folder.fill", tint: SettingTint.blue, control: .symbol("arrow.up.forward"), action: {
-            ARMSX2CoreFolders.ensure()
-            openExternal(ARMSX2CoreFolders.filesAppURL, failure: tr("No se pudo abrir Archivos."))
-        }))
-        items.append(SettingItem(id: "armsx2CoreHelp", title: tr("Requisitos"), subtitle: tr("Qué necesita el núcleo integrado"), symbol: "questionmark.circle.fill", tint: SettingTint.blue, control: .symbol("chevron.right"), action: {
-            dialog = .armsx2CoreHelp
-        }))
+        // La carpeta y arrancar la BIOS están en «Juegos»; los requisitos, en «Núcleo».
         return SettingGroup(id: "armsx2core", title: tr("ARMSX2 integrado (PS2)"), isSubsection: true, items: items)
     }
 
@@ -2958,6 +2955,10 @@ struct HomeView: View {
             closePadMenu()
             ARMSX2CoreFolders.ensure()
             openExternal(ARMSX2CoreFolders.filesAppURL, failure: tr("No se pudo abrir Archivos."))
+        })
+        items.append(PadMenuItem(title: tr("Arrancar la BIOS (sin juego)")) {
+            closePadMenu()
+            startIntegratedARMSX2(gamePath: nil, title: "PS2 BIOS", gameID: nil)
         })
         items.append(cancel)
         return (tr("Juegos de ARMSX2 integrado"), "Archivos → OmniStation Dock → ARMSX2 → Juegos", items)
@@ -3258,6 +3259,7 @@ struct HomeView: View {
         if let chosen = RetroConfig.core(for: system, gameID: game.id), chosen.id != core.id {
             showToast(tr("Sin JIT: se usa %@.", core.name), seconds: 3)
         }
+        RetroConfig.onceCore[game.id] = nil
         RetroFolders.ensure(system)
         RetroFolders.prepareSystemFiles(system)
         let options = RetroConfig.launchOptions(system, core: core, gameID: game.id, jit: jit)
@@ -3309,6 +3311,17 @@ struct HomeView: View {
                 if !success {
                     endIntegratedSession()
                     releaseRetroJIT()
+                    // ROM cifrada sin sus claves: esta vez se abre con el Azahar de ManicEMU (la próxima
+                    // se vuelve a probar el nuestro, por si ya están las claves).
+                    if core.id == "azahar_omni", message.localizedCaseInsensitiveContains("encrypted"),
+                       let manic = system.availableCores.first(where: { $0.id == "azahar" }) {
+                        RetroConfig.onceCore[gameID] = manic.id
+                        showToast(tr("ROM cifrada y sin claves: pon aes_keys.txt en la carpeta BIOS de 3DS. Esta vez se abre con %@.", manic.name), seconds: 6)
+                        DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
+                            launchRetro(game, item: item, system: system)
+                        }
+                        return
+                    }
                     showToast(message.isEmpty ? tr("No se pudo arrancar el juego.") : message, seconds: 6)
                 }
             },
@@ -3385,25 +3398,74 @@ struct HomeView: View {
         }
     }
 
-    /// Ajustes → Emuladores → Núcleos clásicos: un elemento por sistema.
-    private var retroSettings: SettingGroup? {
+    /// Ajustes → Emuladores: Dolphin (GameCube/Wii), Azahar (3DS) y el resto de núcleos clásicos,
+    /// cada uno con sus tarjetas (como ARMSX2 y MeloNX).
+    private var retroGroups: [SettingGroup] {
         _ = emulatorRevision
         let systems: [RetroSystem] = retroSystems
-        guard !systems.isEmpty else { return nil }
-        var items: [SettingItem] = []
+        guard !systems.isEmpty else { return [] }
         // Juegos de cada carpeta contados de una vez (antes se recorría la biblioteca por sistema).
         var counts: [String: Int] = [:]
         for game in libraryGames { counts[game.source, default: 0] += 1 }
-        for system in systems {
-            let count: Int = counts[system.source] ?? 0
-            let core: String = RetroConfig.core(for: system, gameID: nil)?.name ?? ""
-            items.append(SettingItem(id: "retro." + system.rawValue, title: system.title, subtitle: tr("%@ · %@/Juegos", core, system.folderName), symbol: "gamecontroller.fill", tint: SettingTint.aqua, control: .badge("\(count)", count > 0 ? Color.green : Color.gray), action: {
-                activeRetroSystem = system
-                dialog = .retroSystem
-            }))
+        var groups: [SettingGroup] = []
+
+        let dolphinSystems: [RetroSystem] = systems.filter { $0 == .gc || $0 == .wii }
+        if !dolphinSystems.isEmpty {
+            var items: [SettingItem] = [retroCoreItem(id: "dolphinCore", system: dolphinSystems[0])]
+            for system in dolphinSystems { items.append(retroSystemItem(system, counts: counts)) }
+            groups.append(SettingGroup(id: "dolphin", title: tr("Dolphin integrado (GameCube / Wii)"), isSubsection: true, items: items))
         }
-        items.append(toggleSetting("retroTouchAlways", tr("Mando táctil siempre"), tr("Si no, se oculta al conectar un mando"), "hand.tap.fill", SettingTint.aqua, $retroTouchAlways))
-        return SettingGroup(id: "retro", title: tr("Núcleos clásicos (integrados)"), isSubsection: true, items: items)
+
+        if systems.contains(.n3ds) {
+            var items: [SettingItem] = [retroCoreItem(id: "azaharCore", system: .n3ds), retroSystemItem(.n3ds, counts: counts)]
+            let keys: Bool = RetroFolders.has3DSKeys()
+            items.append(SettingItem(id: "azaharKeys", title: tr("Claves"), subtitle: keys ? tr("Las ROMs cifradas se abren") : tr("Para ROMs cifradas: aes_keys.txt en 3DS → BIOS"), symbol: "key.fill", tint: SettingTint.aqua, control: keys ? .badge("OK", Color.green) : .badge(tr("FALTA"), Color.orange), action: {
+                RetroFolders.ensure(.n3ds)
+                if keys {
+                    showToast(tr("Claves de 3DS listas (aes_keys.txt o keys.txt, y seeddb.bin si está)."), seconds: 3.5)
+                } else {
+                    showToast(tr("Pon tu aes_keys.txt (y seeddb.bin) en Archivos → OmniStation Dock → 3DS → BIOS."), seconds: 5)
+                    if let url = RetroFolders.filesAppURL(.n3ds) { UIApplication.shared.open(url) }
+                }
+            }))
+            groups.append(SettingGroup(id: "azahar", title: tr("Azahar integrado (3DS)"), isSubsection: true, items: items))
+        }
+
+        var classic: [SettingItem] = []
+        for system in systems where system != .gc && system != .wii && system != .n3ds {
+            classic.append(retroSystemItem(system, counts: counts))
+        }
+        // Vale para todos los núcleos libretro (también Dolphin y Azahar).
+        classic.append(toggleSetting("retroTouchAlways", tr("Mando táctil siempre"), tr("Todos los núcleos integrados (también Dolphin y Azahar)"), "hand.tap.fill", SettingTint.aqua, $retroTouchAlways))
+        groups.append(SettingGroup(id: "retro", title: tr("Núcleos clásicos (integrados)"), isSubsection: true, items: classic))
+        return groups
+    }
+
+    /// Tarjeta de un sistema: sus juegos; al tocarla, sus ajustes, su carpeta y volver a escanear.
+    private func retroSystemItem(_ system: RetroSystem, counts: [String: Int]) -> SettingItem {
+        let count: Int = counts[system.source] ?? 0
+        let core: String = RetroConfig.core(for: system, gameID: nil)?.name ?? ""
+        return SettingItem(id: "retro." + system.rawValue, title: system.title, subtitle: tr("%@ · %@/Juegos", core, system.folderName), symbol: "gamecontroller.fill", tint: SettingTint.aqua, control: .badge("\(count)", count > 0 ? Color.green : Color.gray), action: {
+            activeRetroSystem = system
+            dialog = .retroSystem
+        })
+    }
+
+    /// Tarjeta del núcleo (Dolphin, Azahar): cuál se usa y si tiene el JIT permanente.
+    private func retroCoreItem(id: String, system: RetroSystem) -> SettingItem {
+        let core: RetroCore? = RetroConfig.core(for: system, gameID: nil)
+        let pooled: Bool = core?.execMem == true
+        let ready: Bool = OSLibretroEngine.persistentJITReady
+        let subtitle: String
+        if let core {
+            subtitle = pooled ? core.name + " (OmniStation) · " + tr(ready ? "JIT permanente listo" : "JIT permanente") : core.name
+        } else {
+            subtitle = tr("No incluido en esta compilación")
+        }
+        let control: SettingControl = core == nil ? .badge(tr("FALTA"), Color.orange) : (pooled && ready ? .badge("JIT", Color.green) : .badge("OK", Color.green))
+        return SettingItem(id: id, title: tr("Núcleo"), subtitle: subtitle, symbol: "cpu", tint: SettingTint.aqua, control: control, action: {
+            showToast(pooled ? permanentJITText : tr("Núcleo de ManicEMU: el JIT se activa en cada partida."), seconds: 4)
+        })
     }
 
     private func retroSystemMenu(_ cancel: PadMenuItem) -> PadMenuContent {
@@ -3485,13 +3547,7 @@ struct HomeView: View {
         }))
         items.append(emulatorConfigItem(.melonx))
         items.append(toggleSetting("melonxCoreTouchAlways", tr("Mando táctil siempre"), tr("Si no, se oculta al conectar un mando"), "hand.tap.fill", SettingTint.blue, $melonxTouchAlways))
-        items.append(SettingItem(id: "melonxCoreFolder", title: tr("Carpeta MeloNX"), subtitle: tr("Abrir en Archivos"), symbol: "folder.fill", tint: SettingTint.blue, control: .symbol("arrow.up.forward"), action: {
-            MeloNXCoreFolders.ensure()
-            openExternal(MeloNXCoreFolders.filesAppURL, failure: tr("No se pudo abrir Archivos."))
-        }))
-        items.append(SettingItem(id: "melonxCoreHelp", title: tr("Requisitos"), subtitle: tr("Qué necesita MeloNX integrado"), symbol: "questionmark.circle.fill", tint: SettingTint.blue, control: .symbol("chevron.right"), action: {
-            dialog = .melonxCoreHelp
-        }))
+        // La carpeta está en «Juegos»; los requisitos, en «Núcleo».
         return SettingGroup(id: "melonxcore", title: tr("MeloNX integrado (Switch)"), isSubsection: true, items: items)
     }
 

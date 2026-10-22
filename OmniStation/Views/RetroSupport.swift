@@ -275,6 +275,7 @@ enum RetroFolders {
     /// Lo que necesita el núcleo en su carpeta de sistema y va dentro de la app
     /// (PSP: los archivos de PPSSPP, en BIOS/PPSSPP). Se copia la primera vez y al actualizar.
     static func prepareSystemFiles(_ system: RetroSystem) {
+        if system == .n3ds { prepare3DSKeys() }
         let folder: String
         switch system {
         case .psp: folder = "PPSSPP"
@@ -297,6 +298,40 @@ enum RetroFolders {
             try? manager.copyItem(at: from, to: to)
         }
         try? version.write(to: marker, atomically: true, encoding: .utf8)
+    }
+
+    /// Claves de 3DS (para las ROMs cifradas): las que el usuario pone en la carpeta BIOS de 3DS
+    /// (aes_keys.txt o keys.txt, y seeddb.bin) se copian a donde las busca Azahar
+    /// (Partidas/Azahar/sysdata). Solo si cambian.
+    static func prepare3DSKeys() {
+        let manager = FileManager.default
+        let source: URL = bios(.n3ds)
+        let target: URL = saves(.n3ds).appendingPathComponent("Azahar/sysdata", isDirectory: true)
+        for name in ["aes_keys.txt", "keys.txt", "seeddb.bin"] {
+            let candidates: [URL] = [source.appendingPathComponent(name),
+                                     source.appendingPathComponent("sysdata/" + name)]
+            guard let from = candidates.first(where: { manager.fileExists(atPath: $0.path) }) else { continue }
+            let to: URL = target.appendingPathComponent(name)
+            let fromSize = (try? manager.attributesOfItem(atPath: from.path)[.size] as? NSNumber)?.intValue
+            let toSize = (try? manager.attributesOfItem(atPath: to.path)[.size] as? NSNumber)?.intValue
+            let fromDate = (try? manager.attributesOfItem(atPath: from.path)[.modificationDate]) as? Date
+            let toDate = (try? manager.attributesOfItem(atPath: to.path)[.modificationDate]) as? Date
+            if fromSize == toSize, let fromDate, let toDate, toDate >= fromDate { continue }
+            try? manager.createDirectory(at: target, withIntermediateDirectories: true)
+            try? manager.removeItem(at: to)
+            try? manager.copyItem(at: from, to: to)
+        }
+    }
+
+    /// ¿Hay claves de 3DS para las ROMs cifradas? (En 3DS/BIOS o ya copiadas a donde las lee Azahar.)
+    static func has3DSKeys() -> Bool {
+        let manager = FileManager.default
+        let places: [URL] = [bios(.n3ds), bios(.n3ds).appendingPathComponent("sysdata", isDirectory: true),
+                             saves(.n3ds).appendingPathComponent("Azahar/sysdata", isDirectory: true)]
+        return places.contains { folder in
+            manager.fileExists(atPath: folder.appendingPathComponent("aes_keys.txt").path)
+                || manager.fileExists(atPath: folder.appendingPathComponent("keys.txt").path)
+        }
     }
 
     /// ¿Está la BIOS de Dreamcast? (Si no, Flycast usa la suya.)
@@ -350,9 +385,16 @@ enum RetroConfig {
     }
 
     /// Núcleo de un juego (el elegido para él, el general o el primero que haya).
+    /// Núcleo para la próxima partida de un juego (una vez): el Azahar de ManicEMU cuando el
+    /// nuestro no pudo abrir una ROM cifrada (sin claves).
+    static var onceCore: [String: String] = [:]
+
     static func core(for system: RetroSystem, gameID: String?) -> RetroCore? {
         let available: [RetroCore] = system.availableCores
         guard !available.isEmpty else { return nil }
+        if let gameID, let once = onceCore[gameID], let core = available.first(where: { $0.id == once }) {
+            return core
+        }
         // Solo la opción «core» (sin montar todas las opciones de todos los núcleos: iba lento).
         let target: EmuConfigTarget = .retro(system)
         let own: String? = gameID.flatMap { EmulatorConfig.game(target, $0)["core"] }
@@ -522,13 +564,18 @@ final class PermanentJIT {
         if DebugSupport.isInsideLiveContainer {
             // Solo con el depurador de StikDebug enganchado al abrir la app (y no el de otra partida).
             guard OSLibretroEngine.jitActive, RetroJIT.fresh else { completion(false); return }
-            let ready: Bool = OSLibretroEngine.preparePersistentJIT()
-            // Se suelta después (como en SideStore): con él puesto, los núcleos de ManicEMU no
-            // preparaban bien su propia memoria. Cada uno lo vuelve a pedir en su partida.
+            busy = true
+            // Fuera del hilo principal (el depurador tarda en preparar el bloque y la app no se para).
             DispatchQueue.global(qos: .userInitiated).async {
+                let ready: Bool = OSLibretroEngine.preparePersistentJIT()
+                // Se suelta después (como en SideStore): con él puesto, los núcleos de ManicEMU no
+                // preparaban bien su propia memoria. Cada uno lo vuelve a pedir en su partida.
                 OSLibretroEngine.detachJITDebugger()
+                DispatchQueue.main.async {
+                    self.busy = false
+                    completion(ready)
+                }
             }
-            completion(ready)
             return
         }
         let language: String = L10n.resolve(UserDefaults.standard.string(forKey: "appLanguage") ?? "system")
@@ -539,18 +586,24 @@ final class PermanentJIT {
         }
         busy = true
         OSMeloNXEngine.shared.prepareSharedJIT(withPairing: pairing, progress: nil) { success, _ in
-            self.busy = false
-            guard success else { completion(false); return }
-            let ready: Bool = OSLibretroEngine.preparePersistentJIT()
-            // Listo o no, el depurador se suelta y se cierra la extensión (no se queda nada enganchado).
+            guard success else {
+                self.busy = false
+                completion(false)
+                return
+            }
             DispatchQueue.global(qos: .userInitiated).async {
+                let ready: Bool = OSLibretroEngine.preparePersistentJIT()
+                // Listo o no, el depurador se suelta y se cierra la extensión (no se queda nada enganchado).
                 OSLibretroEngine.detachJITDebugger()
+                DispatchQueue.main.async {
+                    self.busy = false
+                    RetroJIT.holding = false
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) {
+                        OSMeloNXEngine.shared.releaseSharedJIT()
+                    }
+                    completion(ready)
+                }
             }
-            DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) {
-                OSMeloNXEngine.shared.releaseSharedJIT()
-            }
-            RetroJIT.holding = false
-            completion(ready)
         }
     }
 }
