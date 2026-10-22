@@ -83,6 +83,8 @@ private enum ImporterPurpose: Equatable {
     case melonxGames
     /// Carpeta (.app) de un emulador dentro de LiveContainer: solo se apunta su nombre.
     case lcAppFolder(Emulator)
+    /// seeddb.bin de 3DS (algunos juegos cifrados lo necesitan) para 3DS/BIOS.
+    case n3dsKeys
 }
 
 /// Para qué se abre el selector de fotos.
@@ -3313,10 +3315,10 @@ struct HomeView: View {
                     releaseRetroJIT()
                     // ROM cifrada sin sus claves: esta vez se abre con el Azahar de ManicEMU (la próxima
                     // se vuelve a probar el nuestro, por si ya están las claves).
-                    if core.id == "azahar_omni", message.localizedCaseInsensitiveContains("encrypted"),
+                    if core.id == "azahar_omni", message.localizedCaseInsensitiveContains("missing"),
                        let manic = system.availableCores.first(where: { $0.id == "azahar" }) {
                         RetroConfig.onceCore[gameID] = manic.id
-                        showToast(tr("ROM cifrada y sin claves: pon aes_keys.txt en la carpeta BIOS de 3DS. Esta vez se abre con %@.", manic.name), seconds: 6)
+                        showToast(tr("Este juego necesita seeddb.bin (Ajustes → Azahar → Claves y seeds). Esta vez se abre con %@.", manic.name), seconds: 6)
                         DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
                             launchRetro(game, item: item, system: system)
                         }
@@ -3418,15 +3420,11 @@ struct HomeView: View {
 
         if systems.contains(.n3ds) {
             var items: [SettingItem] = [retroCoreItem(id: "azaharCore", system: .n3ds), retroSystemItem(.n3ds, counts: counts)]
-            let keys: Bool = RetroFolders.has3DSKeys()
-            items.append(SettingItem(id: "azaharKeys", title: tr("Claves"), subtitle: keys ? tr("Las ROMs cifradas se abren") : tr("Para ROMs cifradas: aes_keys.txt en 3DS → BIOS"), symbol: "key.fill", tint: SettingTint.aqua, control: keys ? .badge("OK", Color.green) : .badge(tr("FALTA"), Color.orange), action: {
+            // Las claves ya vienen en Azahar; seeddb.bin solo lo piden algunos juegos.
+            let seeds: Bool = RetroFolders.has3DSSeeds()
+            items.append(SettingItem(id: "azaharKeys", title: tr("Claves y seeds"), subtitle: seeds ? tr("Claves incluidas · seeddb.bin") : tr("Claves incluidas · importa seeddb.bin si un juego lo pide"), symbol: "key.fill", tint: SettingTint.aqua, control: .badge("OK", Color.green), action: {
                 RetroFolders.ensure(.n3ds)
-                if keys {
-                    showToast(tr("Claves de 3DS listas (aes_keys.txt o keys.txt, y seeddb.bin si está)."), seconds: 3.5)
-                } else {
-                    showToast(tr("Pon tu aes_keys.txt (y seeddb.bin) en Archivos → OmniStation Dock → 3DS → BIOS."), seconds: 5)
-                    if let url = RetroFolders.filesAppURL(.n3ds) { UIApplication.shared.open(url) }
-                }
+                openCoreImporter(.n3dsKeys)
             }))
             groups.append(SettingGroup(id: "azahar", title: tr("Azahar integrado (3DS)"), isSubsection: true, items: items))
         }
@@ -3617,6 +3615,18 @@ struct HomeView: View {
         OSMeloNXEngine.shared.readFirmwareVersion { version in
             melonxFirmware = version
             emulatorRevision += 1
+        }
+    }
+
+    /// seeddb.bin elegido en Archivos: se copia a 3DS/BIOS (y de ahí a donde lo lee Azahar).
+    private func import3DSKeys(_ result: Result<[URL], Error>) {
+        guard case .success(let urls) = result, !urls.isEmpty else { return }
+        Task {
+            let copied: Bool = await Task.detached(priority: .userInitiated) { () -> Bool in
+                RetroFolders.import3DSSeeds(urls)
+            }.value
+            emulatorRevision += 1
+            showToast(copied ? tr("seeddb.bin importado") : tr("Elige el archivo seeddb.bin."), seconds: 3)
         }
     }
 
@@ -4142,14 +4152,14 @@ struct HomeView: View {
         switch importerPurpose {
         case .folder: return [.folder]
         case .cover: return [.image]
-        case .coreBIOS, .coreGames, .melonxKeys, .melonxGames: return [.data]
+        case .coreBIOS, .coreGames, .melonxKeys, .melonxGames, .n3dsKeys: return [.data]
         case .melonxFirmware: return [.zip, .data, .folder]
         case .lcAppFolder: return [.folder]
         }
     }
 
     private var importerMultiple: Bool {
-        importerPurpose == .coreBIOS || importerPurpose == .coreGames || importerPurpose == .melonxKeys || importerPurpose == .melonxGames
+        importerPurpose == .coreBIOS || importerPurpose == .coreGames || importerPurpose == .melonxKeys || importerPurpose == .melonxGames || importerPurpose == .n3dsKeys
     }
 
     private func openFolderImporter() {
@@ -4177,6 +4187,9 @@ struct HomeView: View {
             return
         case .melonxKeys:
             importMeloNXKeys(result)
+            return
+        case .n3dsKeys:
+            import3DSKeys(result)
             return
         case .melonxFirmware:
             installMeloNXFirmware(result)

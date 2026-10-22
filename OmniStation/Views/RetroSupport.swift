@@ -300,37 +300,57 @@ enum RetroFolders {
         try? version.write(to: marker, atomically: true, encoding: .utf8)
     }
 
-    /// Claves de 3DS (para las ROMs cifradas): las que el usuario pone en la carpeta BIOS de 3DS
-    /// (aes_keys.txt o keys.txt, y seeddb.bin) se copian a donde las busca Azahar
-    /// (Partidas/Azahar/sysdata). Solo si cambian.
+    /// 3DS: Azahar ya trae las claves para las ROMs cifradas. Solo hace falta seeddb.bin para algunos
+    /// juegos (los de eShop o recientes): el que se pone en 3DS/BIOS se copia a donde lo lee Azahar
+    /// (Partidas/Azahar/sysdata). Un aes_keys.txt o keys.txt que se copiara antes se aparta: con
+    /// claves malas se cerraban los dos núcleos (también el de ManicEMU, que lee la misma carpeta).
     static func prepare3DSKeys() {
         let manager = FileManager.default
-        let source: URL = bios(.n3ds)
         let target: URL = saves(.n3ds).appendingPathComponent("Azahar/sysdata", isDirectory: true)
-        for name in ["aes_keys.txt", "keys.txt", "seeddb.bin"] {
-            let candidates: [URL] = [source.appendingPathComponent(name),
-                                     source.appendingPathComponent("sysdata/" + name)]
-            guard let from = candidates.first(where: { manager.fileExists(atPath: $0.path) }) else { continue }
-            let to: URL = target.appendingPathComponent(name)
-            let fromSize = (try? manager.attributesOfItem(atPath: from.path)[.size] as? NSNumber)?.intValue
-            let toSize = (try? manager.attributesOfItem(atPath: to.path)[.size] as? NSNumber)?.intValue
-            let fromDate = (try? manager.attributesOfItem(atPath: from.path)[.modificationDate]) as? Date
-            let toDate = (try? manager.attributesOfItem(atPath: to.path)[.modificationDate]) as? Date
-            if fromSize == toSize, let fromDate, let toDate, toDate >= fromDate { continue }
-            try? manager.createDirectory(at: target, withIntermediateDirectories: true)
-            try? manager.removeItem(at: to)
-            try? manager.copyItem(at: from, to: to)
+        for name in ["aes_keys.txt", "keys.txt"] {
+            let file: URL = target.appendingPathComponent(name)
+            guard manager.fileExists(atPath: file.path) else { continue }
+            let aside: URL = target.appendingPathComponent(name + ".desactivado")
+            try? manager.removeItem(at: aside)
+            try? manager.moveItem(at: file, to: aside)
         }
+        let source: URL = bios(.n3ds)
+        let candidates: [URL] = [source.appendingPathComponent("seeddb.bin"),
+                                 source.appendingPathComponent("sysdata/seeddb.bin")]
+        guard let from = candidates.first(where: { manager.fileExists(atPath: $0.path) }) else { return }
+        let to: URL = target.appendingPathComponent("seeddb.bin")
+        let fromSize = (try? manager.attributesOfItem(atPath: from.path)[.size] as? NSNumber)?.intValue
+        let toSize = (try? manager.attributesOfItem(atPath: to.path)[.size] as? NSNumber)?.intValue
+        let fromDate = (try? manager.attributesOfItem(atPath: from.path)[.modificationDate]) as? Date
+        let toDate = (try? manager.attributesOfItem(atPath: to.path)[.modificationDate]) as? Date
+        if fromSize == toSize, let fromDate, let toDate, toDate >= fromDate { return }
+        try? manager.createDirectory(at: target, withIntermediateDirectories: true)
+        try? manager.removeItem(at: to)
+        try? manager.copyItem(at: from, to: to)
     }
 
-    /// ¿Hay claves de 3DS para las ROMs cifradas? (En 3DS/BIOS o ya copiadas a donde las lee Azahar.)
-    static func has3DSKeys() -> Bool {
+    /// Copia el seeddb.bin elegido a 3DS/BIOS. Devuelve si lo copió.
+    static func import3DSSeeds(_ urls: [URL]) -> Bool {
         let manager = FileManager.default
-        let places: [URL] = [bios(.n3ds), bios(.n3ds).appendingPathComponent("sysdata", isDirectory: true),
-                             saves(.n3ds).appendingPathComponent("Azahar/sysdata", isDirectory: true)]
-        return places.contains { folder in
-            manager.fileExists(atPath: folder.appendingPathComponent("aes_keys.txt").path)
-                || manager.fileExists(atPath: folder.appendingPathComponent("keys.txt").path)
+        guard let url = urls.first(where: { $0.pathExtension.lowercased() == "bin" }) else { return false }
+        let folder: URL = bios(.n3ds)
+        try? manager.createDirectory(at: folder, withIntermediateDirectories: true)
+        let accessing: Bool = url.startAccessingSecurityScopedResource()
+        defer { if accessing { url.stopAccessingSecurityScopedResource() } }
+        let to: URL = folder.appendingPathComponent("seeddb.bin")
+        try? manager.removeItem(at: to)
+        guard (try? manager.copyItem(at: url, to: to)) != nil else { return false }
+        prepare3DSKeys()
+        return true
+    }
+
+    /// ¿Está seeddb.bin? (En 3DS/BIOS o ya copiado a donde lo lee Azahar.)
+    static func has3DSSeeds() -> Bool {
+        let manager = FileManager.default
+        return [bios(.n3ds).appendingPathComponent("seeddb.bin"),
+                bios(.n3ds).appendingPathComponent("sysdata/seeddb.bin"),
+                saves(.n3ds).appendingPathComponent("Azahar/sysdata/seeddb.bin")].contains {
+            manager.fileExists(atPath: $0.path)
         }
     }
 
