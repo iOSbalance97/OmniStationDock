@@ -25,6 +25,32 @@ index 2443f80..7d1e615 100644
  	else
  		PLATCFLAGS += -DOS_MAC_OS_X
  		PLATCFLAGS += -DHAVE_POSIX_MEMALIGN -DNO_ASM
+diff --git a/custom/dependencies/libpng/pngpriv.h b/custom/dependencies/libpng/pngpriv.h
+index 7216050..def50a5 100644
+--- a/custom/dependencies/libpng/pngpriv.h
++++ b/custom/dependencies/libpng/pngpriv.h
+@@ -509,7 +509,7 @@
+ #  include <float.h>
+ 
+ #  if (defined(__MWERKS__) && defined(macintosh)) || defined(applec) || \
+-    defined(THINK_C) || defined(__SC__) || defined(TARGET_OS_MAC)
++    defined(THINK_C) || defined(__SC__) || (defined(TARGET_OS_MAC) && !defined(__APPLE__))
+    /* We need to check that <math.h> hasn't already been included earlier
+     * as it seems it doesn't agree with <fp.h>, yet we should really use
+     * <fp.h> if possible.
+diff --git a/custom/dependencies/libzlib/zutil.h b/custom/dependencies/libzlib/zutil.h
+index 24ab06b..bb8b265 100644
+--- a/custom/dependencies/libzlib/zutil.h
++++ b/custom/dependencies/libzlib/zutil.h
+@@ -118,7 +118,7 @@ extern z_const char * const z_errmsg[10]; /* indexed by 2-zlib_error */
+ #  endif
+ #endif
+ 
+-#if defined(MACOS) || defined(TARGET_OS_MAC)
++#if defined(MACOS) || (defined(TARGET_OS_MAC) && !defined(__APPLE__))
+ #  define OS_CODE  0x07
+ #  ifndef Z_SOLO
+ #    if defined(__MWERKS__) && __dest_os != __be_os && __dest_os != __win32_os
 diff --git a/libretro/libretro.c b/libretro/libretro.c
 index 4a9f129..bbea645 100644
 --- a/libretro/libretro.c
