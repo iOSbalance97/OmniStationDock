@@ -1,14 +1,29 @@
 diff --git a/src/citra_libretro/citra_libretro.cpp b/src/citra_libretro/citra_libretro.cpp
-index c9123085b..83d4cf6e4 100644
+index c9123085b..d1458a76a 100644
 --- a/src/citra_libretro/citra_libretro.cpp
 +++ b/src/citra_libretro/citra_libretro.cpp
-@@ -534,7 +534,8 @@ bool retro_load_game(const struct retro_game_info* info) {
+@@ -47,6 +47,7 @@
+ #include "core/hle/kernel/kernel.h"
+ #include "core/hle/kernel/memory.h"
+ #include "core/hle/kernel/process.h"
++#include "core/file_sys/ncch_container.h"
+ #include "core/loader/loader.h"
+ #include "core/memory.h"
+ 
+@@ -533,8 +534,14 @@ bool retro_load_game(const struct retro_game_info* info) {
+         if (result != Loader::ResultStatus::Success) {
              switch (result) {
              case Loader::ResultStatus::ErrorEncrypted:
-                 LibRetro::DisplayMessage(
+-                LibRetro::DisplayMessage(
 -                    "This ROM is encrypted and must be decrypted before use with Azahar.");
-+                    "This ROM is encrypted and its keys are missing: put aes_keys.txt (and "
-+                    "seeddb.bin) in Azahar's sysdata folder, or decrypt the ROM.");
++                if (FileSys::NCCHKeysRejected()) {
++                    LibRetro::DisplayMessage(
++                        "This ROM is encrypted and the keys do not decrypt it (bad dump?).");
++                } else {
++                    LibRetro::DisplayMessage(
++                        "This ROM is encrypted and its keys or seed are missing: put seeddb.bin "
++                        "in Azahar's sysdata folder, or decrypt the ROM.");
++                }
                  break;
              case Loader::ResultStatus::ErrorInvalidFormat:
                  LibRetro::DisplayMessage("The ROM format is not supported.");
@@ -174,21 +189,28 @@ index ee21f22be..1357a5f2e 100644
  
          std::string ret;
 diff --git a/src/core/file_sys/ncch_container.cpp b/src/core/file_sys/ncch_container.cpp
-index bf4abb023..25358560c 100644
+index bf4abb023..cb5784bf9 100644
 --- a/src/core/file_sys/ncch_container.cpp
 +++ b/src/core/file_sys/ncch_container.cpp
-@@ -2,6 +2,7 @@
+@@ -2,6 +2,8 @@
  // Licensed under GPLv3 or any later version
  // Refer to the LICENSE.txt file included.
  
 +#include <algorithm>
++#include <atomic>
  #include <cstring>
  #include <memory>
  #include <span>
-@@ -219,6 +220,205 @@ Loader::ResultStatus NCCHContainer::OpenFile(const std::string& filepath_, u32 n
+@@ -219,6 +221,231 @@ Loader::ResultStatus NCCHContainer::OpenFile(const std::string& filepath_, u32 n
      return Loader::ResultStatus::Success;
  }
  
++static std::atomic<bool> ncch_keys_rejected{false};
++
++bool NCCHKeysRejected() {
++    return ncch_keys_rejected.load();
++}
++
 +/**
 + * OmniStation: encrypted NCCH support, as Citra had it (keys from the user's aes_keys.txt or
 + * keys.txt, seeds from seeddb.bin). Replaces `file` by a view that decrypts on the fly.
@@ -326,8 +348,9 @@ index bf4abb023..25358560c 100644
 +        failed_to_decrypt = true;
 +    }
 +
++    ncch_keys_rejected = false;
 +    if (failed_to_decrypt) {
-+        LOG_ERROR(Service_FS, "Failed to decrypt (missing keys in aes_keys.txt / keys.txt?)");
++        LOG_ERROR(Service_FS, "Failed to decrypt (missing keys or seed)");
 +        return Loader::ResultStatus::ErrorEncrypted;
 +    }
 +
@@ -383,15 +406,34 @@ index bf4abb023..25358560c 100644
 +                           to_vector(romfs_ctr)});
 +    }
 +
-+    LOG_INFO(Service_FS, "Encrypted NCCH: decrypting on the fly ({} regions)", regions.size());
-+    file = std::make_unique<FileUtil::NCCHDecryptIOFile>(std::move(file), std::move(regions));
++    auto decrypted =
++        std::make_unique<FileUtil::NCCHDecryptIOFile>(std::move(file), std::move(regions));
++
++    // With the right keys the decrypted exheader names the program itself. If not, the keys are
++    // wrong: stop here (running garbage code used to crash the app).
++    if (ncch_header.extended_header_size) {
++        ExHeader_Header exheader;
++        if (decrypted->ReadAtBytes(&exheader, sizeof(exheader), sizeof(NCCH_Header)) !=
++                sizeof(exheader) ||
++            (exheader.system_info.jump_id & 0xFFFFFFFF) != (ncch_header.program_id & 0xFFFFFFFF)) {
++            LOG_ERROR(Service_FS, "Encrypted NCCH {:016X}: the keys do not decrypt it",
++                      ncch_header.program_id);
++            ncch_keys_rejected = true;
++            file = std::move(decrypted);
++            return Loader::ResultStatus::ErrorEncrypted;
++        }
++    }
++
++    LOG_INFO(Service_FS, "Encrypted NCCH {:016X}: decrypting on the fly",
++             ncch_header.program_id);
++    file = std::move(decrypted);
 +    return Loader::ResultStatus::Success;
 +}
 +
  Loader::ResultStatus NCCHContainer::LoadHeader() {
      if (has_header) {
          return Loader::ResultStatus::Success;
-@@ -259,8 +459,11 @@ Loader::ResultStatus NCCHContainer::LoadHeader() {
+@@ -259,8 +486,11 @@ Loader::ResultStatus NCCHContainer::LoadHeader() {
      LOG_DEBUG(Service_FS, "NCCH type: {}", file->GetType().to_string());
  
      if (!ncch_header.no_crypto) {
@@ -405,7 +447,7 @@ index bf4abb023..25358560c 100644
      }
  
      has_header = true;
-@@ -289,11 +492,6 @@ Loader::ResultStatus NCCHContainer::Load() {
+@@ -289,11 +519,6 @@ Loader::ResultStatus NCCHContainer::Load() {
              block_size = 1;
          }
  
@@ -417,8 +459,22 @@ index bf4abb023..25358560c 100644
          // System archives and DLC don't have an extended header but have RomFS
          // Proto apps don't have an ext header size
          if (ncch_header.extended_header_size || is_proto) {
+diff --git a/src/core/file_sys/ncch_container.h b/src/core/file_sys/ncch_container.h
+index 1ae7aadc9..407872628 100644
+--- a/src/core/file_sys/ncch_container.h
++++ b/src/core/file_sys/ncch_container.h
+@@ -231,6 +231,9 @@ static_assert(sizeof(ExHeader_Header) == 0x800, "ExHeader structure size is wron
+ 
+ namespace FileSys {
+ 
++/// OmniStation: the last encrypted NCCH could not be decrypted with the keys there are.
++bool NCCHKeysRejected();
++
+ /**
+  * Helper which implements an interface to deal with NCCH containers which can
+  * contain ExeFS archives or RomFS archives for games or other applications.
 diff --git a/src/core/hw/aes/key.cpp b/src/core/hw/aes/key.cpp
-index 64748e41c..f45f41824 100644
+index 64748e41c..2bd1ffc91 100644
 --- a/src/core/hw/aes/key.cpp
 +++ b/src/core/hw/aes/key.cpp
 @@ -290,27 +290,48 @@ void LoadPresetKeys() {
@@ -434,26 +490,11 @@ index 64748e41c..f45f41824 100644
 -    if (file.is_open()) {
 -        return std::istringstream(std::string(std::istreambuf_iterator<char>(file), {}));
 -    } else {
-+    // OmniStation: the built-in keys first, then the user's own files, so the user's keys add to
-+    // (and replace) the built-in ones instead of hiding them. Besides keys.txt, Citra's old
-+    // aes_keys.txt (AES keys only, without section headers) is read too.
++    // OmniStation: the user's own files first and the built-in keys last, so a user file adds
++    // the keys that are missing but never replaces the built-in ones (a wrong aes_keys.txt used
++    // to break every game). Besides keys.txt, Citra's old aes_keys.txt (AES keys only, without
++    // section headers) is read too.
 +    std::string all;
- #ifdef ENABLE_BUILTIN_KEYBLOB
-+    {
-         // The key data is encrypted in the source to prevent easy access to it for unintended
-         // purposes.
-         std::vector<u8> kiv(16);
-         std::string s(default_keys_enc_size, ' ');
-         CryptoPP::CBC_Mode<CryptoPP::AES>::Decryption(kiv.data(), kiv.size(), kiv.data())
-             .ProcessData(reinterpret_cast<u8*>(s.data()), default_keys_enc, s.size());
--        return std::istringstream(s);
--#else
--        return std::istringstream("");
-+        all += s;
-+        all += "\n";
-+    }
- #endif // ENABLE_BUILTIN_KEYBLOB
-+
 +    const std::string sysdata = FileUtil::GetUserPath(FileUtil::UserPath::SysDataDir);
 +    FileUtil::CreateFullPath(sysdata + KEYS_FILE); // Create path if not already created
 +    const auto read_file = [](const std::string& path, std::string& out) {
@@ -466,16 +507,32 @@ index 64748e41c..f45f41824 100644
 +        return true;
 +    };
 +    std::string contents;
-+    if (read_file(sysdata + KEYS_FILE, contents)) {
-+        all += contents;
-+        all += "\n";
-+    }
 +    if (read_file(sysdata + "aes_keys.txt", contents)) {
 +        LOG_INFO(HW_AES, "Loading aes_keys.txt");
 +        all += ":AES\n";
 +        all += contents;
 +        all += "\n";
++    }
++    if (read_file(sysdata + KEYS_FILE, contents)) {
++        all += contents;
++        all += "\n";
++    }
+ #ifdef ENABLE_BUILTIN_KEYBLOB
++    {
+         // The key data is encrypted in the source to prevent easy access to it for unintended
+         // purposes.
+         std::vector<u8> kiv(16);
+         std::string s(default_keys_enc_size, ' ');
+         CryptoPP::CBC_Mode<CryptoPP::AES>::Decryption(kiv.data(), kiv.size(), kiv.data())
+             .ProcessData(reinterpret_cast<u8*>(s.data()), default_keys_enc, s.size());
+-        return std::istringstream(s);
+-#else
+-        return std::istringstream("");
+-#endif // ENABLE_BUILTIN_KEYBLOB
++        all += s;
++        all += "\n";
      }
++#endif // ENABLE_BUILTIN_KEYBLOB
 +    // Files saved on Windows end their lines with \r\n.
 +    all.erase(std::remove(all.begin(), all.end(), '\r'), all.end());
 +    return std::istringstream(all);
