@@ -674,14 +674,44 @@ static void OSLRCaptureVariables(const struct retro_variable *variables) {
 
 // MARK: Llamadas del núcleo
 
+// Lo que cuenta el núcleo en la partida (desde «info»): «Registro núcleo.txt», junto al otro.
+// Se escribe línea a línea y al momento, para que quede lo último si el núcleo se cierra de golpe.
+static FILE *gCoreLogFile;
+static size_t gCoreLogBytes;
+static os_unfair_lock gCoreLogLock = OS_UNFAIR_LOCK_INIT;
+static const size_t kOSLRCoreLogLimit = (size_t)4 * 1024 * 1024;
+
+static void OSLRCoreLogReset(void) {
+    NSString *documents = NSSearchPathForDirectoriesInDomains(NSDocumentDirectory, NSUserDomainMask, YES).firstObject ?: NSTemporaryDirectory();
+    NSString *path = [documents stringByAppendingPathComponent:@"Registro núcleo.txt"];
+    os_unfair_lock_lock(&gCoreLogLock);
+    if (gCoreLogFile) fclose(gCoreLogFile);
+    gCoreLogFile = fopen(path.fileSystemRepresentation, "w");
+    gCoreLogBytes = 0;
+    os_unfair_lock_unlock(&gCoreLogLock);
+}
+
 static void OSLRLog(enum retro_log_level level, const char *format, ...) {
-    if (level < RETRO_LOG_WARN || format == NULL) return;
+    if (format == NULL || level < RETRO_LOG_INFO) return;
+    char line[2048];
     va_list args;
     va_start(args, format);
-    fprintf(stdout, "[libretro] ");
-    vfprintf(stdout, format, args);
+    int length = vsnprintf(line, sizeof(line), format, args);
     va_end(args);
-    fflush(stdout);
+    if (length <= 0) return;
+    if (level >= RETRO_LOG_WARN) {
+        fprintf(stdout, "[libretro] %s", line);
+        fflush(stdout);
+    }
+    os_unfair_lock_lock(&gCoreLogLock);
+    if (gCoreLogFile && gCoreLogBytes < kOSLRCoreLogLimit) {
+        size_t size = strnlen(line, sizeof(line));
+        fwrite(line, 1, size, gCoreLogFile);
+        if (size == 0 || line[size - 1] != '\n') fputc('\n', gCoreLogFile);
+        fflush(gCoreLogFile);
+        gCoreLogBytes += size + 1;
+    }
+    os_unfair_lock_unlock(&gCoreLogLock);
 }
 
 // Último aviso del núcleo en esta partida (si no abre el juego, suele decir por qué).
@@ -3965,6 +3995,7 @@ typedef NS_ENUM(NSInteger, OSLRMenuAction) {
     gJITUnanswered = 0;
     atomic_store(&gLoopDone, false);
     @synchronized ([OSLibretroEngine class]) { gLastCoreMessage = nil; }
+    OSLRCoreLogReset();
     OSLRTrace([NSString stringWithFormat:@"abrir: %@ con %@ (JIT %@, depurador %@)", gamePath.lastPathComponent, framework,
                [hostOptions[@"jit"] isEqualToString:@"true"] ? @"pedido" : @"no", OSLRIsTraced() ? @"enganchado" : @"no"], YES);
     gSessionStartFree = os_proc_available_memory();
