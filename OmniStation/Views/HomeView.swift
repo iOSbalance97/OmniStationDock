@@ -248,6 +248,11 @@ struct HomeView: View {
     @State private var shortcutMode = 0
     /// Parte de Ajustes que se ve.
     @State private var settingsCategory: SettingsCategory = .general
+    /// Pantalla de mandos (panel desde la izquierda; en vertical también con un gesto).
+    @State private var controllersDrawerOpen = false
+    @State private var drawerDrag: CGFloat = 0
+    @AppStorage("volumeBack") private var volumeBack = 0.7
+    @AppStorage("volumeToggle") private var volumeToggle = 0.7
 
     init() {
         let library = LibraryStore.load()
@@ -346,7 +351,13 @@ struct HomeView: View {
             Self.haptic.impactOccurred()
         }
         guard clickSound else { return }
-        let volume: Double = kind == .navigate ? volumeNavigate : volumeSelect
+        let volume: Double
+        switch kind {
+        case .navigate: volume = volumeNavigate
+        case .back: volume = volumeBack
+        case .toggle: volume = volumeToggle
+        default: volume = volumeSelect
+        }
         SoundManager.shared.play(kind, volume: volume)
     }
 
@@ -473,10 +484,12 @@ struct HomeView: View {
 
     @ViewBuilder
     private func topChrome(landscape: Bool, dock: Bool) -> some View {
-        if dock {
+        if dock || landscape {
+            // En horizontal sin Dock, la misma barra que en el Dock (nombre, pestañas, reloj,
+            // batería y JIT).
             dockTopBar()
         } else {
-            topBar(compact: landscape)
+            portraitHeader()
         }
     }
 
@@ -502,6 +515,9 @@ struct HomeView: View {
         view
             .overlay { optionsDismissLayer(dock) }
             .overlay(alignment: .bottom) { dockBottomOverlay(dock) }
+            .overlay(alignment: .bottom) { portraitTabBarOverlay }
+            .overlay(alignment: .leading) { controllersEdgeGesture }
+            .overlay { controllersDrawerOverlay }
             .overlay { jitTransitionOverlay }
             .overlay(alignment: .bottom) { toastOverlay }
             .onPreferenceChange(FramesKey.self) { value in handleFrames(value) }
@@ -1026,6 +1042,11 @@ struct HomeView: View {
         controllers.onAccept = { handleAccept() }
         controllers.onOptions = { handleOptions() }
         controllers.onSquare = { handleSquare() }
+        // SELECT / Compartir / ⊖: pantalla de mandos.
+        controllers.onSelect = {
+            guard !modalActive || controllersDrawerOpen else { return }
+            if controllersDrawerOpen { closeControllersDrawer() } else { openControllersDrawer() }
+        }
         if keepLandscape {
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) {
                 OrientationController.apply(landscape: true)
@@ -1099,6 +1120,7 @@ struct HomeView: View {
     }
 
     private func handleDirection(_ direction: ControllerMonitor.Direction) {
+        if controllersDrawerOpen { return }
         if modalActive {
             routeModalDirection(direction)
         } else {
@@ -1107,6 +1129,10 @@ struct HomeView: View {
     }
 
     private func handleAccept() {
+        if controllersDrawerOpen {
+            closeControllersDrawer()
+            return
+        }
         if modalActive {
             routeModalAccept()
         } else {
@@ -1318,7 +1344,7 @@ struct HomeView: View {
             .padding(.vertical, 12)
             .liquidGlass(in: RoundedRectangle(cornerRadius: 22, style: .continuous))
             .padding(.horizontal, 20)
-            .padding(.bottom, dockActive ? 66 : 26)
+            .padding(.bottom, dockActive ? 66 : (isLandscapeNow ? 26 : Self.tabBarReserve + 8))
             .transition(.move(edge: .bottom).combined(with: .opacity))
         }
     }
@@ -2311,6 +2337,11 @@ struct HomeView: View {
     /// ○ / B: cancela lo que se esté haciendo, de lo más reciente a lo más antiguo.
     /// Solo vuelve a Inicio cuando ya no queda nada que cancelar.
     private func handleControllerCancel() {
+        // 0) Pantalla de mandos abierta.
+        if controllersDrawerOpen {
+            closeControllersDrawer()
+            return
+        }
         // 1) Ventanas abiertas (la de más arriba primero).
         if showPhotoPicker { showPhotoPicker = false; return }
         if showFolderImporter { showFolderImporter = false; return }
@@ -2339,31 +2370,31 @@ struct HomeView: View {
         if dockActive, ["dockOptions", "dockChips", "dockNav"].contains(controllerSelectedArea) {
             controllerSelectedArea = "games"
             withAnimation(.spring(response: 0.3, dampingFraction: 0.85)) { optionsExpanded = false }
-            feedback()
+            feedback(.back)
             return
         }
         // 3) Teclado del mando: sale del teclado y deja marcada la barra de búsqueda.
         if selectedSection == .busqueda, controllerSelectedArea == "alphabet" {
             controllerSelectedArea = "search"
-            feedback()
+            feedback(.back)
             return
         }
         // 4) Búsqueda escrita.
         if selectedSection == .busqueda, !searchText.isEmpty {
             searchText = ""
             controllerAlphabetSearchText = ""
-            feedback()
+            feedback(.back)
             return
         }
         // 5) Filtro de plataforma.
         if (selectedSection == .inicio || selectedSection == .busqueda), selectedPlatform != "Todos" {
             withAnimation(.easeInOut(duration: 0.18)) { selectedPlatform = "Todos" }
-            feedback()
+            feedback(.back)
             return
         }
         // 6) Nada más que cancelar: vuelve a Inicio.
         if selectedSection != .inicio {
-            feedback()
+            feedback(.back)
             withAnimation(.easeInOut(duration: 0.2)) { selectedSection = .inicio }
         }
     }
@@ -4295,10 +4326,40 @@ struct HomeView: View {
     /// Botones de las pestañas principales (los mismos en vertical y en el Modo Dock).
     private func tabButtons(compact: Bool) -> some View {
         HStack(spacing: 6) {
+            // Mandos conectados (abre su pantalla).
+            controllersTabButton(compact: compact)
             ForEach(DockSection.allCases, id: \.self) { section in
                 tabButton(section, compact: compact)
             }
         }
+    }
+
+    private func controllersTabButton(compact: Bool) -> some View {
+        let side: CGFloat = compact ? 36 : 40
+        let shape = RoundedRectangle(cornerRadius: 13, style: .continuous)
+        let count: Int = controllers.controllers.count
+        return Button {
+            openControllersDrawer()
+        } label: {
+            Image(systemName: count > 0 ? "gamecontroller.fill" : "hand.tap.fill")
+                .font(.system(size: compact ? 15 : 17, weight: .semibold))
+                .foregroundStyle(controllersDrawerOpen ? Color.cyan : Color.white.opacity(0.76))
+                .frame(width: side, height: side)
+                .contentShape(shape)
+                .liquidGlass(in: shape, tint: nil, interactive: true)
+                .overlay(alignment: .topTrailing) {
+                    if count > 0 {
+                        Text("\(count)")
+                            .font(AppFont.text(9, .bold))
+                            .foregroundStyle(.black)
+                            .frame(minWidth: 15, minHeight: 15)
+                            .background(Circle().fill(Color.green))
+                            .offset(x: 4, y: -4)
+                    }
+                }
+        }
+        .buttonStyle(ControllerFocusableButtonStyle())
+        .accessibilityLabel(tr("Mandos"))
     }
 
     private func tabButton(_ section: DockSection, compact: Bool) -> some View {
@@ -4340,14 +4401,16 @@ struct HomeView: View {
         ScrollViewReader { proxy in
             followSelection(scrollBody(topGap: topGap, content), proxy: proxy)
                 .reportFrame("scroll")
-                .edgeFade(clear: metrics.fadeClear, fade: metrics.headerHeight, bottom: Self.bottomFadeHeight)
+                .edgeFade(clear: metrics.fadeClear, fade: metrics.headerHeight,
+                          bottom: isLandscapeNow ? Self.bottomFadeHeight : 76,
+                          bottomClear: isLandscapeNow ? 0 : Self.tabBarReserve - 14)
         }
     }
 
     private func scrollBody<Content: View>(topGap: CGFloat, _ content: @escaping () -> Content) -> some View {
         let owner: String = selectedSection.rawValue
         let topPadding: CGFloat = metrics.headerHeight + topGap
-        let bottomPadding: CGFloat = dockActive ? 92 : 44
+        let bottomPadding: CGFloat = dockActive ? 92 : (isLandscapeNow ? 44 : Self.tabBarReserve + 24)
         return ScrollView(showsIndicators: false) {
             VStack(spacing: 0) {
                 // Punto de anclaje en el borde superior: para volver exactamente arriba.
@@ -5445,7 +5508,11 @@ struct HomeView: View {
     }
 
     private func runSetting(_ item: SettingItem) {
-        feedback()
+        if case .toggle = item.control {
+            feedback(.toggle)
+        } else {
+            feedback()
+        }
         item.action()
     }
 
@@ -5948,6 +6015,7 @@ struct BrandTitle: View {
 private struct HeaderTitle: View {
     @ObservedObject var progress: ScrollProgress
     var size: CGFloat
+    var anchor: UnitPoint = .leading
 
     /// Puntos de scroll en los que el título termina de desvanecerse.
     private static let collapseDistance: CGFloat = 36
@@ -5957,7 +6025,7 @@ private struct HeaderTitle: View {
         return BrandTitle(size: size)
             .opacity(1 - hidden)
             .offset(y: -10 * hidden)
-            .scaleEffect(1 - 0.06 * hidden, anchor: .leading)
+            .scaleEffect(1 - 0.06 * hidden, anchor: anchor)
     }
 }
 
@@ -6122,5 +6190,418 @@ private struct SettingCardLabel: View, Equatable {
             .padding(.horizontal, 8)
             .padding(.vertical, 4)
             .background(tint.opacity(0.14), in: Capsule())
+    }
+}
+
+
+// MARK: - Cabecera centrada, barra inferior (vertical) y pantalla de mandos
+
+extension HomeView {
+    /// Lo que ocupa abajo la barra de botones en vertical (el contenido se desvanece antes).
+    static let tabBarReserve: CGFloat = 96
+
+    /// Vertical: el nombre en el centro con un haz de neón a cada lado y el punto del JIT debajo.
+    fileprivate func portraitHeader() -> some View {
+        VStack(spacing: 0) {
+            HStack(spacing: 10) {
+                HeaderBeam(progress: scrollProgress, leading: true, paused: activity.running)
+                HeaderTitle(progress: scrollProgress, size: 22, anchor: .center)
+                    .fixedSize()
+                HeaderBeam(progress: scrollProgress, leading: false, paused: activity.running)
+            }
+            .frame(height: 34)
+            .padding(.horizontal, 6)
+            JITIndicatorDot(active: jitIndicatorOn)
+                .onTapGesture { explainJITIndicator() }
+        }
+        .padding(.top, 6)
+        .reportFrame("header")
+    }
+
+    // MARK: Barra inferior
+
+    @ViewBuilder
+    fileprivate var portraitTabBarOverlay: some View {
+        if !isLandscapeNow && detailGame == nil && padMenu == nil && !activity.running {
+            portraitTabBar
+                .transition(.move(edge: .bottom).combined(with: .opacity))
+        }
+    }
+
+    private var portraitTabBar: some View {
+        let shape = RoundedRectangle(cornerRadius: 28, style: .continuous)
+        let neonColors: [Color] = [Color.cyan.opacity(0.95), Color(red: 0.12, green: 0.45, blue: 1.0).opacity(0.95), Color.cyan.opacity(0.95)]
+        let neon: LinearGradient = LinearGradient(colors: neonColors, startPoint: .leading, endPoint: .trailing)
+        return HStack(spacing: 0) {
+            bottomControllersButton
+            bottomSectionButton(.busqueda)
+            bottomSectionButton(.inicio)
+            bottomSectionButton(.favoritos)
+            bottomSectionButton(.ajustes)
+        }
+        .padding(.horizontal, 8)
+        .frame(height: 66)
+        .background {
+            ZStack {
+                // Barra sólida (no deja ver lo de detrás) con un brillo arriba.
+                shape.fill(LinearGradient(colors: [Color(red: 0.05, green: 0.08, blue: 0.17), Color(red: 0.01, green: 0.02, blue: 0.07)],
+                                          startPoint: .top, endPoint: .bottom))
+                shape.fill(LinearGradient(colors: [Color.cyan.opacity(0.10), Color.clear], startPoint: .top, endPoint: .center))
+                // Neón azul alrededor.
+                shape.stroke(neon, lineWidth: 2.2).blur(radius: 7).opacity(0.75)
+                shape.strokeBorder(neon, lineWidth: 1.3)
+            }
+            .shadow(color: Color(red: 0.1, green: 0.5, blue: 1.0).opacity(0.45), radius: 14, y: 2)
+        }
+        .padding(.horizontal, 14)
+        .padding(.bottom, 4)
+    }
+
+    private func bottomLabel(_ text: String, selected: Bool) -> some View {
+        Text(text)
+            .font(AppFont.text(9, .semibold))
+            .lineLimit(1)
+            .minimumScaleFactor(0.7)
+            .foregroundStyle(selected ? Color.cyan : Color.white.opacity(0.55))
+    }
+
+    private var bottomControllersButton: some View {
+        let count: Int = controllers.controllers.count
+        let selected: Bool = controllersDrawerOpen
+        return Button {
+            openControllersDrawer()
+        } label: {
+            VStack(spacing: 3) {
+                Image(systemName: count > 0 ? "gamecontroller.fill" : "hand.tap.fill")
+                    .font(.system(size: 18, weight: .semibold))
+                    .foregroundStyle(selected ? Color.cyan : Color.white.opacity(0.78))
+                    .frame(width: 44, height: 30)
+                    .overlay(alignment: .topTrailing) {
+                        if count > 0 {
+                            Text("\(count)")
+                                .font(AppFont.text(9, .bold))
+                                .foregroundStyle(.black)
+                                .frame(minWidth: 15, minHeight: 15)
+                                .background(Circle().fill(Color.green))
+                                .shadow(color: Color.green.opacity(0.7), radius: 4)
+                                .offset(x: 2, y: -3)
+                        }
+                    }
+                bottomLabel(count > 0 ? tr("Mandos") : tr("Táctil"), selected: selected)
+            }
+            .frame(maxWidth: .infinity)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(ControllerFocusableButtonStyle())
+        .accessibilityLabel(tr("Mandos"))
+    }
+
+    private func homeColors(_ selected: Bool) -> [Color] {
+        if selected { return [Color.cyan, Color(red: 0.1, green: 0.42, blue: 1.0)] }
+        return [Color(red: 0.08, green: 0.14, blue: 0.28), Color(red: 0.03, green: 0.05, blue: 0.12)]
+    }
+
+    private func bottomSectionButton(_ section: DockSection) -> some View {
+        let selected: Bool = selectedSection == section && !controllersDrawerOpen
+        let home: Bool = section == .inicio
+        return Button {
+            feedback()
+            if controllersDrawerOpen { closeControllersDrawer(sound: false) }
+            withAnimation(.easeInOut(duration: 0.2)) { selectedSection = section }
+        } label: {
+            VStack(spacing: 3) {
+                if home {
+                    // Inicio, más grande y un poco por encima de la barra.
+                    ZStack {
+                        Circle()
+                            .fill(LinearGradient(colors: homeColors(selected), startPoint: .topLeading, endPoint: .bottomTrailing))
+                        Circle().strokeBorder(Color.cyan.opacity(selected ? 0.0 : 0.85), lineWidth: 1.4)
+                        Image(systemName: section.symbol)
+                            .font(.system(size: 23, weight: .bold))
+                            .foregroundStyle(selected ? Color.black.opacity(0.85) : Color.cyan)
+                    }
+                    .frame(width: 58, height: 58)
+                    .shadow(color: Color.cyan.opacity(selected ? 0.75 : 0.35), radius: selected ? 12 : 6)
+                    .offset(y: -14)
+                    .padding(.bottom, -14)
+                } else {
+                    Image(systemName: section.symbol)
+                        .font(.system(size: 18, weight: .semibold))
+                        .foregroundStyle(selected ? Color.cyan : Color.white.opacity(0.78))
+                        .frame(width: 44, height: 30)
+                        .background {
+                            if selected {
+                                Capsule().fill(Color.cyan.opacity(0.16))
+                                    .overlay(Capsule().strokeBorder(Color.cyan.opacity(0.7), lineWidth: 1))
+                                    .shadow(color: Color.cyan.opacity(0.5), radius: 6)
+                            }
+                        }
+                }
+                bottomLabel(tr(section.rawValue), selected: selected)
+            }
+            .frame(maxWidth: .infinity)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(ControllerFocusableButtonStyle())
+        .accessibilityLabel(tr(section.rawValue))
+    }
+
+    // MARK: Pantalla de mandos
+
+    private var drawerWidth: CGFloat {
+        min(340, UIScreen.main.bounds.width * 0.84)
+    }
+
+    fileprivate func openControllersDrawer() {
+        guard !controllersDrawerOpen else { return }
+        feedback()
+        controllers.refresh()
+        withAnimation(.spring(response: 0.34, dampingFraction: 0.86)) {
+            controllersDrawerOpen = true
+            drawerDrag = 0
+        }
+    }
+
+    fileprivate func closeControllersDrawer(sound: Bool = true) {
+        guard controllersDrawerOpen || drawerDrag != 0 else { return }
+        if sound { feedback(.back) }
+        withAnimation(.spring(response: 0.3, dampingFraction: 0.9)) {
+            controllersDrawerOpen = false
+            drawerDrag = 0
+        }
+    }
+
+    /// Vertical: arrastrar desde el borde izquierdo hacia el centro abre la pantalla de mandos.
+    @ViewBuilder
+    fileprivate var controllersEdgeGesture: some View {
+        if !isLandscapeNow && !controllersDrawerOpen && detailGame == nil && padMenu == nil && sheet == nil && !activity.running {
+            Color.clear
+                .frame(width: 18)
+                .frame(maxHeight: .infinity)
+                .contentShape(Rectangle())
+                .gesture(
+                    DragGesture(minimumDistance: 10)
+                        .onChanged { value in
+                            drawerDrag = max(0, min(drawerWidth, value.translation.width))
+                        }
+                        .onEnded { value in
+                            if value.translation.width > 90 || value.predictedEndTranslation.width > drawerWidth * 0.5 {
+                                openControllersDrawer()
+                            } else {
+                                withAnimation(.spring(response: 0.3, dampingFraction: 0.9)) { drawerDrag = 0 }
+                            }
+                        }
+                )
+        }
+    }
+
+    @ViewBuilder
+    fileprivate var controllersDrawerOverlay: some View {
+        if controllersDrawerOpen || drawerDrag > 0 {
+            let width: CGFloat = drawerWidth
+            let base: CGFloat = controllersDrawerOpen ? 0 : -width
+            let offset: CGFloat = max(-width, min(0, base + drawerDrag))
+            let shown: CGFloat = 1 + offset / width
+            ZStack(alignment: .leading) {
+                Color.black.opacity(0.55 * shown)
+                    .ignoresSafeArea()
+                    .onTapGesture { closeControllersDrawer() }
+                controllersPanel
+                    .frame(width: width)
+                    .frame(maxHeight: .infinity)
+                    .offset(x: offset)
+                    .gesture(
+                        DragGesture(minimumDistance: 10)
+                            .onChanged { value in
+                                guard controllersDrawerOpen else { return }
+                                drawerDrag = min(0, value.translation.width)
+                            }
+                            .onEnded { value in
+                                guard controllersDrawerOpen else { return }
+                                if value.translation.width < -width * 0.3 || value.predictedEndTranslation.width < -width * 0.5 {
+                                    closeControllersDrawer()
+                                } else {
+                                    withAnimation(.spring(response: 0.3, dampingFraction: 0.9)) { drawerDrag = 0 }
+                                }
+                            }
+                    )
+            }
+            .zIndex(20)
+        }
+    }
+
+    private var controllersPanel: some View {
+        let list: [ControllerMonitor.Info] = controllers.controllers
+        return VStack(alignment: .leading, spacing: 14) {
+            HStack(spacing: 10) {
+                Image(systemName: "gamecontroller.fill")
+                    .font(.system(size: 18, weight: .bold))
+                    .foregroundStyle(Color.cyan)
+                    .shadow(color: Color.cyan.opacity(0.7), radius: 6)
+                Text(tr("Mandos"))
+                    .font(AppFont.text(21, .bold))
+                Spacer(minLength: 4)
+                Button {
+                    closeControllersDrawer()
+                } label: {
+                    Image(systemName: "xmark.circle.fill")
+                        .font(.system(size: 22))
+                        .foregroundStyle(Color.white.opacity(0.6))
+                }
+                .buttonStyle(ControllerFocusableButtonStyle())
+            }
+            if list.isEmpty {
+                VStack(alignment: .leading, spacing: 10) {
+                    HStack(spacing: 12) {
+                        Image(systemName: "hand.tap.fill")
+                            .font(.system(size: 26, weight: .semibold))
+                            .foregroundStyle(Color.cyan)
+                            .frame(width: 48, height: 48)
+                            .background(Color.cyan.opacity(0.14), in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+                        VStack(alignment: .leading, spacing: 3) {
+                            Text(tr("Gamepad táctil activo"))
+                                .font(AppFont.text(15, .bold))
+                            Text(tr("Ningún mando conectado"))
+                                .font(AppFont.text(11))
+                                .foregroundStyle(.white.opacity(0.55))
+                        }
+                    }
+                    Text(tr("Conecta un mando por Bluetooth o USB: se usa al momento en la app y en los juegos."))
+                        .font(AppFont.text(11))
+                        .foregroundStyle(.white.opacity(0.6))
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                .padding(14)
+                .appSectionCard(cornerRadius: 18)
+            } else {
+                ScrollView(showsIndicators: false) {
+                    VStack(spacing: 10) {
+                        ForEach(Array(list.enumerated()), id: \.element.id) { index, info in
+                            controllerRow(info, player: index + 1)
+                        }
+                    }
+                }
+                Text(tr("El mando 1 maneja la app. En los juegos, cada mando es un jugador (del 1 al 4) si el juego lo admite."))
+                    .font(AppFont.text(11))
+                    .foregroundStyle(.white.opacity(0.55))
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            Spacer(minLength: 0)
+            Button {
+                closeControllersDrawer(sound: false)
+                feedback()
+                sheet = .controllers
+            } label: {
+                Label(tr("Ajustes de los mandos"), systemImage: "slider.horizontal.3")
+                    .font(AppFont.text(13, .semibold))
+                    .foregroundStyle(Color.cyan)
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, 12)
+                    .background(Color.cyan.opacity(0.12), in: Capsule())
+                    .overlay(Capsule().strokeBorder(Color.cyan.opacity(0.5), lineWidth: 1))
+            }
+            .buttonStyle(ControllerFocusableButtonStyle())
+        }
+        .padding(.horizontal, 18)
+        .padding(.top, 18)
+        .padding(.bottom, 16)
+        .background {
+            ZStack(alignment: .trailing) {
+                LinearGradient(colors: [Color(red: 0.04, green: 0.07, blue: 0.16), Color(red: 0.01, green: 0.02, blue: 0.06)],
+                               startPoint: .top, endPoint: .bottom)
+                // Neón en el borde derecho.
+                Rectangle()
+                    .fill(LinearGradient(colors: [Color.cyan.opacity(0.0), Color.cyan.opacity(0.9), Color(red: 0.12, green: 0.45, blue: 1.0).opacity(0.9), Color.cyan.opacity(0.0)],
+                                         startPoint: .top, endPoint: .bottom))
+                    .frame(width: 1.6)
+                    .shadow(color: Color.cyan.opacity(0.9), radius: 6)
+            }
+            .ignoresSafeArea()
+        }
+    }
+
+    private func controllerRow(_ info: ControllerMonitor.Info, player: Int) -> some View {
+        HStack(spacing: 12) {
+            Text("J\(player)")
+                .font(AppFont.text(12, .bold))
+                .foregroundStyle(.black)
+                .frame(width: 34, height: 34)
+                .background(Circle().fill(player == 1 ? Color.cyan : Color(red: 0.45, green: 0.75, blue: 1.0)))
+            VStack(alignment: .leading, spacing: 3) {
+                Text(info.name)
+                    .font(AppFont.text(14, .semibold))
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.7)
+                Text(info.category)
+                    .font(AppFont.text(10))
+                    .foregroundStyle(.white.opacity(0.5))
+                    .lineLimit(1)
+            }
+            Spacer(minLength: 4)
+            if let battery = info.battery {
+                HStack(spacing: 3) {
+                    if info.charging {
+                        Image(systemName: "bolt.fill")
+                            .font(.system(size: 10, weight: .bold))
+                            .foregroundStyle(Color.yellow)
+                    }
+                    Text("\(battery)%")
+                        .font(AppFont.text(11, .semibold))
+                        .monospacedDigit()
+                        .foregroundStyle(battery <= 20 ? Color.red : Color.green)
+                }
+            }
+        }
+        .padding(12)
+        .appSectionCard(cornerRadius: 16)
+    }
+}
+
+/// Haz de neón a un lado del nombre: se enciende desde el centro hacia el borde de la pantalla
+/// y se vuelve a apagar hacia el centro, sin parar (se para durante una partida).
+private struct HeaderBeam: View {
+    @ObservedObject var progress: ScrollProgress
+    /// El de la izquierda (crece hacia la izquierda).
+    let leading: Bool
+    var paused: Bool
+    @State var lit = false
+
+    var body: some View {
+        let hidden: CGFloat = min(1, progress.offset / 36)
+        let towardEdge: UnitPoint = leading ? .leading : .trailing
+        let towardCenter: UnitPoint = leading ? .trailing : .leading
+        return GeometryReader { geometry in
+            let width: CGFloat = geometry.size.width
+            let length: CGFloat = max(10, width * (lit ? 1.0 : 0.12))
+            ZStack(alignment: leading ? .trailing : .leading) {
+                // Rastro tenue de todo el haz.
+                Capsule()
+                    .fill(LinearGradient(colors: [Color.cyan.opacity(0.22), Color.cyan.opacity(0.0)], startPoint: towardCenter, endPoint: towardEdge))
+                    .frame(height: 1)
+                // La luz que va y vuelve.
+                Capsule()
+                    .fill(LinearGradient(colors: [Color.white, Color.cyan, Color(red: 0.1, green: 0.45, blue: 1.0).opacity(0.0)],
+                                         startPoint: towardCenter, endPoint: towardEdge))
+                    .frame(width: length, height: 2.2)
+                    .shadow(color: Color.cyan.opacity(0.95), radius: 4)
+                    .shadow(color: Color(red: 0.1, green: 0.45, blue: 1.0).opacity(0.7), radius: 10)
+            }
+            .frame(width: width, height: geometry.size.height, alignment: leading ? .trailing : .leading)
+        }
+        .frame(height: 12)
+        .opacity((lit ? 1.0 : 0.6) * (1 - hidden))
+        .allowsHitTesting(false)
+        .onAppear { update() }
+        .onChange(of: paused) { _, _ in update() }
+    }
+
+    private func update() {
+        if paused {
+            var transaction = Transaction()
+            transaction.disablesAnimations = true
+            withTransaction(transaction) { lit = false }
+        } else {
+            withAnimation(.easeInOut(duration: 1.9).repeatForever(autoreverses: true)) { lit = true }
+        }
     }
 }

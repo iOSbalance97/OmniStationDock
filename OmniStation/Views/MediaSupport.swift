@@ -161,7 +161,7 @@ final class LoopingVideoView: UIView {
 // MARK: - Sonidos de la app
 
 enum SoundKind: String, CaseIterable, Identifiable {
-    case navigate, select, ambient
+    case navigate, select, back, toggle, ambient
 
     var id: String { rawValue }
 
@@ -172,6 +172,10 @@ enum SoundKind: String, CaseIterable, Identifiable {
             return ["sound_navigate", "sound_navigation", "navigate", "navigation", "sound_move", "move"]
         case .select:
             return ["sound_select", "sound_selection", "select", "selection", "sound_seleccion", "seleccion", "sound_confirm", "confirm"]
+        case .back:
+            return ["sound_back", "back", "sound_cancel", "cancel", "atras"]
+        case .toggle:
+            return ["sound_toggle", "toggle", "sound_switch", "switch", "sound_shift", "shift"]
         case .ambient:
             return ["sound_ambient", "ambient", "sound_music", "music", "bgm"]
         }
@@ -195,7 +199,6 @@ final class SoundManager {
     /// Formatos que suelen usarse pero iOS no reproduce.
     private static let unsupportedExtensions: [String] = ["ogg", "oga", "opus", "wma", "mid", "midi"]
 
-    private var players: [SoundKind: AVAudioPlayer] = [:]
     private var unreadable: [SoundKind: String] = [:]
     private var sessionReady = false
 
@@ -276,19 +279,9 @@ final class SoundManager {
         return .missing
     }
 
-    private func player(for kind: SoundKind) -> AVAudioPlayer? {
-        if let existing = players[kind] { return existing }
-        guard let url = customURL(for: kind) ?? bundledURL(for: kind) else { return nil }
-        guard let player = try? AVAudioPlayer(contentsOf: url) else {
-            unreadable[kind] = url.lastPathComponent
-            return nil
-        }
-        unreadable[kind] = nil
-        if kind == .ambient { player.numberOfLoops = -1 }
-        player.prepareToPlay()
-        players[kind] = player
-        return player
-    }
+    /// Música de ambiente: se descomprime entera y se repite desde memoria sin hueco
+    /// (AVAudioPlayer dejaba un silencio al volver al principio con m4a/mp3).
+    private let ambientLoop = AmbientLoop()
 
     /// Efecto corto (navegación o selección). Sin archivo de sonido, suena el clic del sistema.
     /// Los efectos van por un motor de audio aparte, ya descomprimidos y fuera del hilo de la
@@ -301,7 +294,7 @@ final class SoundManager {
         if now - (lastPlayed[kind] ?? 0) < 0.05 { return }
         lastPlayed[kind] = now
         guard let url = effectURL(for: kind) else {
-            AudioServicesPlaySystemSound(kind == .navigate ? 1105 : 1104)
+            AudioServicesPlaySystemSound(kind == .navigate ? 1105 : (kind == .back ? 1155 : 1104))
             return
         }
         effects.play(kind, url: url, volume: Float(volume)) { [weak self] name in
@@ -329,19 +322,22 @@ final class SoundManager {
     /// Antes de un juego: se para la música y el motor de los efectos, para que no queden sonando
     /// (ni a medias) mientras el núcleo arranca su propio sonido o se engancha el depurador.
     func silenceForGame() {
-        players[.ambient]?.stop()
+        ambientLoop.stop()
         effects.stopEngine()
     }
 
     /// Música de ambiente en bucle: con volumen 0 (o sin archivo) se para.
     func updateAmbient(volume: Double) {
-        guard volume > 0, let player = player(for: .ambient) else {
-            players[.ambient]?.stop()
+        guard volume > 0, let url = customURL(for: .ambient) ?? bundledURL(for: .ambient) else {
+            ambientLoop.stop()
             return
         }
         prepareSession()
-        player.volume = Float(volume)
-        if !player.isPlaying { player.play() }
+        if ambientLoop.play(url: url, volume: Float(volume)) {
+            unreadable[.ambient] = nil
+        } else {
+            unreadable[.ambient] = url.lastPathComponent
+        }
     }
 
     @discardableResult
@@ -357,20 +353,80 @@ final class SoundManager {
         } catch {
             return false
         }
-        players[kind] = nil
+        if kind == .ambient { ambientLoop.forget() }
         unreadable[kind] = nil
         forgetEffect(kind)
         return true
     }
 
     func removeCustom(_ kind: SoundKind) {
-        players[kind]?.stop()
+        if kind == .ambient { ambientLoop.forget() }
         for ext in Self.extensions {
             try? FileManager.default.removeItem(at: customFolder.appendingPathComponent("\(kind.rawValue).\(ext)"))
         }
-        players[kind] = nil
         unreadable[kind] = nil
         forgetEffect(kind)
+    }
+}
+
+/// Bucle de la música de ambiente sin cortes: el archivo entero en memoria y un nodo que lo
+/// repite (`.loops`), así el final enlaza con el principio sin silencio.
+private final class AmbientLoop {
+    private let engine = AVAudioEngine()
+    private let node = AVAudioPlayerNode()
+    private var buffer: AVAudioPCMBuffer?
+    private var source: URL?
+    private var attached = false
+    private var playing = false
+
+    /// Devuelve `false` si el archivo no se puede leer.
+    func play(url: URL, volume: Float) -> Bool {
+        if source != url || buffer == nil {
+            stop()
+            guard let file = try? AVAudioFile(forReading: url),
+                  file.length > 0,
+                  let pcm = AVAudioPCMBuffer(pcmFormat: file.processingFormat, frameCapacity: AVAudioFrameCount(file.length)),
+                  (try? file.read(into: pcm)) != nil else {
+                buffer = nil
+                source = nil
+                return false
+            }
+            if attached {
+                engine.disconnectNodeOutput(node)
+            } else {
+                engine.attach(node)
+                attached = true
+            }
+            engine.connect(node, to: engine.mainMixerNode, format: pcm.format)
+            buffer = pcm
+            source = url
+        }
+        node.volume = volume
+        if playing && engine.isRunning && node.isPlaying { return true }
+        guard let pcm = buffer else { return false }
+        if !engine.isRunning {
+            engine.prepare()
+            do { try engine.start() } catch { return true }
+        }
+        node.stop()
+        node.scheduleBuffer(pcm, at: nil, options: [.loops], completionHandler: nil)
+        node.play()
+        playing = true
+        return true
+    }
+
+    func stop() {
+        guard playing || engine.isRunning else { return }
+        node.stop()
+        engine.stop()
+        playing = false
+    }
+
+    /// Cambió el archivo: se vuelve a leer en la siguiente llamada.
+    func forget() {
+        stop()
+        buffer = nil
+        source = nil
     }
 }
 
@@ -422,12 +478,12 @@ private final class SoundEffects {
         if let source = sources[kind], source != url { drop(kind) }
         guard let buffer = loadBuffer(kind, url: url) else {
             onFailure(url.lastPathComponent)
-            AudioServicesPlaySystemSound(kind == .navigate ? 1105 : 1104)
+            AudioServicesPlaySystemSound(kind == .navigate ? 1105 : (kind == .back ? 1155 : 1104))
             return
         }
         let pool: [AVAudioPlayerNode] = voicePool(kind, format: buffer.format)
         guard !pool.isEmpty, startEngine() else {
-            AudioServicesPlaySystemSound(kind == .navigate ? 1105 : 1104)
+            AudioServicesPlaySystemSound(kind == .navigate ? 1105 : (kind == .back ? 1155 : 1104))
             return
         }
         let index: Int = (nextVoice[kind] ?? 0) % pool.count

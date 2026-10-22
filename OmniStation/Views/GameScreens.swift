@@ -1723,8 +1723,10 @@ struct SoundsSheet: View {
     @AppStorage("volumeNavigate") private var volumeNavigate = 0.5
     @AppStorage("volumeSelect") private var volumeSelect = 0.7
     @AppStorage("volumeAmbient") private var volumeAmbient = 0.3
+    @AppStorage("volumeBack") private var volumeBack = 0.7
+    @AppStorage("volumeToggle") private var volumeToggle = 0.7
 
-    // 0..2 sonidos, 3 = Listo.
+    // 0..4 sonidos, 5 = Listo.
     @State private var selected = 0
     @State private var importKind: SoundKind = .navigate
     @State private var showImporter = false
@@ -1788,6 +1790,8 @@ struct SoundsSheet: View {
         switch kind {
         case .navigate: return tr("Desplazamiento por menús")
         case .select: return tr("Selección")
+        case .back: return tr("Atrás")
+        case .toggle: return tr("Interruptores de opciones")
         case .ambient: return tr("Música de ambiente")
         }
     }
@@ -1796,6 +1800,8 @@ struct SoundsSheet: View {
         switch kind {
         case .navigate: return "arrow.up.and.down.and.arrow.left.and.right"
         case .select: return "hand.tap.fill"
+        case .back: return "arrow.uturn.backward"
+        case .toggle: return "switch.2"
         case .ambient: return "music.note"
         }
     }
@@ -1804,6 +1810,8 @@ struct SoundsSheet: View {
         switch kind {
         case .navigate: return $volumeNavigate
         case .select: return $volumeSelect
+        case .back: return $volumeBack
+        case .toggle: return $volumeToggle
         case .ambient: return $volumeAmbient
         }
     }

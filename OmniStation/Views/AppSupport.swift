@@ -60,7 +60,6 @@ enum L10n {
         "Juegos": "Games",
         "Mandos": "Controllers",
         "Ninguno conectado": "None connected",
-        "Ningún mando conectado": "No controller connected",
         "Conecta un mando por Bluetooth (DualSense, Xbox…) y aparecerá aquí.": "Connect a controller over Bluetooth (DualSense, Xbox…) and it will appear here.",
         "Navegar con el mando": "Navigate with controller",
         "L1 y R1 cambian de pestaña": "L1 and R1 switch tabs",
@@ -199,6 +198,13 @@ enum L10n {
         "Crea tus propias plataformas": "Create your own platforms",
         "Desconectar": "Disconnect",
         "Desplazamiento por menús": "Menu navigation",
+        "Interruptores de opciones": "Option switches",
+        "Táctil": "Touch",
+        "Gamepad táctil activo": "Touch gamepad active",
+        "Ningún mando conectado": "No controller connected",
+        "Conecta un mando por Bluetooth o USB: se usa al momento en la app y en los juegos.": "Connect a controller over Bluetooth or USB: it works right away in the app and in games.",
+        "El mando 1 maneja la app. En los juegos, cada mando es un jugador (del 1 al 4) si el juego lo admite.": "Controller 1 drives the app. In games, each controller is a player (1 to 4) if the game supports it.",
+        "Ajustes de los mandos": "Controller settings",
         "Desvincular carpeta": "Unlink folder",
         "Dock a pantalla completa": "Full-width Dock",
         "El mapa se guarda para este juego. iOS no deja que una app cambie los botones dentro de otra: úsalo como referencia o configúralo igual en el emulador.": "The mapping is saved for this game. iOS doesn't let one app change the buttons inside another: use it as a reference or set the same mapping in the emulator.",
@@ -719,6 +725,8 @@ final class ControllerMonitor: ObservableObject {
     var onOptions: (() -> Void)?
     /// X/cuadrado: borrar la última letra en el teclado de Búsqueda.
     var onSquare: (() -> Void)?
+    /// SELECT / Compartir / ⊖: pantalla de mandos.
+    var onSelect: (() -> Void)?
 
     enum Direction {
         case up, down, left, right
@@ -851,6 +859,10 @@ final class ControllerMonitor: ObservableObject {
         pad.buttonX.pressedChangedHandler = { [weak self] _, _, pressed in
             guard pressed, self?.navigationEnabled == true else { return }
             DispatchQueue.main.async { self?.onSquare?() }
+        }
+        pad.buttonOptions?.pressedChangedHandler = { [weak self] _, _, pressed in
+            guard pressed, self?.navigationEnabled == true else { return }
+            DispatchQueue.main.async { self?.onSelect?() }
         }
     }
 }
@@ -1162,7 +1174,8 @@ extension View {
     /// Desvanece el contenido por arriba (detrás de la barra superior) y por abajo.
     /// `clear`: zona de arriba donde no se ve nada; `fade`: puntos de degradado superior;
     /// `bottom`: puntos de degradado inferior.
-    func edgeFade(clear: CGFloat, fade: CGFloat, bottom: CGFloat) -> some View {
+    /// `bottomClear`: zona de abajo donde no se ve nada (detrás de la barra inferior).
+    func edgeFade(clear: CGFloat, fade: CGFloat, bottom: CGFloat, bottomClear: CGFloat = 0) -> some View {
         mask {
             VStack(spacing: 0) {
                 Color.clear.frame(height: clear)
@@ -1187,6 +1200,7 @@ extension View {
                     endPoint: .bottom
                 )
                 .frame(height: bottom)
+                Color.clear.frame(height: bottomClear)
             }
         }
     }
