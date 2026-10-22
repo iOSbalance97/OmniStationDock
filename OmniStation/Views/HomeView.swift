@@ -203,6 +203,9 @@ struct HomeView: View {
     /// Pantalla de transición mientras se prepara el JIT (juego que se va a abrir y lo que pasa ahora).
     @State private var jitTransitionGame: String?
     @State private var jitTransitionDetail: String = ""
+    /// Preparación del JIT permanente al abrir la app (SideStore).
+    @State private var permanentJITBusy: Bool = false
+    @State private var permanentJITTriedAt: Date = .distantPast
     /// Último aviso de poca memoria (si se vuelve a pulsar Jugar enseguida, se juega igualmente).
     @State private var lowMemoryWarnedAt: Date = .distantPast
     @AppStorage("retroTouchAlways") private var retroTouchAlways = false
@@ -761,6 +764,7 @@ struct HomeView: View {
                 refreshJITStatus(announce: false)
                 showPendingReturnMessage()
                 if usesBuiltInJIT { jitStatus.autoPrepare() }
+                schedulePermanentJIT()
             }
     }
 
@@ -804,6 +808,42 @@ struct HomeView: View {
             } else {
                 showToast(jitEnabled ? tr("JIT activo en esta app") : tr("JIT no activo en esta app"))
             }
+        }
+    }
+
+    /// SideStore: el JIT permanente se prepara al abrir la app (o al volver a ella), mientras la VPN
+    /// funciona (wifi o modo avión). Se engancha el depurador un momento, se prepara el bloque y se
+    /// suelta: desde entonces Dolphin tiene JIT toda la sesión aunque luego solo haya datos móviles.
+    private func schedulePermanentJIT() {
+        guard !DebugSupport.isInsideLiveContainer, !OSLibretroEngine.persistentJITReady, !permanentJITBusy,
+              Date().timeIntervalSince(permanentJITTriedAt) > 20,
+              RetroSystem.allCases.contains(where: { $0.availableCores.contains(where: \.execMem) }) else { return }
+        // Un poco después, cuando la app ya está quieta (el enganche la para un instante).
+        DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) {
+            preparePermanentJITNow()
+        }
+    }
+
+    private func preparePermanentJITNow() {
+        guard UIApplication.shared.applicationState == .active, !permanentJITBusy, !OSLibretroEngine.persistentJITReady,
+              !OSLibretroEngine.shared.busy, !OSArmsx2Engine.shared.busy, !OSMeloNXEngine.shared.busy,
+              canAskSelfJIT, let pairing = PairingFile.data() else { return }
+        permanentJITBusy = true
+        permanentJITTriedAt = Date()
+        OSMeloNXEngine.shared.prepareSharedJIT(withPairing: pairing, progress: nil) { success, _ in
+            defer { permanentJITBusy = false }
+            guard success else { return }
+            let ready: Bool = OSLibretroEngine.preparePersistentJIT()
+            // Listo o no, el depurador se suelta y se cierra la extensión (no se queda nada enganchado).
+            DispatchQueue.global(qos: .userInitiated).async {
+                OSLibretroEngine.detachJITDebugger()
+            }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) {
+                OSMeloNXEngine.shared.releaseSharedJIT()
+            }
+            RetroJIT.holding = false
+            showToast(ready ? tr("JIT permanente listo") : permanentJITText, seconds: ready ? 2.5 : 5)
+            emulatorRevision += 1
         }
     }
 
@@ -992,6 +1032,7 @@ struct HomeView: View {
         controllers.navigationEnabled = true
         sheetPad.gamepadConnected = gamepadConnected
         refreshJITStatus(announce: false)
+        schedulePermanentJIT()
         // Instalada con SideStore: las carpetas de los núcleos existen desde el principio, así la
         // carpeta de OmniStation sale en Archivos → En mi iPhone sin tener que importar nada antes.
         if !DebugSupport.isInsideLiveContainer {
@@ -3215,7 +3256,19 @@ struct HomeView: View {
         // Con el depurador enganchado, el JIT permanente se prepara ya (una vez): desde entonces los
         // núcleos que lo usan tienen JIT siempre, sin StikDebug ni VPN.
         if wanted?.execMem == true && OSLibretroEngine.jitActive && !OSLibretroEngine.persistentJITReady {
-            if !OSLibretroEngine.preparePersistentJIT() {
+            if OSLibretroEngine.preparePersistentJIT() {
+                // Este núcleo ya no necesita el depurador: se suelta antes de jugar (con él puesto,
+                // la partida va más lenta, calienta y tarda en cerrarse).
+                DispatchQueue.global(qos: .userInitiated).async {
+                    OSLibretroEngine.detachJITDebugger()
+                }
+                if RetroJIT.holding {
+                    RetroJIT.holding = false
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) {
+                        OSMeloNXEngine.shared.releaseSharedJIT()
+                    }
+                }
+            } else {
                 showToast(permanentJITText, seconds: 5)
             }
         }
