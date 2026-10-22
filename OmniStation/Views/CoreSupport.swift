@@ -11,9 +11,10 @@ enum ARMSX2Mode: String {
 
     static let storageKey = "armsx2Engine"
 
-    /// El integrado solo funciona fuera de LiveContainer (la extensión de JIT no corre dentro).
+    /// Con SideStore (extensión de JIT o JIT permanente) y, desde el JIT permanente, también en
+    /// LiveContainer (allí no hay extensión: usa el bloque que se prepara al abrir con StikDebug).
     static var integratedAvailable: Bool {
-        !DebugSupport.isInsideLiveContainer
+        true
     }
 
     /// El modo que de verdad se usa ahora.

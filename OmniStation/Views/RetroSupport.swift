@@ -569,7 +569,9 @@ final class PermanentJIT {
 
     /// ¿Hace falta? (hay algún núcleo que lo use y aún no está preparado)
     var wanted: Bool {
-        !OSLibretroEngine.persistentJITReady && RetroSystem.allCases.contains { $0.availableCores.contains(where: \.execMem) }
+        guard !OSLibretroEngine.persistentJITReady else { return false }
+        // Dolphin y Azahar (núcleos con execMem) y ARMSX2 integrado.
+        return OSArmsx2Engine.coreBundled || RetroSystem.allCases.contains { $0.availableCores.contains(where: \.execMem) }
     }
 
     /// Lo intenta (en el hilo principal). `completion(listo)`; si ya estaba, enseguida.

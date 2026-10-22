@@ -2911,9 +2911,12 @@ struct HomeView: View {
 
     /// Núcleo integrado con el que se juega este juego (nil si se abre con una app aparte).
     private func integratedEmulator(for id: String) -> Emulator? {
-        guard installMethodRaw == InstallMethod.sideStore.rawValue,
-              let item = libraryGames.first(where: { $0.id == id }) else { return nil }
-        if item.source == ARMSX2CoreFolders.source && armsx2Integrated { return .armsx2 }
+        guard let item = libraryGames.first(where: { $0.id == id }) else { return nil }
+        // ARMSX2 integrado: con SideStore y, con el JIT permanente, también en LiveContainer.
+        if item.source == ARMSX2CoreFolders.source && armsx2Integrated {
+            return installMethodRaw == InstallMethod.sideStore.rawValue || DebugSupport.isInsideLiveContainer ? .armsx2 : nil
+        }
+        guard installMethodRaw == InstallMethod.sideStore.rawValue else { return nil }
         if item.source == MeloNXCoreFolders.source && melonxIntegrated { return .melonx }
         return nil
     }
@@ -2929,9 +2932,9 @@ struct HomeView: View {
         })
         items.append(PadMenuItem(title: checked(tr("Núcleo integrado en OmniStation"), integrated)) {
             closePadMenu()
-            guard ARMSX2Mode.integratedAvailable else {
-                showToast(tr("El núcleo integrado no funciona dentro de LiveContainer: instala OmniStation con SideStore."), seconds: 4)
-                return
+            if DebugSupport.isInsideLiveContainer {
+                // Aquí no hay extensión de JIT: va con el JIT permanente (StikDebug al abrir la app).
+                showToast(tr("En LiveContainer, ARMSX2 integrado usa el JIT permanente: abre OmniStation con el JIT de StikDebug."), seconds: 5)
             }
             armsx2ModeRaw = ARMSX2Mode.integrated.rawValue
             emulatorRevision += 1
@@ -3021,18 +3024,25 @@ struct HomeView: View {
             showToast(tr("Esta compilación no incluye el núcleo de ARMSX2."), seconds: 4)
             return
         }
+        // JIT permanente (bloque preparado al abrir la app): sin extensión, VPN ni depurador.
+        let pooled: Bool = OSArmsx2Engine.permanentJITUsable
         guard OSArmsx2Engine.supportedHere else {
-            showToast(tr("El núcleo integrado necesita iOS 18 y OmniStation instalada con SideStore (no en LiveContainer)."), seconds: 4.5)
+            showToast(DebugSupport.isInsideLiveContainer
+                      ? tr("En LiveContainer, ARMSX2 integrado necesita el JIT permanente: abre OmniStation con el JIT de StikDebug.")
+                      : tr("El núcleo integrado necesita iOS 18."), seconds: 5)
             return
         }
-        guard OSArmsx2Engine.helperBundled else {
-            showToast(tr("Falta la extensión de JIT. Reinstala OmniStation con SideStore sin quitar sus extensiones."), seconds: 5)
-            return
+        if !pooled {
+            guard OSArmsx2Engine.helperBundled else {
+                showToast(tr("Falta la extensión de JIT. Reinstala OmniStation con SideStore sin quitar sus extensiones."), seconds: 5)
+                return
+            }
+            guard PairingFile.data() != nil else {
+                showToast(tr("Importa el archivo de emparejamiento en Ajustes → Depuración."), seconds: 4)
+                return
+            }
         }
-        guard let pairing = PairingFile.data() else {
-            showToast(tr("Importa el archivo de emparejamiento en Ajustes → Depuración."), seconds: 4)
-            return
-        }
+        let pairing: Data = PairingFile.data() ?? Data()
         ARMSX2CoreFolders.ensure()
         guard !ARMSX2CoreFolders.biosFiles().isEmpty else {
             showToast(tr("Falta la BIOS: impórtala en Ajustes → ARMSX2 integrado → BIOS."), seconds: 4.5)
@@ -3046,13 +3056,14 @@ struct HomeView: View {
         controllers.navigationEnabled = false
         SoundManager.shared.updateAmbient(volume: 0)
         EmulationActivity.shared.begin(gameID: gameID)
-        // ARMSX2 engancha y suelta su propio depurador: el de los núcleos libretro ya no vale.
-        RetroJIT.fresh = false
+        // ARMSX2 engancha y suelta su propio depurador: el de los núcleos libretro ya no vale
+        // (con el JIT permanente no engancha ninguno).
+        if !pooled { RetroJIT.fresh = false }
         // Como con los otros núcleos: pantalla del rayo mientras se engancha el JIT, y se espera a que
         // acabe el sonido del botón (con el depurador enganchándose, la app se para un instante y
         // lo que estuviera sonando se oiría entrecortado).
         SoundManager.shared.silenceForGame()
-        showJITTransition(title, detail: tr("Activando el JIT…"))
+        showJITTransition(title, detail: pooled ? tr("JIT permanente listo") : tr("Activando el JIT…"))
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.45) {
             OSArmsx2Engine.shared.launchGame(
                 atPath: gamePath,
@@ -5286,10 +5297,14 @@ struct HomeView: View {
         let method: InstallMethod? = InstallMethod(rawValue: installMethodRaw)
         // En iOS 26 el JIT solo vale mientras el depurador sigue enganchado: el estado dice la verdad.
         let jitUsable: Bool = jitEnabled && OSLibretroEngine.jitActive
-        let jitControl: SettingControl = jitUsable ? .badge("ON", Color.green) : (jitEnabled ? .badge(tr("SUELTO"), Color.orange) : .badge("OFF", Color.gray))
+        var jitControl: SettingControl = jitUsable ? .badge("ON", Color.green) : (jitEnabled ? .badge(tr("SUELTO"), Color.orange) : .badge("OFF", Color.gray))
         var jitSubtitle: String = jitUsable ? tr("Activo en esta app") : (jitEnabled ? tr("Se activó, pero el depurador ya no está enganchado") : tr("No activo en esta app"))
-        // El JIT permanente (núcleos compilados por OmniStation) sigue valiendo sin depurador.
-        if RetroSystem.allCases.contains(where: { $0.availableCores.contains(where: \.execMem) }) {
+        // El JIT permanente (núcleos compilados por OmniStation) sigue valiendo sin depurador: el
+        // depurador se suelta a propósito y los demás núcleos lo vuelven a pedir al abrir un juego.
+        if OSLibretroEngine.persistentJITReady && !jitUsable {
+            jitControl = .badge(tr("PERMANENTE"), Color.green)
+            jitSubtitle = tr("JIT permanente listo (Dolphin, 3DS y ARMSX2 integrado). Los demás núcleos lo piden al abrir un juego.")
+        } else if RetroSystem.allCases.contains(where: { $0.availableCores.contains(where: \.execMem) }) {
             jitSubtitle += " · " + permanentJITText
         }
         let stikFailure: String = tr("No se pudo abrir StikDebug. ¿Está instalado?")
