@@ -144,7 +144,9 @@ enum RetroSystem: String, CaseIterable, Identifiable {
         case .n64:
             return [RetroCore(id: "mupen64plus_next", name: "Mupen64Plus-Next", framework: "mupen64plus.next.libretro.framework", jit: true, gpu: true)]
         case .psp:
-            return [RetroCore(id: "ppsspp", name: "PPSSPP", framework: "ppsspp.libretro.framework", jit: true, gpu: true)]
+            // El compilado por OmniStation (JIT permanente) primero; el de ManicEMU, si el nuestro no está.
+            return [RetroCore(id: "ppsspp_omni", name: "PPSSPP", framework: "ppsspp_omni.libretro.framework", jit: true, gpu: true, execMem: true),
+                    RetroCore(id: "ppsspp", name: "PPSSPP (ManicEMU)", framework: "ppsspp.libretro.framework", jit: true, gpu: true)]
         case .dc:
             return [RetroCore(id: "flycast", name: "Flycast (JIT)", framework: "flycast.libretro.framework", jit: true, requiresJIT: true, gpu: true),
                     RetroCore(id: "flycast_jitless", name: "Flycast (sin JIT)", framework: "flycast-jitless.libretro.framework", jit: false, gpu: true)]
@@ -526,7 +528,8 @@ enum RetroConfig {
         case "mupen64plus_next":
             coreOptions["mupen64plus-cpucore"] = useJIT ? "dynamic_recompiler" : "cached_interpreter"
             coreOptions["mupen64plus-rdp-plugin"] = "gliden64"
-        case "ppsspp":
+        case "ppsspp", "ppsspp_omni":
+            // El nuestro además mira si OmniStation le da memoria de JIT (si no, intérprete IR).
             coreOptions["ppsspp_backend"] = "opengl"
             coreOptions["ppsspp_cpu_core"] = useJIT ? "JIT" : "IR JIT"
             coreOptions["ppsspp_software_rendering_jit"] = useJIT ? "enabled" : "disabled"

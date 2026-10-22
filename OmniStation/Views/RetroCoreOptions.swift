@@ -127,7 +127,7 @@ enum RetroCoreOptions {
                     CuratedOption(key: "mupen64plus-pak1", tab: i, title: "Accesorio del mando", detail: "Memoria, vibración o Transfer Pak."),
                     CuratedOption(key: "mupen64plus-astick-deadzone", tab: i, title: "Zona muerta del stick"),
                     CuratedOption(key: "mupen64plus-astick-sensitivity", tab: i, title: "Sensibilidad del stick")]
-        case "ppsspp":
+        case "ppsspp", "ppsspp_omni":
             return [CuratedOption(key: "ppsspp_internal_resolution", tab: g, title: "Resolución interna"),
                     CuratedOption(key: "ppsspp_texture_scaling_level", tab: g, title: "Escalado de texturas"),
                     CuratedOption(key: "ppsspp_texture_scaling_type", tab: g, title: "Tipo de escalado de texturas"),
