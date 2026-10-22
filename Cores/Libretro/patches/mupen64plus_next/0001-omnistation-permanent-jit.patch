@@ -1,0 +1,486 @@
+diff --git a/Makefile b/Makefile
+index 2443f80..7d1e615 100644
+--- a/Makefile
++++ b/Makefile
+@@ -451,12 +451,18 @@ else ifneq (,$(findstring ios,$(platform)))
+ 		COREFLAGS  += -Ofast -ffast-math -funsafe-math-optimizations -DNO_ASM
+ 		CPUFLAGS   += -Ofast -ffast-math -funsafe-math-optimizations -DNO_ASM
+ 		HAVE_NEON=1
+-		CC         += -miphoneos-version-min=8.0
+-		CC_AS      += -miphoneos-version-min=8.0
+-		CXX        += -miphoneos-version-min=8.0
+-		PLATCFLAGS += -miphoneos-version-min=8.0 -Wno-error=implicit-function-declaration
++		CC         += -miphoneos-version-min=12.0
++		CC_AS      += -miphoneos-version-min=12.0
++		CXX        += -miphoneos-version-min=12.0
++		PLATCFLAGS += -miphoneos-version-min=12.0 -Wno-error=implicit-function-declaration
+ 		CC = clang -arch arm64 -isysroot $(IOSSDK)
+ 		CXX = clang++ -arch arm64 -isysroot $(IOSSDK)
++		ifeq ($(OMNI_EXEC_MEM),1)
++			# OmniStation: the aarch64 dynarec in the frontend's permanent JIT region (dual-mapped).
++			# NO_ASM would leave the dynarec without its jumps: undone at the end (DYNAFLAGS go last).
++			WITH_DYNAREC = aarch64
++			DYNAFLAGS += -UNO_ASM -DOMNI_EXEC_MEM
++		endif
+ 	else
+ 		PLATCFLAGS += -DOS_MAC_OS_X
+ 		PLATCFLAGS += -DHAVE_POSIX_MEMALIGN -DNO_ASM
+diff --git a/libretro/libretro.c b/libretro/libretro.c
+index 4a9f129..bbea645 100644
+--- a/libretro/libretro.c
++++ b/libretro/libretro.c
+@@ -110,6 +110,42 @@ retro_audio_sample_batch_t audio_batch_cb = NULL;
+ retro_environment_t environ_cb = NULL;
+ retro_environment_t environ_clear_thread_waits_cb = NULL;
+ 
++#ifdef OMNI_EXEC_MEM
++/* OmniStation: executable memory from the frontend (RETRO_ENVIRONMENT_EXEC_MEM_ALLOC, as libretro's
++ * Dolphin uses it on iOS). On iOS 26+ (TXM) the frontend keeps one region that a debugger prepared
++ * once, in two views (RW and RX), so the dynarec keeps working without a debugger. */
++#define OMNI_ENVIRONMENT_EXEC_MEM_ALLOC 83
++#define OMNI_ENVIRONMENT_EXEC_MEM_FREE 84
++#define OMNI_EXEC_MEM_MODE_DUAL_MAP 4
++struct omni_exec_mem_alloc { unsigned version; size_t size; unsigned mode; void *rx; void *rw; };
++struct omni_exec_mem_free { void *rx; };
++
++int omni_exec_mem_ready(void)
++{
++   struct omni_exec_mem_alloc probe = { 1, 0, 0, NULL, NULL };
++   return environ_cb && environ_cb(OMNI_ENVIRONMENT_EXEC_MEM_ALLOC, &probe) &&
++          probe.mode == OMNI_EXEC_MEM_MODE_DUAL_MAP;
++}
++
++void *omni_exec_mem_alloc(size_t size, void **rw)
++{
++   struct omni_exec_mem_alloc request = { 1, size, OMNI_EXEC_MEM_MODE_DUAL_MAP, NULL, NULL };
++   *rw = NULL;
++   if (!environ_cb || !environ_cb(OMNI_ENVIRONMENT_EXEC_MEM_ALLOC, &request) ||
++       request.mode != OMNI_EXEC_MEM_MODE_DUAL_MAP || !request.rx || !request.rw)
++      return NULL;
++   *rw = request.rw;
++   return request.rx;
++}
++
++void omni_exec_mem_free(void *rx)
++{
++   struct omni_exec_mem_free request = { rx };
++   if (environ_cb && rx)
++      environ_cb(OMNI_ENVIRONMENT_EXEC_MEM_FREE, &request);
++}
++#endif
++
+ struct retro_rumble_interface rumble;
+ 
+ save_memory_data saved_memory;
+@@ -1002,7 +1038,12 @@ static void update_variables(bool startup)
+        
+ #ifdef IOS
+        bool can_jit = false;
++#ifdef OMNI_EXEC_MEM
++       /* OmniStation: ParaLLEl RSP's JIT (GNU lightning) writes and runs the same pages: never here. */
++       if (true)
++#else
+        if (!environ_cb(RETRO_ENVIRONMENT_GET_JIT_CAPABLE, &can_jit) || !can_jit)
++#endif
+        {
+           if(current_rsp_type == RSP_PLUGIN_PARALLEL)
+           {
+@@ -1401,6 +1442,15 @@ static void update_variables(bool startup)
+           else if (!strcmp(var.value, "dynamic_recompiler"))
+              r4300_emumode = EMUMODE_DYNAREC;
+        }
++#ifdef OMNI_EXEC_MEM
++       /* the dynarec only with executable memory from the frontend */
++       if (r4300_emumode == EMUMODE_DYNAREC && !omni_exec_mem_ready())
++       {
++          r4300_emumode = EMUMODE_INTERPRETER;
++          if (log_cb)
++             log_cb(RETRO_LOG_INFO, "OmniStation: no executable memory from the frontend, cached interpreter\n");
++       }
++#endif
+ 
+        var.key = CORE_NAME "-aspect";
+        var.value = NULL;
+diff --git a/mupen64plus-core/src/device/r4300/new_dynarec/arm64/assem_arm64.c b/mupen64plus-core/src/device/r4300/new_dynarec/arm64/assem_arm64.c
+index 98dea54..1fc5f63 100644
+--- a/mupen64plus-core/src/device/r4300/new_dynarec/arm64/assem_arm64.c
++++ b/mupen64plus-core/src/device/r4300/new_dynarec/arm64/assem_arm64.c
+@@ -261,9 +261,16 @@ static uintptr_t jump_table_symbols[] = {
+   (intptr_t)breakpoint
+ };
+ 
++#if defined(__APPLE__)
++#include <libkern/OSCacheControl.h>
++#endif
++
+ static void cache_flush(char* start, char* end)
+ {
+-#ifndef WIN32
++#if defined(__APPLE__)
++    // OmniStation: the system call for it (callers pass the executable view).
++    sys_icache_invalidate(start, (size_t)(end - start));
++#elif !defined(WIN32)
+     // Don't rely on GCC's __clear_cache implementation, as it caches
+     // icache/dcache cache line sizes, that can vary between cores on
+     // big.LITTLE architectures.
+@@ -4666,5 +4673,5 @@ static void arch_init(void) {
+     ptr3+=2;
+   }
+ 
+-  __clear_cache((char *)base_addr+(1<<TARGET_SIZE_2)-JUMP_TABLE_SIZE,(char *)base_addr+(1<<TARGET_SIZE_2));
++  cache_flush((char *)base_addr_rx+(1<<TARGET_SIZE_2)-JUMP_TABLE_SIZE,(char *)base_addr_rx+(1<<TARGET_SIZE_2));
+ }
+diff --git a/mupen64plus-core/src/device/r4300/new_dynarec/arm64/assem_arm64.h b/mupen64plus-core/src/device/r4300/new_dynarec/arm64/assem_arm64.h
+index 79978d6..bf74bcf 100644
+--- a/mupen64plus-core/src/device/r4300/new_dynarec/arm64/assem_arm64.h
++++ b/mupen64plus-core/src/device/r4300/new_dynarec/arm64/assem_arm64.h
+@@ -4,7 +4,11 @@
+ #define HOST_REGS 29
+ #define HOST_CCREG 20 /* callee-save */
+ #define HOST_BTREG 19 /* callee-save */
++#if defined(__APPLE__)
++#define EXCLUDE_REG 18 /* OmniStation: x18 is the platform register on Apple (never allocated) */
++#else
+ #define EXCLUDE_REG 29 /* FP */
++#endif
+ 
+ //#define DISABLE_BLOCK_LINKING 1
+ #define NATIVE_64 1
+diff --git a/mupen64plus-core/src/device/r4300/new_dynarec/arm64/linkage_arm64.S b/mupen64plus-core/src/device/r4300/new_dynarec/arm64/linkage_arm64.S
+index c4e340d..1c1b0d1 100644
+--- a/mupen64plus-core/src/device/r4300/new_dynarec/arm64/linkage_arm64.S
++++ b/mupen64plus-core/src/device/r4300/new_dynarec/arm64/linkage_arm64.S
+@@ -18,6 +18,24 @@
+  *   51 Franklin Street, Fifth Floor, Boston, MA 02110-1301, USA.          *
+  * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * */
+ 
++#if defined(__APPLE__)
++/* OmniStation: Mach-O (iOS). C symbols carry a leading underscore, ";" starts a comment and
++   "%%" separates statements. */
++#define CSYM(name) _##name
++#define GLOBAL_FUNCTION(name)  \
++    .globl _##name %%          \
++    .private_extern _##name %% \
++    .p2align 2 %%              \
++    _##name
++
++#define LOCAL_FUNCTION(name)  \
++    .p2align 2 %%             \
++    name
++
++#define PAGE(sym) _##sym@PAGE
++#define PAGEOFF(sym) _##sym@PAGEOFF
++#else
++#define CSYM(name) name
+ #define GLOBAL_FUNCTION(name)  \
+     .globl name;               \
+     .hidden name;              \
+@@ -29,6 +47,10 @@
+     .type name, %function;    \
+     name
+ 
++#define PAGE(sym) sym
++#define PAGEOFF(sym) :lo12:sym
++#endif
++
+ #define GLOBAL_VARIABLE(name, size_) \
+     .global name;                    \
+     .hidden name;                    \
+@@ -57,132 +79,132 @@ fp_stop                = offsetof_struct_new_dynarec_hot_state_stop
+ TEXT_SECTION
+ 
+ GLOBAL_FUNCTION(jump_vaddr_x0):
+-    b      jump_vaddr
++    b      CSYM(jump_vaddr)
+ 
+ GLOBAL_FUNCTION(jump_vaddr_x1):
+     mov    w0, w1
+-    b      jump_vaddr
++    b      CSYM(jump_vaddr)
+ 
+ GLOBAL_FUNCTION(jump_vaddr_x2):
+     mov    w0, w2
+-    b      jump_vaddr
++    b      CSYM(jump_vaddr)
+ 
+ GLOBAL_FUNCTION(jump_vaddr_x3):
+     mov    w0, w3
+-    b      jump_vaddr
++    b      CSYM(jump_vaddr)
+ 
+ GLOBAL_FUNCTION(jump_vaddr_x4):
+     mov    w0, w4
+-    b      jump_vaddr
++    b      CSYM(jump_vaddr)
+ 
+ GLOBAL_FUNCTION(jump_vaddr_x5):
+     mov    w0, w5
+-    b      jump_vaddr
++    b      CSYM(jump_vaddr)
+ 
+ GLOBAL_FUNCTION(jump_vaddr_x6):
+     mov    w0, w6
+-    b      jump_vaddr
++    b      CSYM(jump_vaddr)
+ 
+ GLOBAL_FUNCTION(jump_vaddr_x8):
+     mov    w0, w8
+-    b      jump_vaddr
++    b      CSYM(jump_vaddr)
+ 
+ GLOBAL_FUNCTION(jump_vaddr_x9):
+     mov    w0, w9
+-    b      jump_vaddr
++    b      CSYM(jump_vaddr)
+ 
+ GLOBAL_FUNCTION(jump_vaddr_x10):
+     mov    w0, w10
+-    b      jump_vaddr
++    b      CSYM(jump_vaddr)
+ 
+ GLOBAL_FUNCTION(jump_vaddr_x11):
+     mov    w0, w11
+-    b      jump_vaddr
++    b      CSYM(jump_vaddr)
+ 
+ GLOBAL_FUNCTION(jump_vaddr_x12):
+     mov    w0, w12
+-    b      jump_vaddr
++    b      CSYM(jump_vaddr)
+ 
+ GLOBAL_FUNCTION(jump_vaddr_x13):
+     mov    w0, w13
+-    b      jump_vaddr
++    b      CSYM(jump_vaddr)
+ 
+ GLOBAL_FUNCTION(jump_vaddr_x14):
+     mov    w0, w14
+-    b      jump_vaddr
++    b      CSYM(jump_vaddr)
+ 
+ GLOBAL_FUNCTION(jump_vaddr_x15):
+     mov    w0, w15
+-    b      jump_vaddr
++    b      CSYM(jump_vaddr)
+ 
+ GLOBAL_FUNCTION(jump_vaddr_x16):
+     mov    w0, w16
+-    b      jump_vaddr
++    b      CSYM(jump_vaddr)
+ 
+ GLOBAL_FUNCTION(jump_vaddr_x17):
+     mov    w0, w17
+-    b      jump_vaddr
++    b      CSYM(jump_vaddr)
+ 
+ GLOBAL_FUNCTION(jump_vaddr_x19):
+     mov    w0, w19
+-    b      jump_vaddr
++    b      CSYM(jump_vaddr)
+ 
+ GLOBAL_FUNCTION(jump_vaddr_x21):
+     mov    w0, w21
+-    b      jump_vaddr
++    b      CSYM(jump_vaddr)
+ 
+ GLOBAL_FUNCTION(jump_vaddr_x22):
+     mov    w0, w22
+-    b      jump_vaddr
++    b      CSYM(jump_vaddr)
+ 
+ GLOBAL_FUNCTION(jump_vaddr_x23):
+     mov    w0, w23
+-    b      jump_vaddr
++    b      CSYM(jump_vaddr)
+ 
+ GLOBAL_FUNCTION(jump_vaddr_x24):
+     mov    w0, w24
+-    b      jump_vaddr
++    b      CSYM(jump_vaddr)
+ 
+ GLOBAL_FUNCTION(jump_vaddr_x25):
+     mov    w0, w25
+-    b      jump_vaddr
++    b      CSYM(jump_vaddr)
+ 
+ GLOBAL_FUNCTION(jump_vaddr_x26):
+     mov    w0, w26
+-    b      jump_vaddr
++    b      CSYM(jump_vaddr)
+ 
+ GLOBAL_FUNCTION(jump_vaddr_x27):
+     mov    w0, w27
+-    b      jump_vaddr
++    b      CSYM(jump_vaddr)
+ 
+ GLOBAL_FUNCTION(jump_vaddr_x28):
+     mov    w0, w28
+-    b      jump_vaddr
++    b      CSYM(jump_vaddr)
+ 
+ GLOBAL_FUNCTION(jump_vaddr_x7):
+     mov    w0, w7
+ 
+ GLOBAL_FUNCTION(jump_vaddr):
+-    bl     get_addr_ht
++    bl     CSYM(get_addr_ht)
+     br     x0
+ 
+ GLOBAL_FUNCTION(verify_code):
+     /* x0 = head */
+     mov    x21, x30 /* Save link register */
+-    bl     verify_dirty
++    bl     CSYM(verify_dirty)
+     tst    x0, x0
+-    b.ne   .D1
++    b.ne   L_D1
+     mov    x30, x21 /* Restore link register */
+     ret
+-.D1:
+-    bl     get_addr
++L_D1:
++    bl     CSYM(get_addr)
+     br     x0
+ 
+ GLOBAL_FUNCTION(cc_interrupt):
+     str    w20, [x29, #fp_cycle_count]
+     str    wzr, [x29, #fp_pending_exception]
+     mov    x20, x30 /* Save link register */
+-    bl     dynarec_gen_interrupt
++    bl     CSYM(dynarec_gen_interrupt)
+     mov    x30, x20 /* Restore link register */
+     ldr    w20, [x29, #fp_cycle_count]
+     ldr    w1, [x29, #fp_pending_exception]
+@@ -190,11 +212,11 @@ GLOBAL_FUNCTION(cc_interrupt):
+     tst    w2, w2
+     b.ne   new_dyna_stop
+     tst    w1, w1
+-    b.ne   .E1
++    b.ne   L_E1
+     ret
+-.E1:
++L_E1:
+     ldr    w0, [x29, #fp_pcaddr]
+-    bl     get_addr_ht
++    bl     CSYM(get_addr_ht)
+     br     x0
+ 
+ LOCAL_FUNCTION(new_dyna_stop):
+@@ -212,43 +234,43 @@ GLOBAL_FUNCTION(do_interrupt):
+     tst    w2, w2
+     b.ne   new_dyna_stop
+     ldr    w0, [x29, #fp_pcaddr]
+-    bl     get_addr_ht
++    bl     CSYM(get_addr_ht)
+     ldr    w20, [x29, #fp_cycle_count]
+     br     x0
+ 
+ GLOBAL_FUNCTION(fp_exception):
+     str    w0, [x29, #fp_pcaddr]
+-    bl     cop1_unusable
++    bl     CSYM(cop1_unusable)
+     br     x0
+ 
+ GLOBAL_FUNCTION(jump_syscall):
+     str    w0, [x29, #fp_pcaddr]
+-    bl     SYSCALL_new
++    bl     CSYM(SYSCALL_new)
+     br     x0
+ 
+ GLOBAL_FUNCTION(jump_eret):
+     str    w20, [x29, #fp_cycle_count]
+-    bl     ERET_new
++    bl     CSYM(ERET_new)
+     ldr    w20, [x29, #fp_cycle_count]
+     tst    w0, w0
+     b.eq   new_dyna_stop
+     br     x0
+ 
+ GLOBAL_FUNCTION(dyna_linker):
+-    bl     dynamic_linker
++    bl     CSYM(dynamic_linker)
+     br     x0
+ 
+ GLOBAL_FUNCTION(dyna_linker_ds):
+-    bl     dynamic_linker_ds
++    bl     CSYM(dynamic_linker_ds)
+     br     x0
+ 
+ GLOBAL_FUNCTION(new_dyna_start):
+-    adrp   x16, g_dev
+-    add    x16, x16, :lo12:g_dev
++    adrp   x16, PAGE(g_dev)
++    add    x16, x16, PAGEOFF(g_dev)
+     movl   x1, (device_r4300_new_dynarec_hot_state_dynarec_local + saved_context)
+     add    x16, x16, x1
+-    adrp   x1, base_addr_rx
+-    add    x1, x1, :lo12:base_addr_rx
++    adrp   x1, PAGE(base_addr_rx)
++    add    x1, x1, PAGEOFF(base_addr_rx)
+     mov    w0, #0xa4000000
+     stp    x19,x20,[x16,#0]
+     stp    x21,x22,[x16,#16]
+@@ -259,7 +281,7 @@ GLOBAL_FUNCTION(new_dyna_start):
+     sub    x29, x16, #saved_context
+     ldr    x19, [x1]
+     add    w0, w0, #0x40
+-    bl     new_recompile_block
++    bl     CSYM(new_recompile_block)
+     ldr    w20, [x29, #fp_cycle_count]
+     br     x19
+ 
+diff --git a/mupen64plus-core/src/device/r4300/new_dynarec/new_dynarec.c b/mupen64plus-core/src/device/r4300/new_dynarec/new_dynarec.c
+index 1e8f261..9cef469 100644
+--- a/mupen64plus-core/src/device/r4300/new_dynarec/new_dynarec.c
++++ b/mupen64plus-core/src/device/r4300/new_dynarec/new_dynarec.c
+@@ -63,6 +63,12 @@
+ #endif // HAVE_LIBNX
+ #endif
+ 
++#ifdef OMNI_EXEC_MEM
++/* libretro/libretro.c: RETRO_ENVIRONMENT_EXEC_MEM_ALLOC / _FREE (OmniStation's permanent JIT) */
++void *omni_exec_mem_alloc(size_t size, void **rw);
++void omni_exec_mem_free(void *rx);
++#endif
++
+ #if defined(RECOMPILER_DEBUG) && !defined(RECOMP_DBG)
+ void recomp_dbg_init(void);
+ void recomp_dbg_cleanup(void);
+@@ -8723,7 +8729,7 @@ void new_dynarec_init(void)
+ #define DOUBLE_CACHE_ADDR 3   // Put the dynarec cache at random address with RW address != RX address
+ 
+ // Default to fixed cache address
+-#ifdef HAVE_LIBNX
++#if defined(HAVE_LIBNX) || defined(OMNI_EXEC_MEM)
+ #define CACHE_ADDR DOUBLE_CACHE_ADDR
+ #else
+ #define CACHE_ADDR FIXED_CACHE_ADDR
+@@ -8733,6 +8739,18 @@ void new_dynarec_init(void)
+ #ifdef HAVE_LIBNX
+   base_addr = mmap((u_char *)jit_memory, 1<<TARGET_SIZE_2, 0,0,0,0);
+   base_addr_rx = (void*)jit_memory;
++#elif defined(OMNI_EXEC_MEM)
++  {
++    /* OmniStation: write through the RW view, run the RX one */
++    void *rw = NULL;
++    base_addr_rx = omni_exec_mem_alloc(1<<TARGET_SIZE_2, &rw);
++    base_addr = rw;
++    if (base_addr_rx == NULL || base_addr == NULL) {
++      DebugMessage(M64MSG_ERROR, "OmniStation: no executable memory for the dynarec");
++      abort();
++    }
++    DebugMessage(M64MSG_INFO, "OmniStation: dynarec in dual-mapped executable memory from the frontend");
++  }
+ #else
+   #include <unistd.h>
+   #include <sys/types.h>
+@@ -8842,6 +8860,9 @@ void new_dynarec_cleanup(void)
+ #if !defined(RECOMP_DBG)
+   #if defined(WIN32)
+     VirtualFree(base_addr, 0, MEM_RELEASE);
++  #elif NEW_DYNAREC == NEW_DYNAREC_ARM64 && defined(OMNI_EXEC_MEM)
++    omni_exec_mem_free(base_addr_rx);
++    base_addr = base_addr_rx = NULL;
+   #elif NEW_DYNAREC == NEW_DYNAREC_ARM64 && CACHE_ADDR!=FIXED_CACHE_ADDR
+     if (munmap (base_addr_rx, 1<<TARGET_SIZE_2) < 0) {DebugMessage(M64MSG_ERROR, "munmap() failed");}
+   #else
