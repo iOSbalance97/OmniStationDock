@@ -1,0 +1,179 @@
+diff --git a/core/build.h b/core/build.h
+index 6ea5355..9161149 100755
+--- a/core/build.h
++++ b/core/build.h
+@@ -63,6 +63,12 @@
+ #define FEAT_NO_RWX_PAGES
+ #endif
+ 
++// OmniStation: on iOS the JIT code goes in the frontend's permanent JIT region, in two views (RW and
++// RX) of the same pages, like on Switch.
++#if defined(TARGET_IPHONE) && defined(OMNI_EXEC_MEM)
++#define FEAT_NO_RWX_PAGES
++#endif
++
+ //defaults
+ 
+ #ifndef FEAT_SHREC
+diff --git a/core/hw/aica/dsp_arm64.cpp b/core/hw/aica/dsp_arm64.cpp
+index 357bd84..6736780 100644
+--- a/core/hw/aica/dsp_arm64.cpp
++++ b/core/hw/aica/dsp_arm64.cpp
+@@ -44,6 +44,10 @@ static ptrdiff_t rx_offset;
+ 
+ static void JITWriteProtect(bool enable)
+ {
++#ifdef FEAT_NO_RWX_PAGES
++    // OmniStation: RW and RX views, nothing to toggle.
++    return;
++#endif
+     if (enable)
+     	virtmem::region_set_exec(pCodeBuffer, CodeSize);
+     else
+@@ -447,7 +451,10 @@ void recInit()
+ 	bool rc = virtmem::prepare_jit_block(DynCode, CodeSize, (void**)&pCodeBuffer);
+ #endif
+ 	verify(rc);
+-#if defined(TARGET_IPHONE) || defined(TARGET_ARM_MAC)
++#if defined(TARGET_IPHONE) && defined(FEAT_NO_RWX_PAGES)
++	// OmniStation: runs from the RX view
++	DynCode = pCodeBuffer + rx_offset;
++#elif defined(TARGET_IPHONE) || defined(TARGET_ARM_MAC)
+ 	DynCode = pCodeBuffer;
+ #endif
+ }
+diff --git a/core/hw/arm7/arm7_rec_arm64.cpp b/core/hw/arm7/arm7_rec_arm64.cpp
+index 9492f6f..be7dcc5 100644
+--- a/core/hw/arm7/arm7_rec_arm64.cpp
++++ b/core/hw/arm7/arm7_rec_arm64.cpp
+@@ -46,6 +46,10 @@ static Arm64UnwindInfo unwinder;
+ #ifdef TARGET_IPHONE
+ static void JITWriteProtect(bool enable)
+ {
++#ifdef FEAT_NO_RWX_PAGES
++    // OmniStation: RW and RX views, nothing to toggle.
++    return;
++#endif
+     if (enable)
+     	virtmem::region_set_exec(recompiler::ICache, recompiler::ICacheSize);
+     else
+diff --git a/core/linux/posix_vmem.cpp b/core/linux/posix_vmem.cpp
+index 2d42410..9c9ef6c 100644
+--- a/core/linux/posix_vmem.cpp
++++ b/core/linux/posix_vmem.cpp
+@@ -286,6 +286,53 @@ void release_jit_block(void *code_area, size_t size)
+ 	munmap(code_area, size);
+ }
+ 
++#if defined(TARGET_IPHONE) && defined(OMNI_EXEC_MEM)
++} // namespace virtmem
++
++// OmniStation: executable memory from the frontend (RETRO_ENVIRONMENT_EXEC_MEM_ALLOC, as libretro's
++// Dolphin uses it on iOS). On iOS 26+ (TXM) the frontend keeps one region that a debugger prepared
++// once, in two views (RW and RX), so the JIT keeps working without a debugger.
++#define OMNI_ENVIRONMENT_EXEC_MEM_ALLOC 83
++#define OMNI_ENVIRONMENT_EXEC_MEM_FREE 84
++#define OMNI_EXEC_MEM_MODE_DUAL_MAP 4
++struct OmniExecMemAlloc { unsigned version; size_t size; unsigned mode; void *rx; void *rw; };
++struct OmniExecMemFree { void *rx; };
++extern bool (*environ_cb)(unsigned cmd, void *data); // shell/libretro/libretro.cpp
++
++bool omni_exec_mem_ready()
++{
++	OmniExecMemAlloc probe = { 2, 0, 0, nullptr, nullptr };
++	return environ_cb != nullptr && environ_cb(OMNI_ENVIRONMENT_EXEC_MEM_ALLOC, &probe)
++			&& probe.mode == OMNI_EXEC_MEM_MODE_DUAL_MAP;
++}
++
++namespace virtmem
++{
++
++bool prepare_jit_block(void *code_area, size_t size, void **code_area_rw, ptrdiff_t *rx_offset)
++{
++	// Version 2: kept across games. On Apple the emulator (and these blocks) live as long as the app.
++	OmniExecMemAlloc request = { 2, size, OMNI_EXEC_MEM_MODE_DUAL_MAP, nullptr, nullptr };
++	if (environ_cb == nullptr || !environ_cb(OMNI_ENVIRONMENT_EXEC_MEM_ALLOC, &request)
++			|| request.mode != OMNI_EXEC_MEM_MODE_DUAL_MAP || request.rx == nullptr || request.rw == nullptr)
++	{
++		ERROR_LOG(DYNAREC, "OmniStation: no executable memory from the frontend (%zu bytes)", size);
++		return false;
++	}
++	*code_area_rw = request.rw;
++	*rx_offset = (char *)request.rx - (char *)request.rw;
++	INFO_LOG(DYNAREC, "OmniStation: JIT with dual-mapped executable memory from the frontend, rx %p rw %p", request.rx, request.rw);
++	return true;
++}
++
++void release_jit_block(void *code_area1, void *code_area2, size_t size)
++{
++	// Callers pass the views in either order (or a null static one): the frontend takes RX or RW.
++	OmniExecMemFree request = { code_area2 != nullptr ? code_area2 : code_area1 };
++	if (environ_cb != nullptr && request.rx != nullptr)
++		environ_cb(OMNI_ENVIRONMENT_EXEC_MEM_FREE, &request);
++}
++#else
+ // Use two addr spaces: need to remap something twice, therefore use allocate_shared_filemem()
+ bool prepare_jit_block(void *code_area, size_t size, void **code_area_rw, ptrdiff_t *rx_offset)
+ {
+@@ -322,6 +369,7 @@ void release_jit_block(void *code_area1, void *code_area2, size_t size)
+ 	// keep code_area1 (RX) mapped since it's statically allocated
+ 	munmap(code_area2, size);
+ }
++#endif // TARGET_IPHONE && OMNI_EXEC_MEM
+ 
+ } // namespace virtmem
+ 
+diff --git a/core/rec-ARM64/rec_arm64.cpp b/core/rec-ARM64/rec_arm64.cpp
+index 426ddb4..ab2ca46 100644
+--- a/core/rec-ARM64/rec_arm64.cpp
++++ b/core/rec-ARM64/rec_arm64.cpp
+@@ -77,7 +77,10 @@ static DynaCode *writeStoreQueue64;
+ 
+ static void jitWriteProtect(Sh4CodeBuffer &codeBuffer, bool enable)
+ {
+-#ifdef TARGET_IPHONE
++#if defined(TARGET_IPHONE) && defined(FEAT_NO_RWX_PAGES)
++	// OmniStation: RW and RX views, nothing to toggle.
++	(void)codeBuffer; (void)enable;
++#elif defined(TARGET_IPHONE)
+     if (enable)
+     	virtmem::region_set_exec(codeBuffer.getBase(), codeBuffer.getSize());
+     else
+diff --git a/shell/libretro/libretro.cpp b/shell/libretro/libretro.cpp
+index a4444c9..56f37d6 100644
+--- a/shell/libretro/libretro.cpp
++++ b/shell/libretro/libretro.cpp
+@@ -413,6 +413,17 @@ void retro_init()
+ 	MapleConfigMap::UpdateVibration = updateVibration;
+ 	i18n::init();
+ 
++#if defined(TARGET_IPHONE) && defined(OMNI_EXEC_MEM)
++	// OmniStation: the emulator is set up once and kept (as on every Apple build), JIT blocks
++	// included: only with executable memory from the frontend (retro_load_game says why not).
++	extern bool omni_exec_mem_ready();
++	if (!emuInited && omni_exec_mem_ready())
++	{
++		emu.init();
++		emuInited = true;
++	}
++	return;
++#endif
+ #if defined(__APPLE__) || (defined(__GNUC__) && defined(__linux__) && !defined(__ANDROID__))
+ 	if (!emuInited)
+ #else
+@@ -2205,7 +2216,14 @@ static bool set_dx11_hw_render()
+ // Loading/unloading games
+ bool retro_load_game(const struct retro_game_info *game)
+ {
+-#if defined(IOS)
++#if defined(TARGET_IPHONE) && defined(OMNI_EXEC_MEM)
++	// OmniStation: the JIT only with executable memory from the frontend (permanent JIT).
++	extern bool omni_exec_mem_ready();
++	if (!omni_exec_mem_ready()) {
++		os_notify(i18n::T("Cannot run without JIT"), 5000);
++		return false;
++	}
++#elif defined(IOS)
+ 	bool can_jit;
+ 	if (environ_cb(RETRO_ENVIRONMENT_GET_JIT_CAPABLE, &can_jit) && !can_jit) {
+ 		// jit is required both for performance and for audio. trying to run
