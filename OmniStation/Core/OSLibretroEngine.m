@@ -3776,6 +3776,15 @@ typedef NS_ENUM(NSInteger, OSLRMenuAction) {
             }
         }
     }
+    // Si el depurador sigue enganchado (se salió antes de soltarlo), se suelta antes de cerrar:
+    // con él puesto, el cierre del núcleo pasa por StikDebug y la VPN y tarda muchísimo.
+    if (OSLRUsesJITScript() && OSLRIsTraced()) {
+        OSLRTrace(@"salir: se suelta el depurador antes de cerrar", NO);
+        OSLRInstallTrapGuard(YES);
+        OSLRUniversalDetach();
+        void (^released)(void) = self.debuggerReleasedHandler;
+        if (released) dispatch_async(dispatch_get_main_queue(), released);
+    }
     OSLRTrace(@"salir: guardar partida", NO);
     [self writeSaveRAMIfChanged:lastSave];
     // Como RetroArch: primero se avisa al núcleo de que se va el contexto y luego se cierra el juego.
