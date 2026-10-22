@@ -1,0 +1,76 @@
+diff --git a/src/libretro/config/config.cpp b/src/libretro/config/config.cpp
+index 641ce91..f36cf90 100644
+--- a/src/libretro/config/config.cpp
++++ b/src/libretro/config/config.cpp
+@@ -49,6 +49,56 @@
+ #include <SPI.h>
+ #include <SPI_Firmware.h>
+ #include <FreeBIOS.h>
++
++#if defined(__APPLE__)
++#include <TargetConditionals.h>
++#endif
++#if defined(HAVE_JIT) && defined(__APPLE__) && TARGET_OS_IPHONE
++#include <ARMJIT_Global.h>
++
++// OmniStation: JIT memory from the frontend (RETRO_ENVIRONMENT_EXEC_MEM_ALLOC, as libretro's
++// Dolphin uses it on iOS). On iOS 26+ (TXM) the frontend keeps one region that a debugger
++// prepared once, so the JIT keeps working without a debugger.
++namespace {
++    constexpr unsigned OMNI_EXEC_MEM_ALLOC = 83;
++    constexpr unsigned OMNI_EXEC_MEM_FREE = 84;
++    constexpr unsigned OMNI_MODE_UNRESTRICTED = 1;
++    constexpr unsigned OMNI_MODE_DUAL_MAP = 4;
++    struct OmniExecMemAlloc { unsigned version; size_t size; unsigned mode; void* rx; void* rw; };
++    struct OmniExecMemFree { void* rx; };
++
++    void* OmniExecAlloc(size_t size, void** rw) {
++        OmniExecMemAlloc request {1, size, OMNI_MODE_DUAL_MAP, nullptr, nullptr};
++        *rw = nullptr;
++        if (!retro::environment(OMNI_EXEC_MEM_ALLOC, &request) || request.mode != OMNI_MODE_DUAL_MAP ||
++            !request.rx || !request.rw)
++            return nullptr;
++        *rw = request.rw;
++        return request.rx;
++    }
++
++    void OmniExecFree(void* rx) {
++        OmniExecMemFree request {rx};
++        retro::environment(OMNI_EXEC_MEM_FREE, &request);
++    }
++
++    bool OmniSetupJitMemory() {
++        OmniExecMemAlloc probe {1, 0, 0, nullptr, nullptr};
++        const bool answered = retro::environment(OMNI_EXEC_MEM_ALLOC, &probe);
++        if (answered && probe.mode == OMNI_MODE_DUAL_MAP) {
++            melonDS::ARMJIT_Global::SetCodeMemoryProvider(OmniExecAlloc, OmniExecFree);
++            retro::info("JIT: dual-mapped executable memory from the frontend");
++            return true;
++        }
++        melonDS::ARMJIT_Global::SetCodeMemoryProvider(nullptr, nullptr);
++        // Before TXM the debugger's JIT lets the core map its own memory.
++        bool capable = false;
++        if (answered)
++            return probe.mode == OMNI_MODE_UNRESTRICTED;
++        return retro::environment(74 /* RETRO_ENVIRONMENT_GET_JIT_CAPABLE */, &capable) && capable;
++    }
++}
++#endif
+ #include <file/config_file.h>
+ #include <Net_PCap.h>
+ 
+@@ -409,6 +459,14 @@ static void MelonDsDs::config::ParseJitOptions(CoreConfig& config) noexcept {
+         config.SetJitEnable(true);
+     }
+ 
++#if defined(__APPLE__) && TARGET_OS_IPHONE
++    // OmniStation: on iOS the JIT needs executable memory from the frontend.
++    if (config.JitEnable() && !OmniSetupJitMemory()) {
++        retro::warn("No executable memory from the frontend; the JIT is disabled");
++        config.SetJitEnable(false);
++    }
++#endif
++
+     if (optional<unsigned> value = ParseIntegerInRange(get_variable(cpu::JIT_BLOCK_SIZE), 1, 32)) {
+         config.SetMaxBlockSize(*value);
+     } else {
