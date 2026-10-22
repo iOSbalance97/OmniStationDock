@@ -142,13 +142,17 @@ enum RetroSystem: String, CaseIterable, Identifiable {
                     RetroCore(id: "pcsx_rearmed", name: "PCSX ReARMed (ManicEMU)", framework: "pcsx.rearmed.libretro.framework", jit: false),
                     RetroCore(id: "beetle_psx_hw", name: "Beetle PSX HW", framework: "mednafen.psx.hw.libretro.framework", jit: true, gpu: true)]
         case .n64:
-            return [RetroCore(id: "mupen64plus_next", name: "Mupen64Plus-Next", framework: "mupen64plus.next.libretro.framework", jit: true, gpu: true)]
+            // El nuestro, con dynarec (JIT permanente); el de ManicEMU va sin dynarec.
+            return [RetroCore(id: "mupen64plus_next_omni", name: "Mupen64Plus-Next", framework: "mupen64plus_next_omni.libretro.framework", jit: true, gpu: true, execMem: true),
+                    RetroCore(id: "mupen64plus_next", name: "Mupen64Plus-Next (ManicEMU)", framework: "mupen64plus.next.libretro.framework", jit: true, gpu: true)]
         case .psp:
             // El compilado por OmniStation (JIT permanente) primero; el de ManicEMU, si el nuestro no está.
             return [RetroCore(id: "ppsspp_omni", name: "PPSSPP", framework: "ppsspp_omni.libretro.framework", jit: true, gpu: true, execMem: true),
                     RetroCore(id: "ppsspp", name: "PPSSPP (ManicEMU)", framework: "ppsspp.libretro.framework", jit: true, gpu: true)]
         case .dc:
-            return [RetroCore(id: "flycast", name: "Flycast (JIT)", framework: "flycast.libretro.framework", jit: true, requiresJIT: true, gpu: true),
+            // El nuestro (JIT permanente) primero; sin JIT se usa el de ManicEMU sin JIT.
+            return [RetroCore(id: "flycast_omni", name: "Flycast", framework: "flycast_omni.libretro.framework", jit: true, requiresJIT: true, gpu: true, execMem: true),
+                    RetroCore(id: "flycast", name: "Flycast (JIT, ManicEMU)", framework: "flycast.libretro.framework", jit: true, requiresJIT: true, gpu: true),
                     RetroCore(id: "flycast_jitless", name: "Flycast (sin JIT)", framework: "flycast-jitless.libretro.framework", jit: false, gpu: true)]
         case .n3ds:
             // El compilado por OmniStation (JIT permanente) primero; el de ManicEMU, si el nuestro no está.
@@ -525,7 +529,8 @@ enum RetroConfig {
         case "beetle_psx_hw":
             coreOptions["beetle_psx_hw_cpu_dynarec"] = useJIT ? "execute" : "disabled"
             coreOptions["beetle_psx_hw_renderer"] = "hardware_gl"
-        case "mupen64plus_next":
+        case "mupen64plus_next", "mupen64plus_next_omni":
+            // El nuestro además mira si OmniStation le da memoria de JIT (si no, intérprete con caché).
             coreOptions["mupen64plus-cpucore"] = useJIT ? "dynamic_recompiler" : "cached_interpreter"
             coreOptions["mupen64plus-rdp-plugin"] = "gliden64"
         case "ppsspp", "ppsspp_omni":
@@ -533,7 +538,7 @@ enum RetroConfig {
             coreOptions["ppsspp_backend"] = "opengl"
             coreOptions["ppsspp_cpu_core"] = useJIT ? "JIT" : "IR JIT"
             coreOptions["ppsspp_software_rendering_jit"] = useJIT ? "enabled" : "disabled"
-        case "flycast", "flycast_jitless":
+        case "flycast", "flycast_jitless", "flycast_omni":
             let jitless: Bool = core.id == "flycast_jitless"
             coreOptions["reicast_threaded_rendering"] = jitless ? "disabled" : "enabled"
             coreOptions["reicast_dynamic_cpu_ratio"] = "disabled"

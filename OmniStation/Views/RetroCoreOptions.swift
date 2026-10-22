@@ -116,7 +116,7 @@ enum RetroCoreOptions {
                     CuratedOption(key: "beetle_psx_hw_cpu_freq_scale", tab: s, title: "Velocidad de la CPU"),
                     CuratedOption(key: "beetle_psx_hw_override_bios", tab: s, title: "Usar otra BIOS"),
                     CuratedOption(key: "beetle_psx_hw_analog_toggle", tab: i, title: "Modo analógico (DualShock)")]
-        case "mupen64plus_next":
+        case "mupen64plus_next", "mupen64plus_next_omni":
             return [CuratedOption(key: "mupen64plus-EnableNativeResFactor", tab: g, title: "Resolución interna", detail: "Veces la resolución de la N64."),
                     CuratedOption(key: "mupen64plus-aspect", tab: g, title: "Proporción"),
                     CuratedOption(key: "mupen64plus-BilinearMode", tab: g, title: "Filtro bilineal"),
@@ -138,7 +138,7 @@ enum RetroCoreOptions {
                     CuratedOption(key: "ppsspp_language", tab: s, title: "Idioma de la consola"),
                     CuratedOption(key: "ppsspp_cheats", tab: s, title: "Trucos"),
                     CuratedOption(key: "ppsspp_button_preference", tab: i, title: "Botón para aceptar", detail: "✕ (Europa/América) o ○ (Japón).")]
-        case "flycast", "flycast_jitless":
+        case "flycast", "flycast_jitless", "flycast_omni":
             return [CuratedOption(key: "reicast_internal_resolution", tab: g, title: "Resolución interna"),
                     CuratedOption(key: "reicast_widescreen_hack", tab: g, title: "Pantalla panorámica (truco)"),
                     CuratedOption(key: "reicast_widescreen_cheats", tab: g, title: "Panorámica por trucos"),
