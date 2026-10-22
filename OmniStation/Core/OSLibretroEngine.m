@@ -1837,7 +1837,11 @@ static bool OSLREnvironment(unsigned command, void *data) {
                 return request->size == 0;
             }
             request->mode = OSLR_EXEC_MEM_MODE_DUAL_MAP;
-            if (request->size == 0) return true;
+            if (request->size == 0) {
+                // Flycast (versión 2) ya tiene sus bloques de otra partida: esta también va con JIT.
+                if (request->version == 2) atomic_store(&gJITPoolGiven, true);
+                return true;
+            }
             void *rx = OSLRJITPoolAllocate(request->size);
             // Los bloques pequeños (sombreadores de 3DS) son muchos: solo se apuntan los primeros.
             if (rx == NULL || request->size >= (size_t)1024 * 1024 || atomic_fetch_add(&gJITSmallLogged, 1) < 3)
@@ -1846,6 +1850,9 @@ static bool OSLREnvironment(unsigned command, void *data) {
             request->rx = rx;
             request->rw = (uint8_t *)rx + gJITPoolDiff;
             atomic_store(&gJITPoolGiven, true);
+            // Versión 2 (Flycast): el núcleo se queda el bloque para toda la vida de la app (prepara
+            // su emulador una sola vez y no lo cierra al salir del juego): no se recoge al acabar.
+            if (request->version == 2) return true;
             // Puede llegar desde cualquier hilo del núcleo (CPU, sombreadores).
             @synchronized (gJITSessionBlocks) { [gJITSessionBlocks addObject:[NSValue valueWithPointer:rx]]; }
             return true;
@@ -1854,7 +1861,9 @@ static bool OSLREnvironment(unsigned command, void *data) {
             const struct OSLRExecMemFree *request = data;
             if (request == NULL) return false;
             uint8_t *rx = request->rx;
-            if (rx != NULL && gJITPoolRX != NULL && rx >= gJITPoolRX + gJITPoolDiff) rx -= gJITPoolDiff;
+            // Vale también el puntero RW (la vista RW puede quedar por debajo o por encima de la RX).
+            if (rx != NULL && gJITPoolRX != NULL && rx >= gJITPoolRX + gJITPoolDiff &&
+                rx < gJITPoolRX + gJITPoolDiff + kOSLRJITPoolSize) rx -= gJITPoolDiff;
             @synchronized (gJITSessionBlocks) { [gJITSessionBlocks removeObject:[NSValue valueWithPointer:rx]]; }
             return OSLRJITPoolFree(rx);
         }
