@@ -2,8 +2,8 @@ name: Build libretro cores (OmniStation)
 
 # Compila núcleos libretro desde su código (Cores/Libretro/sources.json) y los publica como release
 # «libretro-cores» de este repositorio. El workflow de la app los descarga de ahí (no los vuelve a
-# compilar). De momento: Dolphin (GameCube/Wii), Azahar (3DS), melonDS DS (NDS) y PCSX ReARMed
-# (PS1), que piden su memoria de JIT a OmniStation y usan el JIT permanente. Tarda bastante (30-90 min de Mac): lánzalo solo cuando
+# compilar). De momento: Dolphin (GameCube/Wii), Azahar (3DS), melonDS DS (NDS), PCSX ReARMed
+# (PS1) y PPSSPP (PSP), que piden su memoria de JIT a OmniStation y usan el JIT permanente. Tarda bastante (30-90 min de Mac): lánzalo solo cuando
 # quieras un núcleo nuevo. Cada núcleo se compila aparte; la release guarda todos.
 on:
   workflow_dispatch:
@@ -16,7 +16,8 @@ on:
           - azahar
           - melondsds
           - pcsx_rearmed
-        default: melondsds
+          - ppsspp
+        default: ppsspp
 
 permissions:
   contents: write
