@@ -15,6 +15,23 @@ index 6ea5355..9161149 100755
  //defaults
  
  #ifndef FEAT_SHREC
+diff --git a/core/emulator.cpp b/core/emulator.cpp
+index e913f61..aed0b28 100644
+--- a/core/emulator.cpp
++++ b/core/emulator.cpp
+@@ -795,7 +795,12 @@ void Emulator::term()
+ 		libGDR_term();
+ 		ice::term();
+ 
++#if defined(TARGET_IPHONE) && defined(OMNI_EXEC_MEM)
++		// OmniStation: set up again for the next game (retro_init calls init() each time).
++		state = Uninitialized;
++#else
+ 		state = Terminated;
++#endif
+ 	}
+ 	addrspace::release();
+ }
 diff --git a/core/hw/aica/dsp_arm64.cpp b/core/hw/aica/dsp_arm64.cpp
 index 357bd84..6736780 100644
 --- a/core/hw/aica/dsp_arm64.cpp
@@ -58,7 +75,7 @@ index 9492f6f..be7dcc5 100644
      	virtmem::region_set_exec(recompiler::ICache, recompiler::ICacheSize);
      else
 diff --git a/core/linux/posix_vmem.cpp b/core/linux/posix_vmem.cpp
-index 2d42410..9466b31 100644
+index 2d42410..7e3d76b 100644
 --- a/core/linux/posix_vmem.cpp
 +++ b/core/linux/posix_vmem.cpp
 @@ -286,6 +286,53 @@ void release_jit_block(void *code_area, size_t size)
@@ -80,7 +97,7 @@ index 2d42410..9466b31 100644
 +
 +bool omni_exec_mem_ready()
 +{
-+	OmniExecMemAlloc probe = { 2, 0, 0, nullptr, nullptr };
++	OmniExecMemAlloc probe = { 1, 0, 0, nullptr, nullptr };
 +	return environ_cb != nullptr && environ_cb(OMNI_ENVIRONMENT_EXEC_MEM_ALLOC, &probe)
 +			&& probe.mode == OMNI_EXEC_MEM_MODE_DUAL_MAP;
 +}
@@ -90,8 +107,8 @@ index 2d42410..9466b31 100644
 +
 +bool prepare_jit_block(void *code_area, size_t size, void **code_area_rw, ptrdiff_t *rx_offset)
 +{
-+	// Version 2: kept across games. On Apple the emulator (and these blocks) live as long as the app.
-+	OmniExecMemAlloc request = { 2, size, OMNI_EXEC_MEM_MODE_DUAL_MAP, nullptr, nullptr };
++	// Version 1: the frontend takes back whatever is left at the end of each game.
++	OmniExecMemAlloc request = { 1, size, OMNI_EXEC_MEM_MODE_DUAL_MAP, nullptr, nullptr };
 +	if (environ_cb == nullptr || !environ_cb(OMNI_ENVIRONMENT_EXEC_MEM_ALLOC, &request)
 +			|| request.mode != OMNI_EXEC_MEM_MODE_DUAL_MAP || request.rx == nullptr || request.rw == nullptr)
 +	{
@@ -140,28 +157,41 @@ index 426ddb4..ab2ca46 100644
      	virtmem::region_set_exec(codeBuffer.getBase(), codeBuffer.getSize());
      else
 diff --git a/shell/libretro/libretro.cpp b/shell/libretro/libretro.cpp
-index a4444c9..56f37d6 100644
+index a4444c9..67104d4 100644
 --- a/shell/libretro/libretro.cpp
 +++ b/shell/libretro/libretro.cpp
-@@ -413,6 +413,17 @@ void retro_init()
+@@ -413,6 +413,16 @@ void retro_init()
  	MapleConfigMap::UpdateVibration = updateVibration;
  	i18n::init();
  
 +#if defined(TARGET_IPHONE) && defined(OMNI_EXEC_MEM)
-+	// OmniStation: the emulator is set up once and kept (as on every Apple build), JIT blocks
-+	// included: only with executable memory from the frontend (retro_load_game says why not).
++	// OmniStation: set up for each game and torn down in retro_deinit (as on Android), so that
++	// between Dreamcast games it keeps no memory, JIT blocks or address space while other cores
++	// run. Only with executable memory from the frontend (retro_load_game says why not).
 +	extern bool omni_exec_mem_ready();
-+	if (!emuInited && omni_exec_mem_ready())
-+	{
++	(void)emuInited;
++	if (omni_exec_mem_ready())
 +		emu.init();
-+		emuInited = true;
-+	}
 +	return;
 +#endif
  #if defined(__APPLE__) || (defined(__GNUC__) && defined(__linux__) && !defined(__ANDROID__))
  	if (!emuInited)
  #else
-@@ -2205,7 +2216,14 @@ static bool set_dx11_hw_render()
+@@ -435,7 +445,12 @@ void retro_deinit()
+ 	}
+ 	os_UninstallFaultHandler();
+ 	
+-#if defined(__APPLE__) || (defined(__GNUC__) && defined(__linux__) && !defined(__ANDROID__))
++#if defined(TARGET_IPHONE) && defined(OMNI_EXEC_MEM)
++	// OmniStation: everything goes (emulator, recompilers and their JIT blocks, address space).
++	// Releasing only the address space and keeping the emulator, as Apple builds do, left the
++	// recompiler pointing at addresses that another core could take before the next game.
++	emu.term();
++#elif defined(__APPLE__) || (defined(__GNUC__) && defined(__linux__) && !defined(__ANDROID__))
+ 	addrspace::release();
+ #else
+ 	emu.term();
+@@ -2205,7 +2220,14 @@ static bool set_dx11_hw_render()
  // Loading/unloading games
  bool retro_load_game(const struct retro_game_info *game)
  {
