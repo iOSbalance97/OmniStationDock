@@ -145,7 +145,9 @@ enum RetroSystem: String, CaseIterable, Identifiable {
             return [RetroCore(id: "flycast", name: "Flycast (JIT)", framework: "flycast.libretro.framework", jit: true, requiresJIT: true, gpu: true),
                     RetroCore(id: "flycast_jitless", name: "Flycast (sin JIT)", framework: "flycast-jitless.libretro.framework", jit: false, gpu: true)]
         case .n3ds:
-            return [RetroCore(id: "azahar", name: "Azahar", framework: "azahar.libretro.framework", jit: true, gpu: true, vulkan: true)]
+            // El compilado por OmniStation (JIT permanente) primero; el de ManicEMU, si el nuestro no está.
+            return [RetroCore(id: "azahar_omni", name: "Azahar", framework: "azahar_omni.libretro.framework", jit: true, gpu: true, vulkan: true, execMem: true),
+                    RetroCore(id: "azahar", name: "Azahar (ManicEMU)", framework: "azahar.libretro.framework", jit: true, gpu: true, vulkan: true)]
         case .gc, .wii:
             // El compilado por OmniStation (Dolphin de libretro, con JIT permanente).
             return [RetroCore(id: "dolphin_omni", name: "Dolphin", framework: "dolphin_omni.libretro.framework", jit: true, gpu: true, vulkan: true, execMem: true)]
@@ -465,7 +467,8 @@ enum RetroConfig {
             coreOptions["reicast_dynamic_cpu_ratio"] = "disabled"
             coreOptions["reicast_sh4clock"] = jitless ? "300" : "200"
             if !RetroFolders.hasDreamcastBIOS() { coreOptions["reicast_hle_bios"] = "enabled" }
-        case "azahar":
+        case "azahar", "azahar_omni":
+            // El nuestro además mira si OmniStation le da memoria de JIT (si no, intérprete).
             coreOptions["citra_use_cpu_jit"] = useJIT ? "enabled" : "disabled"
             coreOptions["citra_use_shader_jit"] = useJIT ? "enabled" : "disabled"
             coreOptions["citra_input_type"] = "frontend"
@@ -492,6 +495,66 @@ enum RetroConfig {
 
 /// El depurador que OmniStation se pide a sí misma para el JIT de un núcleo libretro: se suelta
 /// al salir del juego.
+/// JIT permanente: se prepara una vez al abrir la app (durante la bienvenida) y vale toda la
+/// sesión para los núcleos que lo usan (Dolphin), aunque luego se vaya la VPN o el depurador.
+/// - SideStore: se engancha el depurador un momento con la extensión de JIT (hace falta la VPN:
+///   wifi o modo avión), se prepara el bloque y se suelta.
+/// - LiveContainer: si la app se abrió con JIT (StikDebug), se prepara con ese depurador y se suelta.
+final class PermanentJIT {
+    static let shared = PermanentJIT()
+    private(set) var busy: Bool = false
+    private var triedAt: Date = .distantPast
+
+    /// ¿Hace falta? (hay algún núcleo que lo use y aún no está preparado)
+    var wanted: Bool {
+        !OSLibretroEngine.persistentJITReady && RetroSystem.allCases.contains { $0.availableCores.contains(where: \.execMem) }
+    }
+
+    /// Lo intenta (en el hilo principal). `completion(listo)`; si ya estaba, enseguida.
+    func prepare(force: Bool = false, completion: @escaping (Bool) -> Void) {
+        if OSLibretroEngine.persistentJITReady { completion(true); return }
+        guard wanted, !busy, force || Date().timeIntervalSince(triedAt) > 20,
+              !OSLibretroEngine.shared.busy, !OSArmsx2Engine.shared.busy, !OSMeloNXEngine.shared.busy else {
+            completion(false)
+            return
+        }
+        triedAt = Date()
+        if DebugSupport.isInsideLiveContainer {
+            // Solo con el depurador de StikDebug enganchado al abrir la app (y no el de otra partida).
+            guard OSLibretroEngine.jitActive, RetroJIT.fresh else { completion(false); return }
+            let ready: Bool = OSLibretroEngine.preparePersistentJIT()
+            // Se suelta después (como en SideStore): con él puesto, los núcleos de ManicEMU no
+            // preparaban bien su propia memoria. Cada uno lo vuelve a pedir en su partida.
+            DispatchQueue.global(qos: .userInitiated).async {
+                OSLibretroEngine.detachJITDebugger()
+            }
+            completion(ready)
+            return
+        }
+        let language: String = L10n.resolve(UserDefaults.standard.string(forKey: "appLanguage") ?? "system")
+        guard OSArmsx2Engine.helperBundled, BuiltInJIT.preflightProblem(lang: language) == nil,
+              let pairing = PairingFile.data() else {
+            completion(false)
+            return
+        }
+        busy = true
+        OSMeloNXEngine.shared.prepareSharedJIT(withPairing: pairing, progress: nil) { success, _ in
+            self.busy = false
+            guard success else { completion(false); return }
+            let ready: Bool = OSLibretroEngine.preparePersistentJIT()
+            // Listo o no, el depurador se suelta y se cierra la extensión (no se queda nada enganchado).
+            DispatchQueue.global(qos: .userInitiated).async {
+                OSLibretroEngine.detachJITDebugger()
+            }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) {
+                OSMeloNXEngine.shared.releaseSharedJIT()
+            }
+            RetroJIT.holding = false
+            completion(ready)
+        }
+    }
+}
+
 enum RetroJIT {
     static var holding: Bool = false
     /// El depurador enganchado ahora sirve para los núcleos libretro: se enganchó para ellos (o con

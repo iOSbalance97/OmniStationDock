@@ -138,7 +138,6 @@ struct HomeView: View {
     // Ajustes (se guardan en el dispositivo).
     @AppStorage("favoriteGames") private var favoritesRaw = ""
     @AppStorage("compactGrid") private var compactGrid = false
-    @AppStorage("showWelcome") private var showWelcome = true
     @AppStorage("hapticsEnabled") private var hapticsEnabled = true
     @AppStorage("clickSound") private var clickSound = true
     @AppStorage("keepLandscape") private var keepLandscape = false
@@ -203,9 +202,6 @@ struct HomeView: View {
     /// Pantalla de transición mientras se prepara el JIT (juego que se va a abrir y lo que pasa ahora).
     @State private var jitTransitionGame: String?
     @State private var jitTransitionDetail: String = ""
-    /// Preparación del JIT permanente al abrir la app (SideStore).
-    @State private var permanentJITBusy: Bool = false
-    @State private var permanentJITTriedAt: Date = .distantPast
     /// Último aviso de poca memoria (si se vuelve a pulsar Jugar enseguida, se juega igualmente).
     @State private var lowMemoryWarnedAt: Date = .distantPast
     @AppStorage("retroTouchAlways") private var retroTouchAlways = false
@@ -811,39 +807,19 @@ struct HomeView: View {
         }
     }
 
-    /// SideStore: el JIT permanente se prepara al abrir la app (o al volver a ella), mientras la VPN
-    /// funciona (wifi o modo avión). Se engancha el depurador un momento, se prepara el bloque y se
-    /// suelta: desde entonces Dolphin tiene JIT toda la sesión aunque luego solo haya datos móviles.
+    /// Al volver a la app, si el JIT permanente aún no está (la VPN no iba al abrirla), se intenta
+    /// otra vez (como mucho cada 20 s). Al abrirla se prepara durante la bienvenida.
     private func schedulePermanentJIT() {
-        guard !DebugSupport.isInsideLiveContainer, !OSLibretroEngine.persistentJITReady, !permanentJITBusy,
-              Date().timeIntervalSince(permanentJITTriedAt) > 20,
-              RetroSystem.allCases.contains(where: { $0.availableCores.contains(where: \.execMem) }) else { return }
+        guard PermanentJIT.shared.wanted else { return }
         // Un poco después, cuando la app ya está quieta (el enganche la para un instante).
         DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) {
-            preparePermanentJITNow()
-        }
-    }
-
-    private func preparePermanentJITNow() {
-        guard UIApplication.shared.applicationState == .active, !permanentJITBusy, !OSLibretroEngine.persistentJITReady,
-              !OSLibretroEngine.shared.busy, !OSArmsx2Engine.shared.busy, !OSMeloNXEngine.shared.busy,
-              canAskSelfJIT, let pairing = PairingFile.data() else { return }
-        permanentJITBusy = true
-        permanentJITTriedAt = Date()
-        OSMeloNXEngine.shared.prepareSharedJIT(withPairing: pairing, progress: nil) { success, _ in
-            defer { permanentJITBusy = false }
-            guard success else { return }
-            let ready: Bool = OSLibretroEngine.preparePersistentJIT()
-            // Listo o no, el depurador se suelta y se cierra la extensión (no se queda nada enganchado).
-            DispatchQueue.global(qos: .userInitiated).async {
-                OSLibretroEngine.detachJITDebugger()
+            guard UIApplication.shared.applicationState == .active else { return }
+            PermanentJIT.shared.prepare { ready in
+                if ready {
+                    showToast(tr("JIT permanente listo"), seconds: 2.5)
+                    emulatorRevision += 1
+                }
             }
-            DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) {
-                OSMeloNXEngine.shared.releaseSharedJIT()
-            }
-            RetroJIT.holding = false
-            showToast(ready ? tr("JIT permanente listo") : permanentJITText, seconds: ready ? 2.5 : 5)
-            emulatorRevision += 1
         }
     }
 
@@ -5070,7 +5046,6 @@ struct HomeView: View {
             sheet = .platformManager
         }))
         items.append(toggleSetting("grid", tr("Cuadrícula completa"), tr("Más juegos por pantalla"), "square.grid.3x3.fill", Color.cyan, $compactGrid))
-        items.append(toggleSetting("welcome", tr("Bienvenida animada"), tr("Pantalla de inicio al abrir"), "sparkles", SettingTint.periwinkle, $showWelcome))
         return SettingGroup(id: "appearance", title: tr("Apariencia"), items: items)
     }
 

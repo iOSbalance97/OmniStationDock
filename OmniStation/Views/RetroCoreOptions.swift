@@ -151,7 +151,7 @@ enum RetroCoreOptions {
                     CuratedOption(key: "reicast_frame_skipping", tab: s, title: "Saltar fotogramas"),
                     CuratedOption(key: "reicast_boot_to_bios", tab: s, title: "Arrancar en la BIOS"),
                     CuratedOption(key: "reicast_enable_dsp", tab: a, title: "DSP de sonido", detail: "Efectos de sonido más fieles; gasta más.")]
-        case "azahar":
+        case "azahar", "azahar_omni":
             return [CuratedOption(key: "citra_resolution_factor", tab: g, title: "Resolución interna"),
                     CuratedOption(key: "citra_texture_filter", tab: g, title: "Filtro de texturas"),
                     CuratedOption(key: "citra_texture_sampling", tab: g, title: "Muestreo de texturas"),

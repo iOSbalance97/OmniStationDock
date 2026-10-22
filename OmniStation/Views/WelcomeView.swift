@@ -33,11 +33,9 @@ struct WelcomeView: View {
         static var finish: Double { progressEnd + 1.0 }
     }
 
-    init() {
-        // Si el ajuste «Bienvenida animada» está desactivado, se entra directo a la pantalla principal.
-        let showWelcome = UserDefaults.standard.object(forKey: "showWelcome") as? Bool ?? true
-        _showHome = State(initialValue: !showWelcome)
-    }
+    /// El JIT permanente se prepara mientras dura la bienvenida (siempre se ve: es cuando se
+    /// prepara). Al acabar la animación se espera a que termine, como mucho unos segundos.
+    @State private var jitDone = false
 
     var body: some View {
         ZStack {
@@ -51,8 +49,17 @@ struct WelcomeView: View {
         .task {
             guard !showHome, start == nil else { return }
             start = Date()
+            // Primero un instante de animación (el enganche del depurador para la app un momento).
+            try? await Task.sleep(nanoseconds: 400_000_000)
+            PermanentJIT.shared.prepare(force: true) { _ in jitDone = true }
             let total: Double = reduceMotion ? 2.2 : Script.finish
-            try? await Task.sleep(nanoseconds: UInt64(total * 1_000_000_000))
+            try? await Task.sleep(nanoseconds: UInt64(max(0, total - 0.4) * 1_000_000_000))
+            // Si aún se está preparando, se espera un poco más (sin VPN falla enseguida).
+            var waited: Double = 0
+            while !jitDone && waited < 8 {
+                try? await Task.sleep(nanoseconds: 200_000_000)
+                waited += 0.2
+            }
             guard !Task.isCancelled else { return }
             withAnimation(.easeInOut(duration: 0.5)) { showHome = true }
         }
