@@ -89,6 +89,11 @@ typedef struct NeoARMSX2API {
   int (*set_shader_preset)(const char* stable_token, char* error, size_t capacity);
   int (*set_performance_overlay)(uint32_t preset, char* error, size_t capacity);
   int (*install_shader_pack)(const char* archive_path, char* error, size_t capacity);
+
+  // OmniStation (after install_shader_pack; a core without it has a smaller `size`):
+  // executable memory from the host's permanent JIT region. Set it before prepare(); then
+  // prepare() needs no debugger and request_jit_detach() does nothing. NULL alloc turns it off.
+  void (*set_code_memory_provider)(void* (*alloc)(size_t size, void** rw), void (*release)(void* rx));
 } NeoARMSX2API;
 
 typedef const NeoARMSX2API* (*NeoARMSX2GetAPI)(uint32_t version);
