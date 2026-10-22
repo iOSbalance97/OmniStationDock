@@ -29,7 +29,11 @@ def prepare(source: Path) -> None:
     patch = str(HERE / 'neostation-core.patch')
     subprocess.run(['git', 'apply', '--check', patch], cwd=source, check=True)
     subprocess.run(['git', 'apply', patch], cwd=source, check=True)
-    print(f'ARMSX2 {pin["release"]} ({pin["revision"]}) preparado con el parche de NeoStation.')
+    # OmniStation: memoria de JIT del JIT permanente de la app (sin depurador en cada partida).
+    ours = str(HERE / 'omnistation-jit.patch')
+    subprocess.run(['git', 'apply', '--check', ours], cwd=source, check=True)
+    subprocess.run(['git', 'apply', ours], cwd=source, check=True)
+    print(f'ARMSX2 {pin["release"]} ({pin["revision"]}) preparado con el parche de NeoStation y el de OmniStation.')
 
 
 if __name__ == '__main__':

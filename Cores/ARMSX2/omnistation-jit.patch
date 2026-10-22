@@ -1,0 +1,138 @@
+diff --git a/common/Darwin/DarwinMisc.cpp b/common/Darwin/DarwinMisc.cpp
+index 4a3a3dd..7816fa7 100644
+--- a/common/Darwin/DarwinMisc.cpp
++++ b/common/Darwin/DarwinMisc.cpp
+@@ -597,6 +597,27 @@ size_t DarwinMisc::g_code_rw_size = 0;
+ // cancellation does not wait for an event handler which is already running.
+ static std::mutex s_jit_validation_mutex;
+ 
++// [OmniStation] Code memory handed out by the host app (see SetCodeMemoryProvider).
++static DarwinMisc::CodeMemoryAlloc s_code_provider_alloc = nullptr;
++static DarwinMisc::CodeMemoryFree s_code_provider_free = nullptr;
++static void* s_code_provider_block = nullptr;
++
++void DarwinMisc::SetCodeMemoryProvider(CodeMemoryAlloc alloc, CodeMemoryFree release)
++{
++	s_code_provider_alloc = alloc;
++	s_code_provider_free = release;
++}
++
++bool DarwinMisc::HasCodeMemoryProvider()
++{
++	return s_code_provider_alloc != nullptr;
++}
++
++bool DarwinMisc::CodeMemoryFromProvider()
++{
++	return s_code_provider_block != nullptr;
++}
++
+ void DarwinMisc::SetCrashLogFD(int fd)
+ {
+ 	s_user_crash_log_fd = fd;
+@@ -678,6 +699,15 @@ bool DarwinMisc::IsJITAvailable()
+ #if TARGET_OS_SIMULATOR
+ 	return true;
+ #elif TARGET_OS_IPHONE
++	if (s_code_provider_alloc)
++	{
++		// The host already holds a prepared region: dual-mapped JIT, no debugger needed.
++		s_jit_mode = JitMode::LuckTXM;
++		s_jit_mode_detected = true;
++		std::fprintf(stderr, "@@JIT_DETECT@@ result=AVAILABLE reason=host_code_memory\n");
++		std::fflush(stderr);
++		return true;
++	}
+ 	u32 cs_flags = 0;
+ 	const int rv = csops(getpid(), 0, &cs_flags, sizeof(cs_flags));
+ 	const bool cs_debugged = (rv == 0) && ((cs_flags & 0x10000000u) != 0);
+@@ -735,10 +765,12 @@ void DarwinMisc::SetJITActivityQuery(bool (*query)())
+ bool DarwinMisc::ValidateJITAlive()
+ {
+ #if TARGET_OS_IPHONE && !TARGET_OS_SIMULATOR
+-	// Check 1: CS_DEBUGGED still set?
++	// Check 1: CS_DEBUGGED still set? (Not needed for host memory: the region is already
++	// prepared and stays executable without a debugger.)
+ 	u32 cs_flags = 0;
+ 	const int rv = csops(getpid(), 0, &cs_flags, sizeof(cs_flags));
+-	const bool cs_debugged = (rv == 0) && ((cs_flags & 0x10000000u) != 0);
++	const bool cs_debugged = s_code_provider_block != nullptr ||
++	                         ((rv == 0) && ((cs_flags & 0x10000000u) != 0));
+ 	if (!cs_debugged)
+ 	{
+ 		std::fprintf(stderr, "@@JIT_KEEPALIVE@@ alive=0 reason=cs_debugged_revoked\n");
+@@ -976,6 +1008,29 @@ void* DarwinMisc::MmapCodeDualMap(size_t size)
+ 	std::fflush(stderr);
+ 	return ptr;
+ #else
++	if (s_code_provider_alloc)
++	{
++		void* rw_ptr = nullptr;
++		void* rx_ptr = s_code_provider_alloc(size, &rw_ptr);
++		if (rx_ptr && rw_ptr)
++		{
++			{
++				std::lock_guard<std::mutex> validation_lock(s_jit_validation_mutex);
++				g_code_rw_offset = static_cast<u8*>(rw_ptr) - static_cast<u8*>(rx_ptr);
++				g_code_rw_base = reinterpret_cast<uintptr_t>(rw_ptr);
++				g_code_rw_size = size;
++				s_code_provider_block = rx_ptr;
++			}
++			s_jit_mode = JitMode::LuckTXM;
++			s_jit_mode_detected = true;
++			std::fprintf(stderr, "@@JIT_ALLOC@@ host_code_memory_ok rx=%p rw=%p size=0x%zx\n", rx_ptr, rw_ptr, size);
++			std::fflush(stderr);
++			return rx_ptr;
++		}
++		std::fprintf(stderr, "@@JIT_ALLOC@@ host_code_memory_fail size=0x%zx\n", size);
++		std::fflush(stderr);
++		return nullptr;
++	}
+ 	JitMode mode = GetJitMode();
+ 
+ 	void* jit_ptr = mmap(nullptr, size, PROT_READ | PROT_WRITE | PROT_EXEC,
+@@ -1112,6 +1167,23 @@ void DarwinMisc::MunmapCodeDualMap(void* rx_ptr, size_t size)
+ 	// Wait for any already-running idle validation before invalidating either
+ 	// the RW alias or executable mapping.
+ 	std::lock_guard<std::mutex> validation_lock(s_jit_validation_mutex);
++	if (rx_ptr && rx_ptr == s_code_provider_block)
++	{
++		// Host memory goes back to the host (its region stays prepared for the next game).
++		g_code_rw_offset = 0;
++		g_code_rw_base = 0;
++		g_code_rw_size = 0;
++		s_code_provider_block = nullptr;
++		if (s_code_provider_free)
++			s_code_provider_free(rx_ptr);
++#if TARGET_OS_IPHONE
++		s_legacy_code_base = nullptr;
++		s_legacy_code_size = 0;
++		s_legacy_is_writable = true;
++		s_legacy_range_log_done = false;
++#endif
++		return;
++	}
+ 	const uintptr_t rw_base = g_code_rw_base;
+ 	const size_t rw_size = g_code_rw_size;
+ 	const ptrdiff_t rw_offset = g_code_rw_offset;
+diff --git a/common/Darwin/DarwinMisc.h b/common/Darwin/DarwinMisc.h
+index 47a0284..9e4a809 100644
+--- a/common/Darwin/DarwinMisc.h
++++ b/common/Darwin/DarwinMisc.h
+@@ -145,6 +145,16 @@ struct CPUClass {
+     // Free dual-mapped code memory
+     void MunmapCodeDualMap(void* rx_ptr, size_t size);
+ 
++    // [OmniStation] Executable memory from the host app: one region that a debugger already
++    // prepared (RX), with its RW view. When set, MmapCodeDualMap takes the code memory from it
++    // and the JIT keeps working without a debugger. alloc returns RX and stores RW in *rw.
++    using CodeMemoryAlloc = void* (*)(size_t size, void** rw);
++    using CodeMemoryFree = void (*)(void* rx);
++    void SetCodeMemoryProvider(CodeMemoryAlloc alloc, CodeMemoryFree release);
++    bool HasCodeMemoryProvider();
++    // The current code memory came from the host (no debugger needed for it).
++    bool CodeMemoryFromProvider();
++
+     // [P49] Legacy lazy toggle: flip RW→RX + icache flush before JIT dispatch.
+     // Call this once before entering JIT code (e.g., in recExecute dispatcher).
+     // No-op on non-Legacy modes.
