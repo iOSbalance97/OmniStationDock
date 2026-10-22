@@ -215,6 +215,7 @@ static bool gJITWanted;
 // Núcleo que pide su memoria de JIT a OmniStation, y si de verdad se le dio.
 static bool gJITPoolCore;
 static _Atomic bool gJITPoolGiven;
+static _Atomic int gJITSmallLogged;   // bloques pequeños (sombreadores) apuntados en el registro
 
 // Proporción sacada del propio fotograma (NDS: cambia con la colocación de las pantallas).
 static bool gUseFrameAspect;
@@ -1760,12 +1761,15 @@ static bool OSLREnvironment(unsigned command, void *data) {
             request->mode = OSLR_EXEC_MEM_MODE_DUAL_MAP;
             if (request->size == 0) return true;
             void *rx = OSLRJITPoolAllocate(request->size);
-            OSLRTrace([NSString stringWithFormat:@"JIT permanente: %zu KB %@", request->size / 1024, rx ? @"dados" : @"NO caben"], NO);
+            // Los bloques pequeños (sombreadores de 3DS) son muchos: solo se apuntan los primeros.
+            if (rx == NULL || request->size >= (size_t)1024 * 1024 || atomic_fetch_add(&gJITSmallLogged, 1) < 3)
+                OSLRTrace([NSString stringWithFormat:@"JIT permanente: %zu KB %@", request->size / 1024, rx ? @"dados" : @"NO caben"], NO);
             if (rx == NULL) return false;
             request->rx = rx;
             request->rw = (uint8_t *)rx + gJITPoolDiff;
             atomic_store(&gJITPoolGiven, true);
-            [gJITSessionBlocks addObject:[NSValue valueWithPointer:rx]];
+            // Puede llegar desde cualquier hilo del núcleo (CPU, sombreadores).
+            @synchronized (gJITSessionBlocks) { [gJITSessionBlocks addObject:[NSValue valueWithPointer:rx]]; }
             return true;
         }
         case OSLR_RETRO_ENVIRONMENT_EXEC_MEM_FREE: {
@@ -1773,7 +1777,7 @@ static bool OSLREnvironment(unsigned command, void *data) {
             if (request == NULL) return false;
             uint8_t *rx = request->rx;
             if (rx != NULL && gJITPoolRX != NULL && rx >= gJITPoolRX + gJITPoolDiff) rx -= gJITPoolDiff;
-            [gJITSessionBlocks removeObject:[NSValue valueWithPointer:rx]];
+            @synchronized (gJITSessionBlocks) { [gJITSessionBlocks removeObject:[NSValue valueWithPointer:rx]]; }
             return OSLRJITPoolFree(rx);
         }
         case RETRO_ENVIRONMENT_GET_JIT_CAPABLE:
@@ -3668,8 +3672,10 @@ typedef NS_ENUM(NSInteger, OSLRMenuAction) {
         gCore.deinit();
         OSLRDestroyGL();
         OSLRDestroyVulkan();
-        for (NSValue *block in gJITSessionBlocks) OSLRJITPoolFree(block.pointerValue);
-        [gJITSessionBlocks removeAllObjects];
+        @synchronized (gJITSessionBlocks) {
+            for (NSValue *block in gJITSessionBlocks) OSLRJITPoolFree(block.pointerValue);
+            [gJITSessionBlocks removeAllObjects];
+        }
         [self finishSession];
         return;
     }
@@ -3800,8 +3806,10 @@ typedef NS_ENUM(NSInteger, OSLRMenuAction) {
     OSLRTrace(@"salir: listo", NO);
     atomic_store(&gLoopDone, true);
     // Lo que el núcleo no devolvió del bloque permanente vuelve al bloque (el bloque se queda).
-    for (NSValue *block in gJITSessionBlocks) OSLRJITPoolFree(block.pointerValue);
-    [gJITSessionBlocks removeAllObjects];
+    @synchronized (gJITSessionBlocks) {
+        for (NSValue *block in gJITSessionBlocks) OSLRJITPoolFree(block.pointerValue);
+        [gJITSessionBlocks removeAllObjects];
+    }
     // Cuánta memoria llegó a gastar la partida (para avisar antes de la próxima si no cabe).
     if (gSessionStartFree > 0 && gSessionMinFree > 0 && gSessionStartFree > gSessionMinFree) {
         self.lastSessionPeakMB = (NSUInteger)((gSessionStartFree - gSessionMinFree) / (1024 * 1024));
@@ -3942,6 +3950,7 @@ typedef NS_ENUM(NSInteger, OSLRMenuAction) {
     gJITSessionBlocks = [NSMutableArray new];
     gJITPoolCore = [hostOptions[@"jitPool"] isEqualToString:@"true"];
     atomic_store(&gJITPoolGiven, false);
+    atomic_store(&gJITSmallLogged, 0);
     gJITUnanswered = 0;
     atomic_store(&gLoopDone, false);
     OSLRTrace([NSString stringWithFormat:@"abrir: %@ con %@ (JIT %@, depurador %@)", gamePath.lastPathComponent, framework,
