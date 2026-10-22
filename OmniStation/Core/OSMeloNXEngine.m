@@ -932,6 +932,8 @@ static void OSNXSetTouchVisible(UIViewController *controller, BOOL visible) {
 @property (nonatomic, assign) BOOL textInputOpen;
 /// HUD de rendimiento (nil si está apagado).
 @property (nonatomic, strong, nullable) OSPerfHUD *hud;
+/// Cómo arrancó el JIT (se enseña en el menú de pausa).
+@property (nonatomic, copy, nullable) NSString *jitText;
 - (void)updateTouchVisibility;
 /// Pone la pantalla del juego en la tele (si hay y el ajuste lo deja) o la devuelve al iPhone.
 - (void)updateExternalDisplay;
@@ -943,6 +945,7 @@ static void OSNXSetTouchVisible(UIViewController *controller, BOOL visible) {
 @end
 
 @implementation OSNXGameViewController {
+    UILabel *_jitLabel;
     UIButton *_menuButton;
     UILabel *_statusLabel;
     UIView *_menuView;
@@ -1058,6 +1061,13 @@ static void OSNXSetTouchVisible(UIViewController *controller, BOOL visible) {
         [rows addObject:row];
     }
     _menuRows = rows;
+    _jitLabel = [UILabel new];
+    _jitLabel.textAlignment = NSTextAlignmentCenter;
+    _jitLabel.numberOfLines = 2;
+    _jitLabel.font = [UIFont systemFontOfSize:13 weight:UIFontWeightSemibold];
+    _jitLabel.textColor = [UIColor colorWithRed:0.0 green:0.88 blue:1.0 alpha:1.0];
+    _jitLabel.text = self.jitText;
+    [_menuView addSubview:_jitLabel];
     [root addSubview:_menuView];
 }
 
@@ -1085,6 +1095,7 @@ static void OSNXSetTouchVisible(UIViewController *controller, BOOL visible) {
     CGFloat rowHeight = 48;
     CGFloat total = rowHeight * (CGFloat)_menuRows.count + 12 * (CGFloat)(_menuRows.count - 1);
     CGFloat y = (h - total) * 0.5;
+    _jitLabel.frame = CGRectMake((w - rowWidth) * 0.5, y - 46, rowWidth, 36);
     for (UIButton *row in _menuRows) {
         row.frame = CGRectMake((w - rowWidth) * 0.5, y, rowWidth, rowHeight);
         y += rowHeight + 12;
@@ -1206,6 +1217,7 @@ static void OSNXSetTouchVisible(UIViewController *controller, BOOL visible) {
 - (void)openMenu {
     if (_menuVisible || self.closing) return;
     _menuVisible = YES;
+    _jitLabel.text = self.jitText;
     _menuIndex = 0;
     [self refreshMenu];
     _menuView.hidden = NO;
@@ -2327,6 +2339,10 @@ static BOOL OSNXNeedsExtendedVirtualAddressing(void) {
             controller.api = &self->_api;
             controller.language = language;
             controller.title = title;
+            // Si llega aquí, StikJIT dejó el JIT activo (sin él MeloNX no arranca).
+            controller.jitText = self->_dualMapped
+                ? OSNXText(language, @"Con JIT (memoria doble)", @"Running with JIT (dual-mapped)")
+                : OSNXText(language, @"Con JIT", @"Running with JIT");
             controller.touchAlways = [NSUserDefaults.standardUserDefaults boolForKey:@"melonxCoreTouchAlways"];
             controller.touchScreenDisabled = OSNXFlag(settings, @"disableTouch", NO);
             controller.hudPosition = settings[@"hudPosition"] ?: @"topRight";

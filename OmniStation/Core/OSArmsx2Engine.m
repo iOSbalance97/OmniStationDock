@@ -528,6 +528,8 @@ static NSString *OSString(const char *text, NSString *fallback) {
 @property (nonatomic, assign) BOOL touchHaptics;
 /// Alto/ancho de la imagen del juego (3/4 en 4:3) para centrarla en vertical.
 @property (nonatomic, assign) CGFloat imageRatio;
+/// Cómo arrancó el JIT (se enseña en el menú de pausa).
+@property (nonatomic, copy, nullable) NSString *jitText;
 - (void)updateExternalDisplay;
 - (void)releaseExternalDisplay;
 - (void)showStatus:(NSString *)message;
@@ -538,6 +540,7 @@ static NSString *OSString(const char *text, NSString *fallback) {
 @end
 
 @implementation OSArmsx2GameViewController {
+    UILabel *_jitLabel;
     UIView *_controlsView;
     UIButton *_menuButton;
     UILabel *_statusLabel;
@@ -880,6 +883,7 @@ static NSString *OSString(const char *text, NSString *fallback) {
     CGFloat rowHeight = 46;
     CGFloat menuHeight = rowHeight * (CGFloat)_menuRows.count + 10 * (CGFloat)(_menuRows.count - 1);
     _menuStack.frame = CGRectMake((w - menuWidth) * 0.5, (h - menuHeight) * 0.5, menuWidth, menuHeight);
+    _jitLabel.frame = CGRectMake((w - menuWidth) * 0.5, (h - menuHeight) * 0.5 - 44, menuWidth, 34);
 }
 
 // MARK: Entrada táctil
@@ -950,6 +954,13 @@ static NSString *OSString(const char *text, NSString *fallback) {
     }
     _menuRows = rows;
     [_menuView addSubview:_menuStack];
+    _jitLabel = [UILabel new];
+    _jitLabel.textAlignment = NSTextAlignmentCenter;
+    _jitLabel.numberOfLines = 2;
+    _jitLabel.font = [UIFont systemFontOfSize:13 weight:UIFontWeightSemibold];
+    _jitLabel.textColor = [UIColor colorWithRed:0.0 green:0.88 blue:1.0 alpha:1.0];
+    _jitLabel.text = self.jitText;
+    [_menuView addSubview:_jitLabel];
     [self.view addSubview:_menuView];
     [self refreshMenuTitles];
 }
@@ -982,6 +993,7 @@ static NSString *OSString(const char *text, NSString *fallback) {
 - (void)openMenu {
     if (_menuVisible || self.closing) return;
     _menuVisible = YES;
+    _jitLabel.text = self.jitText;
     _menuIndex = 0;
     [self resetInput];
     if (self.api && self.api->set_paused) self.api->set_paused(1);
@@ -1548,6 +1560,8 @@ static NSString *gLoadedFlavor = nil;
             controller = [OSArmsx2GameViewController new];
             controller.api = self.api;
             controller.language = language;
+            // ARMSX2 solo arranca si validate_jit dice que el JIT quedó activo.
+            controller.jitText = OSText(language, @"Con JIT", @"Running with JIT");
             controller.touchAlways = touchControlsAlways;
             controller.touchHaptics = [hostOptions[@"touchHaptics"] boolValue];
             NSString *aspect = hostOptions[@"aspectRatio"];

@@ -684,9 +684,15 @@ static void OSLRLog(enum retro_log_level level, const char *format, ...) {
     fflush(stdout);
 }
 
+// Último aviso del núcleo en esta partida (si no abre el juego, suele decir por qué).
+static NSString *gLastCoreMessage;
+
 static void OSLRShowMessage(const char *text) {
     if (text == NULL || text[0] == 0) return;
     NSString *message = [NSString stringWithUTF8String:text];
+    if (message.length > 0) {
+        @synchronized ([OSLibretroEngine class]) { gLastCoreMessage = message; }
+    }
     OSLRMessageBlock handler = gMessageHandler;
     if (message.length == 0 || handler == nil) return;
     dispatch_async(dispatch_get_main_queue(), ^{ handler(message); });
@@ -3604,10 +3610,15 @@ typedef NS_ENUM(NSInteger, OSLRMenuAction) {
         }
         if (failure == nil) {
             loaded = gCore.loadGame(&game);
-            if (!loaded) failure = OSLRText(_language, @"El núcleo no pudo abrir este juego.", @"The core could not open this game.");
+            if (!loaded) {
+                NSString *said = nil;
+                @synchronized ([OSLibretroEngine class]) { said = gLastCoreMessage; }
+                failure = OSLRText(_language, @"El núcleo no pudo abrir este juego.", @"The core could not open this game.");
+                if (said.length > 0) failure = [NSString stringWithFormat:@"%@ (%@)", failure, said];
+            }
         }
         gRecording = NO;
-        OSLRTrace(loaded ? @"abrir: juego cargado" : @"abrir: el núcleo no pudo cargar el juego", NO);
+        OSLRTrace(loaded ? @"abrir: juego cargado" : [NSString stringWithFormat:@"abrir: el núcleo no pudo cargar el juego%@", failure.length ? [@": " stringByAppendingString:failure] : @""], NO);
         self.lastSessionOptions = OSLRCapturedList();
         gCaptured = nil;
         gCapturedCategories = nil;
@@ -3953,6 +3964,7 @@ typedef NS_ENUM(NSInteger, OSLRMenuAction) {
     atomic_store(&gJITSmallLogged, 0);
     gJITUnanswered = 0;
     atomic_store(&gLoopDone, false);
+    @synchronized ([OSLibretroEngine class]) { gLastCoreMessage = nil; }
     OSLRTrace([NSString stringWithFormat:@"abrir: %@ con %@ (JIT %@, depurador %@)", gamePath.lastPathComponent, framework,
                [hostOptions[@"jit"] isEqualToString:@"true"] ? @"pedido" : @"no", OSLRIsTraced() ? @"enganchado" : @"no"], YES);
     gSessionStartFree = os_proc_available_memory();
