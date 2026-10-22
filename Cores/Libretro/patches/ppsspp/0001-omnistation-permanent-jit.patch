@@ -1,0 +1,249 @@
+diff --git a/Common/CodeBlock.h b/Common/CodeBlock.h
+index 04642f1..d024113 100644
+--- a/Common/CodeBlock.h
++++ b/Common/CodeBlock.h
+@@ -62,6 +62,15 @@ template<class T> class CodeBlock : public CodeBlockCommon, public T {
+ 
+ public:
+ 	CodeBlock() {}
++
++	// OmniStation: dual-mapped blocks are never re-protected.
++	bool WXExclusive() const {
++#if PPSSPP_PLATFORM(SWITCH)
++		return PlatformIsWXExclusive();
++#else
++		return !dualMapped_ && PlatformIsWXExclusive();
++#endif
++	}
+ 	~CodeBlock() {
+ 		if (region)
+ 			FreeCodeSpace();
+@@ -80,6 +89,18 @@ template<class T> class CodeBlock : public CodeBlockCommon, public T {
+ 		region = (u8 *)jitController.rx_addr;
+ 		writableRegion = (u8 *)jitController.rw_addr;
+ #else // PPSSPP_PLATFORM(SWITCH)
++		dualMapped_ = false;
++		if (HasCodeMemoryProvider()) {
++			// OmniStation: write through the RW view, execute the RX one (as on Switch).
++			void *writable = nullptr;
++			region = (u8 *)AllocateDualMappedCode(region_size, &writable);
++			if (region) {
++				writableRegion = (u8 *)writable;
++				dualMapped_ = true;
++				T::SetCodePointer(region, writableRegion);
++				return;
++			}
++		}
+ 		// The protection will be set to RW if PlatformIsWXExclusive.
+ 		region = (u8 *)AllocateExecutableMemory(region_size);
+ 		writableRegion = region;
+@@ -93,13 +114,13 @@ template<class T> class CodeBlock : public CodeBlockCommon, public T {
+ 		if (!region) {
+ 			return;
+ 		}
+-		if (PlatformIsWXExclusive()) {
++		if (WXExclusive()) {
+ 			ProtectMemoryPages(region, region_size, MEM_PROT_READ | MEM_PROT_WRITE);
+ 		}
+ 		// If not WX Exclusive, no need to call ProtectMemoryPages because we never change the protection from RWX.
+ 		PoisonMemory(offset);
+ 		ResetCodePtr(offset);
+-		if (PlatformIsWXExclusive() && offset != 0) {
++		if (WXExclusive() && offset != 0) {
+ 			// Need to re-protect the part we didn't clear.
+ 			ProtectMemoryPages(region, offset, MEM_PROT_READ | MEM_PROT_EXEC);
+ 		}
+@@ -112,7 +133,7 @@ template<class T> class CodeBlock : public CodeBlockCommon, public T {
+ 		_dbg_assert_msg_(!writeStart_, "Can't nest BeginWrite calls");
+ 
+ 		// In case the last block made the current page exec/no-write, let's fix that.
+-		if (PlatformIsWXExclusive()) {
++		if (WXExclusive()) {
+ 			writeStart_ = GetCodePtr();
+ 			if (writeStart_ + sizeEstimate - region > (ptrdiff_t)region_size)
+ 				sizeEstimate = region_size - (writeStart_ - region);
+@@ -124,7 +145,7 @@ template<class T> class CodeBlock : public CodeBlockCommon, public T {
+ 	// In case you now know your original estimate is wrong.
+ 	void ContinueWrite(size_t sizeEstimate = 1) {
+ 		_dbg_assert_msg_(writeStart_, "Must have already called BeginWrite()");
+-		if (PlatformIsWXExclusive()) {
++		if (WXExclusive()) {
+ 			const uint8_t *pos = GetCodePtr();
+ 			if (pos + sizeEstimate - region > (ptrdiff_t)region_size)
+ 				sizeEstimate = region_size - (pos - region);
+@@ -135,7 +156,7 @@ template<class T> class CodeBlock : public CodeBlockCommon, public T {
+ 
+ 	void EndWrite() {
+ 		// OK, we're done. Re-protect the memory we touched.
+-		if (PlatformIsWXExclusive() && writeStart_ != nullptr) {
++		if (WXExclusive() && writeStart_ != nullptr) {
+ 			const uint8_t *end = GetCodePtr();
+ 			size_t sz = end - writeStart_;
+ 			if (sz > writeEstimated_)
+@@ -152,8 +173,13 @@ template<class T> class CodeBlock : public CodeBlockCommon, public T {
+ 	// Call this when shutting down. Don't rely on the destructor, even though it'll do the job.
+ 	void FreeCodeSpace() {
+ #if !PPSSPP_PLATFORM(SWITCH)
+-		ProtectMemoryPages(region, region_size, MEM_PROT_READ | MEM_PROT_WRITE);
+-		FreeExecutableMemory(region, region_size);
++		if (dualMapped_) {
++			FreeDualMappedCode(region);
++			dualMapped_ = false;
++		} else {
++			ProtectMemoryPages(region, region_size, MEM_PROT_READ | MEM_PROT_WRITE);
++			FreeExecutableMemory(region, region_size);
++		}
+ #else // !PPSSPP_PLATFORM(SWITCH)
+ 		jitClose(&jitController);
+ 		printf("[NXJIT]: Jit closed\n");
+@@ -199,5 +225,7 @@ template<class T> class CodeBlock : public CodeBlockCommon, public T {
+ 	size_t writeEstimated_ = 0;
+ #if PPSSPP_PLATFORM(SWITCH)
+ 	Jit jitController;
++#else
++	bool dualMapped_ = false;
+ #endif // PPSSPP_PLATFORM(SWITCH)
+ };
+diff --git a/Common/MemoryUtil.cpp b/Common/MemoryUtil.cpp
+index be2a14d..c364df6 100644
+--- a/Common/MemoryUtil.cpp
++++ b/Common/MemoryUtil.cpp
+@@ -289,10 +289,44 @@ void FreeAlignedMemory(void* ptr) {
+ #endif
+ }
+ 
++static CodeMemoryAllocFn g_codeMemoryAlloc = nullptr;
++static CodeMemoryFreeFn g_codeMemoryFree = nullptr;
++
++void SetCodeMemoryProvider(CodeMemoryAllocFn allocFn, CodeMemoryFreeFn freeFn) {
++	g_codeMemoryAlloc = allocFn;
++	g_codeMemoryFree = allocFn ? freeFn : nullptr;
++}
++
++bool HasCodeMemoryProvider() {
++	return g_codeMemoryAlloc != nullptr;
++}
++
++void *AllocateDualMappedCode(size_t size, void **writable) {
++	*writable = nullptr;
++	if (!g_codeMemoryAlloc)
++		return nullptr;
++	void *rw = nullptr;
++	void *rx = g_codeMemoryAlloc(size, &rw);
++	if (!rx || !rw) {
++		ERROR_LOG(Log::MemMap, "Failed to get dual-mapped executable memory (%d)", (int)size);
++		return nullptr;
++	}
++	*writable = rw;
++	return rx;
++}
++
++void FreeDualMappedCode(void *executable) {
++	if (executable && g_codeMemoryFree)
++		g_codeMemoryFree(executable);
++}
++
+ bool PlatformIsWXExclusive() {
+ 	// Needed on platforms that disable W^X pages for security. Even without block linking, still should be much faster than IR JIT.
+ 	// This might also come in useful for UWP (Universal Windows Platform) if I'm understanding things correctly.
+-#if PPSSPP_PLATFORM(IOS) || PPSSPP_PLATFORM(UWP) || defined(__OpenBSD__)
++#if PPSSPP_PLATFORM(IOS)
++	// OmniStation: with dual-mapped memory from the frontend nothing is ever re-protected.
++	return !HasCodeMemoryProvider();
++#elif PPSSPP_PLATFORM(UWP) || defined(__OpenBSD__)
+ 	return true;
+ #elif PPSSPP_PLATFORM(MAC) && PPSSPP_ARCH(ARM64)
+ 	return true;
+diff --git a/Common/MemoryUtil.h b/Common/MemoryUtil.h
+index 00dd786..92495ea 100644
+--- a/Common/MemoryUtil.h
++++ b/Common/MemoryUtil.h
+@@ -29,6 +29,17 @@
+ // Returns true if we need to avoid setting both writable and executable at the same time (W^X)
+ bool PlatformIsWXExclusive();
+ 
++// OmniStation: executable memory handed out by the frontend in two views of the same pages (one
++// writable, one executable), like on Switch. While a provider is set, code blocks come from it and
++// pages are never re-protected (PlatformIsWXExclusive() is false).
++typedef void *(*CodeMemoryAllocFn)(size_t size, void **writable);
++typedef void (*CodeMemoryFreeFn)(void *executable);
++void SetCodeMemoryProvider(CodeMemoryAllocFn allocFn, CodeMemoryFreeFn freeFn);
++bool HasCodeMemoryProvider();
++// Returns the executable view (and the writable one in *writable), or nullptr.
++void *AllocateDualMappedCode(size_t size, void **writable);
++void FreeDualMappedCode(void *executable);
++
+ #define MEM_PROT_READ  1
+ #define MEM_PROT_WRITE 2
+ #define MEM_PROT_EXEC  4
+diff --git a/libretro/libretro.cpp b/libretro/libretro.cpp
+index 3b2f103..526def2 100644
+--- a/libretro/libretro.cpp
++++ b/libretro/libretro.cpp
+@@ -8,6 +8,7 @@
+ #include <mutex>
+ 
+ #include "Common/CPUDetect.h"
++#include "Common/MemoryUtil.h"
+ #include "Common/Log.h"
+ #include "Common/Log/LogManager.h"
+ #include "Common/System/Display.h"
+@@ -1504,8 +1505,49 @@ static void retro_check_backend(void)
+    }
+ }
+ 
++#if PPSSPP_PLATFORM(IOS)
++// OmniStation: executable memory from the frontend (RETRO_ENVIRONMENT_EXEC_MEM_ALLOC, as libretro's
++// Dolphin uses it on iOS). On iOS 26+ (TXM) the frontend keeps one region that a debugger prepared
++// once, in two views (RW and RX), so the JIT keeps working without a debugger.
++#define OMNI_ENVIRONMENT_EXEC_MEM_ALLOC 83
++#define OMNI_ENVIRONMENT_EXEC_MEM_FREE 84
++#define OMNI_EXEC_MEM_MODE_DUAL_MAP 4
++struct OmniExecMemAlloc { unsigned version; size_t size; unsigned mode; void *rx; void *rw; };
++struct OmniExecMemFree { void *rx; };
++
++static void *OmniExecMemAllocate(size_t size, void **rw) {
++   OmniExecMemAlloc request = { 1, size, OMNI_EXEC_MEM_MODE_DUAL_MAP, nullptr, nullptr };
++   *rw = nullptr;
++   if (!environ_cb || !environ_cb(OMNI_ENVIRONMENT_EXEC_MEM_ALLOC, &request) ||
++       request.mode != OMNI_EXEC_MEM_MODE_DUAL_MAP || !request.rx || !request.rw)
++      return nullptr;
++   *rw = request.rw;
++   return request.rx;
++}
++
++static void OmniExecMemRelease(void *rx) {
++   OmniExecMemFree request = { rx };
++   if (environ_cb)
++      environ_cb(OMNI_ENVIRONMENT_EXEC_MEM_FREE, &request);
++}
++
++// Before anything allocates code space: with the frontend's memory, every JIT (CPU, vertex
++// decoder, software renderer) writes through the RW view and runs the RX one.
++static void OmniSetupExecMem() {
++   OmniExecMemAlloc probe = { 1, 0, 0, nullptr, nullptr };
++   bool dual = environ_cb(OMNI_ENVIRONMENT_EXEC_MEM_ALLOC, &probe) && probe.mode == OMNI_EXEC_MEM_MODE_DUAL_MAP;
++   SetCodeMemoryProvider(dual ? &OmniExecMemAllocate : nullptr, dual ? &OmniExecMemRelease : nullptr);
++   if (log_cb)
++      log_cb(RETRO_LOG_INFO, dual ? "OmniStation: JIT with dual-mapped executable memory from the frontend\n"
++                                  : "OmniStation: no executable memory from the frontend\n");
++}
++#endif
++
+ bool retro_load_game(const struct retro_game_info *game)
+ {
++#if PPSSPP_PLATFORM(IOS)
++   OmniSetupExecMem();
++#endif
+    retro_pixel_format fmt = retro_pixel_format::RETRO_PIXEL_FORMAT_XRGB8888;
+    if (!environ_cb(RETRO_ENVIRONMENT_SET_PIXEL_FORMAT, &fmt))
+    {
+@@ -2014,6 +2056,8 @@ bool System_GetPropertyBool(SystemProperty prop)
+    case SYSPROP_CAN_JIT:
+ #if PPSSPP_PLATFORM(IOS)
+       bool can_jit;
++      if (HasCodeMemoryProvider())
++         return true;
+       return (environ_cb(RETRO_ENVIRONMENT_GET_JIT_CAPABLE, &can_jit) && can_jit);
+ #else
+       return true;
