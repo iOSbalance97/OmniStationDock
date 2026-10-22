@@ -12,5 +12,23 @@
     "framework": "azahar_omni",
     "bundleID": "com.omnistation.core.azahar",
     "notes": "Azahar (GPL-2.0-or-later). Parches en patches/azahar: 0001, en iOS pide su memoria de JIT al frontend con RETRO_ENVIRONMENT_EXEC_MEM_ALLOC (JIT permanente para CPU y sombreadores); 0002, vuelve a abrir ROMs cifradas con las claves del usuario (aes_keys.txt/keys.txt y seeddb.bin)."
+  },
+  "melondsds": {
+    "repository": "https://github.com/JesseTG/melonds-ds.git",
+    "revision": "f394adbacb5722ee97c1b37c8064da9a25818310",
+    "framework": "melondsds_omni",
+    "bundleID": "com.omnistation.core.melondsds",
+    "melonDS": {
+      "repository": "https://github.com/JesseTG/melonDS.git",
+      "revision": "16f127dbb587a73371827ce79689c5d237c4b59b"
+    },
+    "notes": "melonDS DS (GPL-3.0). Usa el melonDS fijado en «melonDS» (en vez de la rama que baja él solo). Parches: patches/melondsds (frontend) y patches/melondsds/melonDS (el JIT escribe por la vista RW y ejecuta por la RX de la memoria que da OmniStation: JIT permanente)."
+  },
+  "pcsx_rearmed": {
+    "repository": "https://github.com/libretro/pcsx_rearmed.git",
+    "revision": "c8816799b50388e61cfe237fe2cdbb7d8175f20a",
+    "framework": "pcsx_rearmed_omni",
+    "bundleID": "com.omnistation.core.pcsxrearmed",
+    "notes": "PCSX ReARMed (GPL-2.0). Con patches/pcsx_rearmed, en iOS el dynarec (ari64) usa la memoria de JIT de OmniStation en doble vista (TC_WRITE_OFFSET, como en Switch): JIT permanente."
   }
 }

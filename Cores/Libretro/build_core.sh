@@ -70,6 +70,50 @@ case "$CORE" in
       strip -x "$BINARY"
     fi
     ;;
+  melondsds)
+    # melonDS DS baja melonDS de una rama: se usa el commit fijado en sources.json, con su parche.
+    read -r MELONDS_REPO MELONDS_REV < <(python3 - "$ROOT/Cores/Libretro/sources.json" <<'PY'
+import json, sys
+info = json.load(open(sys.argv[1]))["melondsds"]["melonDS"]
+print(info["repository"], info["revision"])
+PY
+)
+    MELONDS_DIR="$SRC/.omni-melonDS"
+    rm -rf "$MELONDS_DIR"
+    git clone --quiet --filter=blob:none "$MELONDS_REPO" "$MELONDS_DIR"
+    git -C "$MELONDS_DIR" checkout --quiet "$MELONDS_REV"
+    shopt -s nullglob
+    for patch in "$ROOT/Cores/Libretro/patches/melondsds/melonDS/"*.patch; do
+      echo "Parche (melonDS): $(basename "$patch")"
+      patch -p1 -N -d "$MELONDS_DIR" -i "$patch"
+    done
+    shopt -u nullglob
+    grep -q SetCodeMemoryProvider "$MELONDS_DIR/src/ARMJIT_Global.h"
+    # Como el CI iOS del propio melonDS DS, con JIT y iOS 17 como mínimo.
+    cmake -S "$SRC" -B "$SRC/build/ios-arm64" \
+      --toolchain "$SRC/cmake/toolchain/ios.toolchain.cmake" \
+      -DPLATFORM=OS64 \
+      -DDEPLOYMENT_TARGET=17.0 \
+      -DBUILD_AS_SHARED_LIBRARY=ON \
+      -DENABLE_JIT=ON \
+      -DCMAKE_BUILD_TYPE=Release \
+      -DFETCHCONTENT_SOURCE_DIR_MELONDS="$MELONDS_DIR" \
+      -Wno-deprecated 2>&1 | tee "$LOGS/configure.log"
+    cmake --build "$SRC/build/ios-arm64" --target melondsds_libretro -j "$(sysctl -n hw.ncpu)" 2>&1 | tee "$LOGS/build.log"
+    BINARY="$(find "$SRC/build/ios-arm64" -name 'melondsds_libretro*.dylib' -print -quit)"
+    if [ -n "$BINARY" ]; then
+      nm "$BINARY" | grep -c SetCodeMemoryProvider >/dev/null || { echo "::error::melonDS DS sin el parche del JIT permanente." >&2; exit 1; }
+    fi
+    ;;
+  pcsx_rearmed)
+    # Makefile de libretro para iOS, con el dynarec y la memoria de JIT de OmniStation.
+    make -C "$SRC" -f Makefile.libretro platform=ios-arm64 OMNI_EXEC_MEM=1 \
+      MINVERSION=-miphoneos-version-min=17.0 -j "$(sysctl -n hw.ncpu)" 2>&1 | tee "$LOGS/build.log"
+    BINARY="$SRC/pcsx_rearmed_libretro_ios.dylib"
+    if [ -f "$BINARY" ]; then
+      nm "$BINARY" | grep -c omni_exec_mem_alloc >/dev/null || { echo "::error::PCSX ReARMed sin el parche del JIT permanente." >&2; exit 1; }
+    fi
+    ;;
   *)
     echo "Núcleo desconocido: $CORE" >&2
     exit 1

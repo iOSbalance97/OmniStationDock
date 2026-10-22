@@ -23,7 +23,12 @@ momento esos núcleos tienen JIT siempre, aunque el depurador se vaya.
   `0002` le devuelve las ROMs cifradas (como Citra): descifra al vuelo con las claves del usuario
   (`aes_keys.txt` o `keys.txt`, y `seeddb.bin`), que la app copia de 3DS/BIOS a
   `Partidas/Azahar/sysdata`. Sin claves, el juego se abre con el Azahar de ManicEMU.
-- **Los demás** (melonDS DS, PPSSPP, Beetle PSX, Mupen64Plus-Next, Flycast…): hay que
+- **melonDS DS** (NDS): `patches/melondsds` (frontend) y `patches/melondsds/melonDS` (el JIT de
+  melonDS escribe por la vista RW y ejecuta por la RX, como ya hacía en Switch).
+- **PCSX ReARMed** (PS1): `patches/pcsx_rearmed` activa en iOS su dynarec con la memoria en doble
+  vista (`TC_WRITE_OFFSET`, el modo de Switch). Beetle PSX no: su dynarec (Lightrec con GNU
+  Lightning) escribe y ejecuta en la misma dirección.
+- **Los demás** (PPSSPP, Beetle PSX, Mupen64Plus-Next, Flycast…): hay que
   cambiar su forma de reservar la memoria de JIT para que la pida con esa llamada. Esos cambios van
   como parches en `patches/<núcleo>/*.patch` y se añaden a `sources.json` y a `build_core.sh`.
 
