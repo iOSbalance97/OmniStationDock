@@ -2,8 +2,9 @@ name: Build libretro cores (OmniStation)
 
 # Compila núcleos libretro desde su código (Cores/Libretro/sources.json) y los publica como release
 # «libretro-cores» de este repositorio. El workflow de la app los descarga de ahí (no los vuelve a
-# compilar). De momento: Dolphin (GameCube/Wii), que pide su memoria de JIT a OmniStation y usa el
-# JIT permanente. Tarda bastante (30-60 min de Mac): lánzalo solo cuando quieras un núcleo nuevo.
+# compilar). De momento: Dolphin (GameCube/Wii) y Azahar (3DS), que piden su memoria de JIT a
+# OmniStation y usan el JIT permanente. Tarda bastante (30-90 min de Mac): lánzalo solo cuando
+# quieras un núcleo nuevo. Cada núcleo se compila aparte; la release guarda todos.
 on:
   workflow_dispatch:
     inputs:
@@ -12,7 +13,8 @@ on:
         type: choice
         options:
           - dolphin
-        default: dolphin
+          - azahar
+        default: azahar
 
 permissions:
   contents: write
@@ -64,8 +66,8 @@ jobs:
           set -euo pipefail
           sudo xcode-select -switch /Applications/Xcode.app
           xcodebuild -version
-          # Lo mismo que instala el workflow de iOS del propio Dolphin de libretro.
-          brew install cmake mbedtls zlib || true
+          # Lo mismo que instala el workflow de iOS de cada núcleo (Azahar lo trae todo dentro).
+          if [ "$CORE" = "dolphin" ]; then brew install cmake mbedtls zlib || true; fi
           cmake --version
           bash -n Cores/Libretro/build_core.sh
 
