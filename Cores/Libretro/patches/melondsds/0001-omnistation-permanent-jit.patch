@@ -1,8 +1,8 @@
 diff --git a/src/libretro/config/config.cpp b/src/libretro/config/config.cpp
-index 641ce91..f36cf90 100644
+index 641ce91..4f992e0 100644
 --- a/src/libretro/config/config.cpp
 +++ b/src/libretro/config/config.cpp
-@@ -49,6 +49,56 @@
+@@ -49,6 +49,57 @@
  #include <SPI.h>
  #include <SPI_Firmware.h>
  #include <FreeBIOS.h>
@@ -12,6 +12,7 @@ index 641ce91..f36cf90 100644
 +#endif
 +#if defined(HAVE_JIT) && defined(__APPLE__) && TARGET_OS_IPHONE
 +#include <ARMJIT_Global.h>
++#include "environment.hpp"
 +
 +// OmniStation: JIT memory from the frontend (RETRO_ENVIRONMENT_EXEC_MEM_ALLOC, as libretro's
 +// Dolphin uses it on iOS). On iOS 26+ (TXM) the frontend keeps one region that a debugger
@@ -59,7 +60,7 @@ index 641ce91..f36cf90 100644
  #include <file/config_file.h>
  #include <Net_PCap.h>
  
-@@ -409,6 +459,14 @@ static void MelonDsDs::config::ParseJitOptions(CoreConfig& config) noexcept {
+@@ -409,6 +460,14 @@ static void MelonDsDs::config::ParseJitOptions(CoreConfig& config) noexcept {
          config.SetJitEnable(true);
      }
  
