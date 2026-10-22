@@ -372,6 +372,8 @@ int request_jit_detach(char* error,size_t capacity) {
     if(r.phase!=Phase::Prepared || !r.initialized || r.stop)
       return error_out("ARMSX2 cannot detach JIT outside Prepared state.",error,capacity);
   }
+  // OmniStation: the code memory came from the host's prepared region; no debugger to detach.
+  if (DarwinMisc::CodeMemoryFromProvider()) return 1;
 #if TARGET_OS_IPHONE && !TARGET_OS_SIMULATOR && defined(__arm64__)
   if (DarwinMisc::GetJitMode() == DarwinMisc::JitMode::Legacy)
     return 1;
@@ -694,6 +696,11 @@ int set_graphics_hack(const char* name,int value,char* error,size_t capacity) {
 
 #include "ARMSX2GraphicsAssets.inc"
 
+// OmniStation: permanent JIT memory from the host (see ARMSX2CoreABI.h).
+void set_code_memory_provider(void* (*alloc)(size_t,void**),void (*release)(void*)) {
+  DarwinMisc::SetCodeMemoryProvider(alloc,release);
+}
+
 const NeoARMSX2API api={sizeof(NeoARMSX2API),NEO_ARMSX2_ABI_VERSION,NEO_ARMSX2_SOURCE_REVISION,
   create_view,release_view,prepare,request_jit_detach,validate_jit,boot,request_stop,shutdown,paused,button,sticks,
   get_upscale_multiplier,get_aspect_ratio,get_cheats_enabled,set_upscale_multiplier,set_aspect_ratio,
@@ -702,7 +709,8 @@ const NeoARMSX2API api={sizeof(NeoARMSX2API),NEO_ARMSX2_ABI_VERSION,NEO_ARMSX2_S
   get_retroachievements_state_json,set_retroachievements_option,
   login_retroachievements,logout_retroachievements,
   get_graphics_hacks_json,set_graphics_hack,
-  get_graphics_assets_json,set_shader_preset,set_performance_overlay,install_shader_pack};
+  get_graphics_assets_json,set_shader_preset,set_performance_overlay,install_shader_pack,
+  set_code_memory_provider};
 }
 extern "C" bool ARMSX2_IsIdleVMPrewarmResolved() { return false; } // No autonomous prewarm in NeoStation.
 extern "C" const NeoARMSX2API* NeoARMSX2_GetAPI(uint32_t version) {
