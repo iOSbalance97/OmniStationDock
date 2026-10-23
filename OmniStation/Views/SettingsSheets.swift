@@ -87,14 +87,30 @@ struct PadScrollView<Content: View>: View {
 extension View {
     /// Recuadro de selección del mando.
     func padRing(_ active: Bool, cornerRadius: CGFloat = 16) -> some View {
-        overlay {
+        // Marca del mando con el toque líquido de la barra de abajo: burbuja azul con borde cian y
+        // brillo, que aparece con un pequeño rebote.
+        let shape = RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
+        return background {
             if active {
-                RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
-                    .strokeBorder(Color.cyan.opacity(0.98), lineWidth: 2.5)
-                    .shadow(color: Color.cyan.opacity(0.7), radius: 8)
-                    .allowsHitTesting(false)
+                ZStack {
+                    shape.fill(Color.cyan.opacity(0.22)).blur(radius: 8)
+                    shape.fill(LinearGradient(colors: [Color(red: 0.05, green: 0.45, blue: 1.0).opacity(0.30), Color(red: 0.05, green: 0.45, blue: 1.0).opacity(0.14)],
+                                              startPoint: .topLeading, endPoint: .bottomTrailing))
+                }
+                .allowsHitTesting(false)
+                .transition(.scale(scale: 0.9).combined(with: .opacity))
             }
         }
+        .overlay {
+            if active {
+                shape
+                    .strokeBorder(Color.cyan.opacity(0.95), lineWidth: 2)
+                    .shadow(color: Color.cyan.opacity(0.6), radius: 7)
+                    .allowsHitTesting(false)
+                    .transition(.scale(scale: 0.9).combined(with: .opacity))
+            }
+        }
+        .animation(.spring(response: 0.32, dampingFraction: 0.62), value: active)
     }
 }
 
@@ -849,12 +865,16 @@ extension View {
     /// Tarjeta de una sección: cristal oscuro con borde de luz cian (como las tarjetas de la app).
     func appSectionCard(cornerRadius: CGFloat = 14) -> some View {
         let shape = RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
-        // Cristal líquido teñido (el de toda la app) con su borde de color.
+        // Aspecto de cristal teñido (el azul de toda la app) pintado a mano: en menús y ajustes hay
+        // muchísimos recuadros y el cristal de verdad en cada uno hacía trabajar (y calentar) la GPU.
         return clipShape(shape)
             .background {
-                Color.clear
-                    .liquidGlass(in: shape)
-                    .shadow(color: Color.cyan.opacity(0.12), radius: 12, y: 4)
+                ZStack {
+                    shape.fill(LinearGradient(colors: [Color(red: 0.05, green: 0.38, blue: 1.0).opacity(0.13), Color.white.opacity(0.04)],
+                                              startPoint: .top, endPoint: .bottom))
+                    shape.fill(LinearGradient(colors: [Color.white.opacity(0.10), Color.white.opacity(0)],
+                                              startPoint: .top, endPoint: .center))
+                }
             }
             .overlay(
                 shape.strokeBorder(
@@ -881,19 +901,19 @@ struct IOSRowDivider: View {
 extension View {
     /// Fila marcada con el mando: se ilumina el fondo de la fila (como la selección de iOS).
     func iosRowHighlight(_ active: Bool) -> some View {
-        background {
+        // Burbuja de la barra de abajo (azul con borde cian), que aparece con rebote.
+        let shape = RoundedRectangle(cornerRadius: 12, style: .continuous)
+        return background {
             if active {
-                LinearGradient(colors: [Color.cyan.opacity(0.30), Color.cyan.opacity(0.08)], startPoint: .leading, endPoint: .trailing)
+                shape
+                    .fill(LinearGradient(colors: [Color(red: 0.05, green: 0.45, blue: 1.0).opacity(0.42), Color(red: 0.05, green: 0.45, blue: 1.0).opacity(0.22)],
+                                         startPoint: .topLeading, endPoint: .bottomTrailing))
+                    .overlay(shape.strokeBorder(Color.cyan.opacity(0.7), lineWidth: 1))
+                    .background(shape.fill(Color.cyan.opacity(0.22)).blur(radius: 8))
+                    .padding(3)
+                    .transition(.scale(scale: 0.88).combined(with: .opacity))
             }
         }
-        .overlay(alignment: .leading) {
-            if active {
-                Rectangle()
-                    .fill(Color.cyan)
-                    .frame(width: 3)
-                    .shadow(color: Color.cyan.opacity(0.9), radius: 5)
-            }
-        }
-        .animation(.easeOut(duration: 0.15), value: active)
+        .animation(.spring(response: 0.32, dampingFraction: 0.62), value: active)
     }
 }

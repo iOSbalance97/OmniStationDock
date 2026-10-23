@@ -256,6 +256,8 @@ struct HomeView: View {
     /// Barra inferior: dedo encima (la burbuja lo sigue) y la pestaña bajo el dedo.
     @State private var tabBarTouchX: CGFloat?
     @State private var tabBarHover: Int?
+    /// Burbujas que se deslizan de una opción a otra (pestañas de Ajustes).
+    @Namespace private var liquidNamespace
     @AppStorage("volumeBack") private var volumeBack = 0.7
     @AppStorage("volumeToggle") private var volumeToggle = 0.7
 
@@ -473,6 +475,7 @@ struct HomeView: View {
             // Los menús (opciones del juego…) siempre por encima de la pantalla del juego.
             padMenuOverlay
                 .zIndex(10)
+                .animation(.spring(response: 0.42, dampingFraction: 0.74), value: padMenu?.title)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .ignoresSafeArea(.container, edges: stretch)
@@ -3357,15 +3360,9 @@ struct HomeView: View {
                 if !success {
                     endIntegratedSession()
                     releaseRetroJIT()
-                    // ROM cifrada sin sus claves: esta vez se abre con el Azahar de ManicEMU (la próxima
-                    // se vuelve a probar el nuestro, por si ya están las claves).
-                    if core.id == "azahar_omni", message.localizedCaseInsensitiveContains("missing"),
-                       let manic = system.availableCores.first(where: { $0.id == "azahar" }) {
-                        RetroConfig.onceCore[gameID] = manic.id
-                        showToast(tr("Este juego necesita seeddb.bin (Ajustes → Azahar → Claves y seeds). Esta vez se abre con %@.", manic.name), seconds: 6)
-                        DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
-                            launchRetro(game, item: item, system: system)
-                        }
+                    // ROM cifrada sin sus claves (o sin seeddb.bin): se dice qué falta.
+                    if core.id == "azahar_omni", message.localizedCaseInsensitiveContains("missing") {
+                        showToast(tr("Este juego necesita sus claves o seeddb.bin (Ajustes → Azahar → Claves y seeds)."), seconds: 6)
                         return
                     }
                     showToast(message.isEmpty ? tr("No se pudo arrancar el juego.") : message, seconds: 6)
@@ -3504,9 +3501,9 @@ struct HomeView: View {
         } else {
             subtitle = tr("No incluido en esta compilación")
         }
-        let control: SettingControl = core == nil ? .badge(tr("FALTA"), Color.orange) : (pooled && ready ? .badge("JIT", Color.green) : .badge("OK", Color.green))
+        let control: SettingControl = core == nil ? .badge(tr("FALTA"), Color.orange) : (pooled && ready ? .badge(tr("PERMANENTE"), Color.green) : .badge("OK", Color.green))
         return SettingItem(id: id, title: tr("Núcleo"), subtitle: subtitle, symbol: "cpu", tint: SettingTint.aqua, control: control, action: {
-            showToast(pooled ? permanentJITText : tr("Núcleo de ManicEMU: el JIT se activa en cada partida."), seconds: 4)
+            showToast(pooled ? permanentJITText : tr("Este núcleo activa el JIT al abrir el juego."), seconds: 4)
         })
     }
 
@@ -4415,7 +4412,7 @@ struct HomeView: View {
     /// Vertical: `fixed` se queda quieto bajo la cabecera y solo se desplaza `content` (con un
     /// desvanecimiento corto al pasar por debajo de lo fijo). En horizontal, todo se desplaza junto.
     @ViewBuilder
-    private func splitScreen<Fixed: View, Content: View>(topGap: CGFloat = 8, spacing: CGFloat = 18,
+    private func splitScreen<Fixed: View, Content: View>(topGap: CGFloat = 8, spacing: CGFloat = 18, topFade: CGFloat = 8,
                                                          @ViewBuilder fixed: @escaping () -> Fixed,
                                                          @ViewBuilder content: @escaping () -> Content) -> some View {
         if isLandscapeNow {
@@ -4437,7 +4434,7 @@ struct HomeView: View {
                 ScrollViewReader { proxy in
                     followSelection(splitScrollBody(spacing: spacing, content), proxy: proxy)
                         .reportFrame("scroll")
-                        .edgeFade(clear: 0, fade: 14, bottom: 34, bottomClear: 0)
+                        .edgeFade(clear: 0, fade: topFade, bottom: 34, bottomClear: 0)
                 }
             }
         }
@@ -4652,7 +4649,9 @@ struct HomeView: View {
     /// hacia «Tu biblioteca», que se queda fijo debajo de las plataformas; solo bajan las tarjetas.
     /// Al subir, todo vuelve a su sitio.
     private func homePortrait(list: [Game], showFeatured: Bool) -> some View {
-        splitScreen(topGap: 5, spacing: 0, fixed: { Color.clear.frame(height: 0) }) {
+        // Sin desvanecimiento arriba: «Tu biblioteca» se queda pegado justo ahí y lo tapa (si no, se
+        // difuminaba también la barra y se veían las tarjetas a través).
+        splitScreen(topGap: 5, spacing: 0, topFade: 0, fixed: { Color.clear.frame(height: 0) }) {
             LazyVStack(alignment: .leading, spacing: 18, pinnedViews: [.sectionHeaders]) {
                 if showFeatured {
                     featuredPanel
@@ -5203,15 +5202,24 @@ struct HomeView: View {
                             .lineLimit(1)
                             .minimumScaleFactor(0.7)
                     }
-                    .foregroundStyle(active ? Color.black : Color.white.opacity(0.85))
+                    .foregroundStyle(active ? Color.white : Color.white.opacity(0.85))
                     .frame(maxWidth: .infinity)
                     .padding(.vertical, 10)
-                    .background(active ? Color.cyan : Color.white.opacity(0.07), in: Capsule())
+                    .background {
+                        // La burbuja de la barra de abajo: se desliza (con rebote) a la pestaña elegida.
+                        if active {
+                            tabBarPill(touching: false)
+                                .matchedGeometryEffect(id: "settingsCategory", in: liquidNamespace)
+                        } else {
+                            Capsule().fill(Color.white.opacity(0.07))
+                        }
+                    }
                     .contentShape(Capsule())
                 }
-                .buttonStyle(TapHighlightButtonStyle(cornerRadius: 20))
+                .buttonStyle(ControllerFocusableButtonStyle())
             }
         }
+        .animation(.spring(response: 0.4, dampingFraction: 0.68), value: settingsCategory)
     }
 
     private var allSettingItems: [SettingItem] {
@@ -5467,7 +5475,7 @@ struct HomeView: View {
         // depurador se suelta a propósito y los demás núcleos lo vuelven a pedir al abrir un juego.
         if OSLibretroEngine.persistentJITReady && !jitUsable {
             jitControl = .badge(tr("PERMANENTE"), Color.green)
-            jitSubtitle = tr("JIT permanente listo (Dolphin, 3DS y ARMSX2 integrado). Los demás núcleos lo piden al abrir un juego.")
+            jitSubtitle = tr("JIT permanente listo: lo usan todos los núcleos integrados. MeloNX y los emuladores externos activan el JIT al abrir el juego.")
         } else if RetroSystem.allCases.contains(where: { $0.availableCores.contains(where: \.execMem) }) {
             jitSubtitle += " · " + permanentJITText
         }
@@ -6720,7 +6728,9 @@ extension HomeView {
         .padding(.bottom, 16)
         .background {
             ZStack(alignment: .trailing) {
-                LinearGradient(colors: [Color(red: 0.04, green: 0.07, blue: 0.16), Color(red: 0.01, green: 0.02, blue: 0.06)],
+                // Cristal teñido (el de la barra de abajo) sobre un azul noche translúcido.
+                Color.clear.liquidGlass(in: Rectangle())
+                LinearGradient(colors: [Color(red: 0.04, green: 0.07, blue: 0.16).opacity(0.62), Color(red: 0.01, green: 0.02, blue: 0.06).opacity(0.78)],
                                startPoint: .top, endPoint: .bottom)
                 // Neón en el borde derecho.
                 Rectangle()
@@ -6771,52 +6781,60 @@ extension HomeView {
 }
 
 /// Haz de neón a un lado del nombre: se enciende desde el centro hacia el borde de la pantalla
-/// y se vuelve a apagar hacia el centro, sin parar (se para durante una partida).
+/// y se vuelve a apagar hacia el centro, sin parar (se para durante una partida y con la app en
+/// segundo plano).
+/// Ligero a propósito: se pinta a 30 fotogramas por segundo como mucho (no a los 120 de la
+/// pantalla), solo cambia una escala (sin recalcular el diseño) y el brillo es una capa ancha y
+/// tenue en vez de sombras difuminadas, que eran lo que más calentaba.
 private struct HeaderBeam: View {
     @ObservedObject var progress: ScrollProgress
     /// El de la izquierda (crece hacia la izquierda).
     let leading: Bool
     var paused: Bool
     var fades: Bool = true
-    @State var lit = false
+    @Environment(\.scenePhase) private var scenePhase
+
+    /// Un ciclo completo (encender y apagar), en segundos.
+    private static let period: Double = 3.8
 
     var body: some View {
         let hidden: CGFloat = fades ? min(1, progress.offset / 36) : 0
-        let towardEdge: UnitPoint = leading ? .leading : .trailing
-        let towardCenter: UnitPoint = leading ? .trailing : .leading
-        return GeometryReader { geometry in
-            let width: CGFloat = geometry.size.width
-            let length: CGFloat = max(10, width * (lit ? 1.0 : 0.12))
-            ZStack(alignment: leading ? .trailing : .leading) {
-                // Rastro tenue de todo el haz.
-                Capsule()
-                    .fill(LinearGradient(colors: [Color.cyan.opacity(0.22), Color.cyan.opacity(0.0)], startPoint: towardCenter, endPoint: towardEdge))
-                    .frame(height: 1)
-                // La luz que va y vuelve.
-                Capsule()
-                    .fill(LinearGradient(colors: [Color.white, Color.cyan, Color(red: 0.1, green: 0.45, blue: 1.0).opacity(0.0)],
-                                         startPoint: towardCenter, endPoint: towardEdge))
-                    .frame(width: length, height: 2.2)
-                    .shadow(color: Color.cyan.opacity(0.95), radius: 4)
-                    .shadow(color: Color(red: 0.1, green: 0.45, blue: 1.0).opacity(0.7), radius: 10)
-            }
-            .frame(width: width, height: geometry.size.height, alignment: leading ? .trailing : .leading)
+        let stopped: Bool = paused || scenePhase != .active
+        return TimelineView(.animation(minimumInterval: 1.0 / 30.0, paused: stopped)) { context in
+            let phase: Double = stopped ? 0 : context.date.timeIntervalSinceReferenceDate
+                .truncatingRemainder(dividingBy: Self.period) / Self.period
+            // 0 → 1 → 0, suave (como easeInOut con vuelta).
+            let wave: CGFloat = CGFloat(0.5 - 0.5 * cos(phase * 2 * .pi))
+            beam(lit: wave)
         }
         .frame(height: 12)
-        .opacity((lit ? 1.0 : 0.6) * (1 - hidden))
+        .opacity(1 - hidden)
         .allowsHitTesting(false)
-        .onAppear { update() }
-        .onChange(of: paused) { _, _ in update() }
     }
 
-    private func update() {
-        if paused {
-            var transaction = Transaction()
-            transaction.disablesAnimations = true
-            withTransaction(transaction) { lit = false }
-        } else {
-            withAnimation(.easeInOut(duration: 1.9).repeatForever(autoreverses: true)) { lit = true }
+    private func beam(lit: CGFloat) -> some View {
+        let towardEdge: UnitPoint = leading ? .leading : .trailing
+        let towardCenter: UnitPoint = leading ? .trailing : .leading
+        let reach: CGFloat = 0.12 + 0.88 * lit
+        return ZStack {
+            // Rastro tenue de todo el haz.
+            Capsule()
+                .fill(LinearGradient(colors: [Color.cyan.opacity(0.22), Color.cyan.opacity(0.0)], startPoint: towardCenter, endPoint: towardEdge))
+                .frame(height: 1)
+            // Brillo: capa ancha y tenue (sin sombras).
+            Capsule()
+                .fill(LinearGradient(colors: [Color.cyan.opacity(0.35), Color(red: 0.1, green: 0.45, blue: 1.0).opacity(0.0)],
+                                     startPoint: towardCenter, endPoint: towardEdge))
+                .frame(height: 8)
+                .scaleEffect(x: reach, anchor: towardCenter)
+            // La luz que va y vuelve.
+            Capsule()
+                .fill(LinearGradient(colors: [Color.white, Color.cyan, Color(red: 0.1, green: 0.45, blue: 1.0).opacity(0.0)],
+                                     startPoint: towardCenter, endPoint: towardEdge))
+                .frame(height: 2.2)
+                .scaleEffect(x: reach, anchor: towardCenter)
         }
+        .opacity(0.6 + 0.4 * lit)
     }
 }
 
@@ -6869,8 +6887,13 @@ private struct PinnedGlass: View {
     var cornerRadius: CGFloat
 
     var body: some View {
-        Color.clear
-            .liquidGlass(in: RoundedRectangle(cornerRadius: cornerRadius, style: .continuous))
+        let shape = RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
+        // Azul noche casi opaco debajo del cristal: las tarjetas que pasan por debajo no se
+        // mezclan con el texto.
+        return ZStack {
+            shape.fill(Color(red: 0.02, green: 0.04, blue: 0.10).opacity(0.82))
+            Color.clear.liquidGlass(in: shape)
+        }
             .visualEffect { view, proxy in
                 let minY: CGFloat = proxy.frame(in: .scrollView).minY
                 return view.opacity(Double(min(1, max(0, (14 - minY) / 14))))

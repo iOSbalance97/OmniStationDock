@@ -18,8 +18,10 @@ extension View {
     func appSheetBackground() -> some View {
         presentationBackground {
             ZStack {
+                // Cristal teñido de azul, más translúcido (el toque de la barra de abajo).
                 Rectangle().fill(.ultraThinMaterial)
-                AppPanelBackground().opacity(0.9)
+                AppPanelBackground().opacity(0.74)
+                Color(red: 0.05, green: 0.38, blue: 1.0).opacity(0.06)
             }
         }
     }

@@ -1,6 +1,6 @@
 import Foundation
 
-// MARK: - Núcleos libretro integrados (sacados de ManicEMU)
+// MARK: - Núcleos libretro integrados (compilados por OmniStation desde su código)
 //
 // Cada sistema tiene su carpeta en Archivos → OmniStation Dock:
 //   <Sistema>/Juegos    los juegos (también en subcarpetas)
@@ -117,49 +117,40 @@ enum RetroSystem: String, CaseIterable, Identifiable {
         }
     }
 
-    /// Núcleos de ManicEMU para este sistema (el primero es el de por defecto).
+    /// Núcleos de este sistema (el primero es el de por defecto). Todos los compila OmniStation desde
+    /// su código (Cores/Libretro); los de JIT permanente llevan `execMem`. Los id de siempre se
+    /// mantienen, así que los ajustes guardados siguen valiendo; si un juego tenía elegido uno que ya
+    /// no está (los de ManicEMU), se usa el primero.
     var cores: [RetroCore] {
         switch self {
         case .nes:
-            return [RetroCore(id: "nestopia", name: "Nestopia", framework: "nestopia.libretro.framework", jit: false)]
+            return [RetroCore(id: "nestopia", name: "Nestopia", framework: "nestopia_omni.libretro.framework", jit: false)]
         case .snes:
-            return [RetroCore(id: "snes9x", name: "Snes9x", framework: "snes9x.libretro.framework", jit: false)]
+            return [RetroCore(id: "snes9x", name: "Snes9x", framework: "snes9x_omni.libretro.framework", jit: false)]
         case .gb:
-            return [RetroCore(id: "gambatte", name: "Gambatte", framework: "gambatte.libretro.framework", jit: false),
-                    RetroCore(id: "mgba", name: "mGBA", framework: "mgba.libretro.framework", jit: false)]
+            return [RetroCore(id: "gambatte", name: "Gambatte", framework: "gambatte_omni.libretro.framework", jit: false),
+                    RetroCore(id: "mgba", name: "mGBA", framework: "mgba_omni.libretro.framework", jit: false)]
         case .gba:
-            return [RetroCore(id: "mgba", name: "mGBA", framework: "mgba.libretro.framework", jit: false),
-                    RetroCore(id: "gpsp", name: "gpSP", framework: "gpsp.libretro.framework", jit: false),
-                    RetroCore(id: "vbam", name: "VBA-M", framework: "vbam.libretro.framework", jit: false)]
+            return [RetroCore(id: "mgba", name: "mGBA", framework: "mgba_omni.libretro.framework", jit: false),
+                    RetroCore(id: "gpsp", name: "gpSP", framework: "gpsp_omni.libretro.framework", jit: false),
+                    RetroCore(id: "vbam", name: "VBA-M", framework: "vbam_omni.libretro.framework", jit: false)]
         case .nds:
-            // El compilado por OmniStation (JIT permanente) primero; el de ManicEMU, si el nuestro no está.
             return [RetroCore(id: "melondsds_omni", name: "melonDS DS", framework: "melondsds_omni.libretro.framework", jit: true, execMem: true),
-                    RetroCore(id: "melondsds", name: "melonDS DS (ManicEMU)", framework: "melondsds.libretro.framework", jit: true),
-                    RetroCore(id: "desmume", name: "DeSmuME", framework: "desmume.libretro.framework", jit: false)]
+                    RetroCore(id: "desmume", name: "DeSmuME", framework: "desmume_omni.libretro.framework", jit: false)]
         case .ps1:
-            // El nuestro, con dynarec (JIT permanente); el de ManicEMU va sin dynarec.
             return [RetroCore(id: "pcsx_rearmed_omni", name: "PCSX ReARMed", framework: "pcsx_rearmed_omni.libretro.framework", jit: true, execMem: true),
-                    RetroCore(id: "pcsx_rearmed", name: "PCSX ReARMed (ManicEMU)", framework: "pcsx.rearmed.libretro.framework", jit: false),
-                    RetroCore(id: "beetle_psx_hw", name: "Beetle PSX HW", framework: "mednafen.psx.hw.libretro.framework", jit: true, gpu: true)]
+                    RetroCore(id: "beetle_psx_hw", name: "Beetle PSX HW", framework: "mednafen_psx_hw_omni.libretro.framework", jit: false, gpu: true)]
         case .n64:
-            // El nuestro, con dynarec (JIT permanente); el de ManicEMU va sin dynarec.
-            return [RetroCore(id: "mupen64plus_next_omni", name: "Mupen64Plus-Next", framework: "mupen64plus_next_omni.libretro.framework", jit: true, gpu: true, execMem: true),
-                    RetroCore(id: "mupen64plus_next", name: "Mupen64Plus-Next (ManicEMU)", framework: "mupen64plus.next.libretro.framework", jit: true, gpu: true)]
+            return [RetroCore(id: "mupen64plus_next_omni", name: "Mupen64Plus-Next", framework: "mupen64plus_next_omni.libretro.framework", jit: true, gpu: true, execMem: true)]
         case .psp:
-            // El compilado por OmniStation (JIT permanente) primero; el de ManicEMU, si el nuestro no está.
-            return [RetroCore(id: "ppsspp_omni", name: "PPSSPP", framework: "ppsspp_omni.libretro.framework", jit: true, gpu: true, execMem: true),
-                    RetroCore(id: "ppsspp", name: "PPSSPP (ManicEMU)", framework: "ppsspp.libretro.framework", jit: true, gpu: true)]
+            return [RetroCore(id: "ppsspp_omni", name: "PPSSPP", framework: "ppsspp_omni.libretro.framework", jit: true, gpu: true, execMem: true)]
         case .dc:
-            // El nuestro (JIT permanente) primero; sin JIT se usa el de ManicEMU sin JIT.
+            // Con JIT permanente; sin JIT se usa el mismo Flycast compilado sin recompilador.
             return [RetroCore(id: "flycast_omni", name: "Flycast", framework: "flycast_omni.libretro.framework", jit: true, requiresJIT: true, gpu: true, execMem: true),
-                    RetroCore(id: "flycast", name: "Flycast (JIT, ManicEMU)", framework: "flycast.libretro.framework", jit: true, requiresJIT: true, gpu: true),
-                    RetroCore(id: "flycast_jitless", name: "Flycast (sin JIT)", framework: "flycast-jitless.libretro.framework", jit: false, gpu: true)]
+                    RetroCore(id: "flycast_jitless", name: "Flycast (sin JIT)", framework: "flycast_jitless_omni.libretro.framework", jit: false, gpu: true)]
         case .n3ds:
-            // El compilado por OmniStation (JIT permanente) primero; el de ManicEMU, si el nuestro no está.
-            return [RetroCore(id: "azahar_omni", name: "Azahar", framework: "azahar_omni.libretro.framework", jit: true, gpu: true, vulkan: true, execMem: true),
-                    RetroCore(id: "azahar", name: "Azahar (ManicEMU)", framework: "azahar.libretro.framework", jit: true, gpu: true, vulkan: true)]
+            return [RetroCore(id: "azahar_omni", name: "Azahar", framework: "azahar_omni.libretro.framework", jit: true, gpu: true, vulkan: true, execMem: true)]
         case .gc, .wii:
-            // El compilado por OmniStation (Dolphin de libretro, con JIT permanente).
             return [RetroCore(id: "dolphin_omni", name: "Dolphin", framework: "dolphin_omni.libretro.framework", jit: true, gpu: true, vulkan: true, execMem: true)]
         }
     }
@@ -313,7 +304,7 @@ enum RetroFolders {
     /// 3DS: Azahar ya trae las claves para las ROMs cifradas. Solo hace falta seeddb.bin para algunos
     /// juegos (los de eShop o recientes): el que se pone en 3DS/BIOS se copia a donde lo lee Azahar
     /// (Partidas/Azahar/sysdata). Un aes_keys.txt o keys.txt que se copiara antes se aparta: con
-    /// claves malas se cerraban los dos núcleos (también el de ManicEMU, que lee la misma carpeta).
+    /// claves malas se cerraba el núcleo.
     static func prepare3DSKeys() {
         let manager = FileManager.default
         let target: URL = saves(.n3ds).appendingPathComponent("Azahar/sysdata", isDirectory: true)
@@ -394,7 +385,7 @@ enum RetroConfig {
                              cores.map { ($0.id, $0.name) }, cores[0].id).grouped("Núcleo"))
         }
         if system.usesJIT {
-            list.append(pick("jit", .system, "Usar JIT", "Si OmniStation tiene JIT, el núcleo va mucho más rápido. Sin JIT va en modo intérprete.",
+            list.append(pick("jit", .system, "Usar JIT", "Con el JIT permanente de OmniStation el núcleo va mucho más rápido. Sin JIT va en modo intérprete.",
                              yesNo, "true").grouped("Núcleo"))
         }
         list.append(pick("filter", .graphics, "Imagen", "Nítida mantiene los píxeles; suave los difumina.",
@@ -415,8 +406,7 @@ enum RetroConfig {
     }
 
     /// Núcleo de un juego (el elegido para él, el general o el primero que haya).
-    /// Núcleo para la próxima partida de un juego (una vez): el Azahar de ManicEMU cuando el
-    /// nuestro no pudo abrir una ROM cifrada (sin claves).
+    /// Núcleo para la próxima partida de un juego (una vez), si hace falta otro distinto del elegido.
     static var onceCore: [String: String] = [:]
 
     static func core(for system: RetroSystem, gameID: String?) -> RetroCore? {
