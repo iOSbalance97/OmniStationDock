@@ -17,6 +17,7 @@ final class AppDelegate: NSObject, UIApplicationDelegate {
                      configurationForConnecting connectingSceneSession: UISceneSession,
                      options: UIScene.ConnectionOptions) -> UISceneConfiguration {
         let role: UISceneSession.Role = connectingSceneSession.role
+        OSExternalDisplay.noteSceneRequest(forRole: role.rawValue)
         if role == .windowExternalDisplayNonInteractive {
             let configuration = UISceneConfiguration(name: "OmniStation TV", sessionRole: role)
             configuration.delegateClass = OSExternalDisplaySceneDelegate.self
