@@ -6325,30 +6325,28 @@ extension HomeView {
         .animation(.spring(response: 0.32, dampingFraction: 0.68), value: touching)
     }
 
-    /// Cristal de cada grupo: casi transparente, con el borde de luz de los botones de horizontal.
+    /// Cristal de cada grupo: el mismo que los filtros de plataformas sin elegir.
     private func tabBarGlass(_ capsule: Capsule) -> some View {
-        capsule
-            .fill(Color.white.opacity(0.015))
-            .clearGlass(in: capsule)
+        Color.clear
+            .liquidGlass(in: capsule, tint: nil, interactive: false)
             .shadow(color: Color.black.opacity(0.25), radius: 8, y: 4)
     }
 
-    /// Burbuja de la pestaña elegida: el cian de los botones de horizontal (cristal teñido,
-    /// borde cian y brillo).
+    /// Burbuja de la pestaña elegida: como el filtro de plataforma elegido (cristal azul,
+    /// borde cian y brillo cian).
     private func tabBarPill(touching: Bool) -> some View {
         let capsule = Capsule(style: .continuous)
-        return capsule
-            .fill(LinearGradient(colors: [Color.cyan.opacity(touching ? 0.26 : 0.22), Color.cyan.opacity(0.10)],
-                                 startPoint: .topLeading, endPoint: .bottomTrailing))
-            .overlay(capsule.strokeBorder(Color.cyan.opacity(0.9), lineWidth: 1.1))
-            .background(capsule.fill(Color.cyan.opacity(touching ? 0.40 : 0.30)).blur(radius: 10))
+        return Color.clear
+            .liquidGlass(in: capsule, tint: Color(red: 0.05, green: 0.45, blue: 1.0), interactive: false)
+            .overlay(capsule.strokeBorder(Color.cyan.opacity(0.7), lineWidth: 1))
+            .background(capsule.fill(Color.cyan.opacity(touching ? 0.35 : 0.25)).blur(radius: 8))
     }
 
     private func tabBarIcon(_ item: DockSection?, selected: Bool) -> some View {
         let count: Int = controllers.controllers.count
         return Image(systemName: tabBarSymbol(item, selected: selected))
             .font(.system(size: 17, weight: .semibold))
-            .foregroundStyle(selected ? Color.cyan : Color.white.opacity(0.76))
+            .foregroundStyle(selected ? Color.white : Color.white.opacity(0.78))
             .scaleEffect(selected ? 1.05 : 1.0)
             .overlay(alignment: .topTrailing) {
                 if item == nil && count > 0 {
