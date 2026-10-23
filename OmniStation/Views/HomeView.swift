@@ -4412,6 +4412,56 @@ struct HomeView: View {
         }
     }
 
+    /// Vertical: `fixed` se queda quieto bajo la cabecera y solo se desplaza `content` (con un
+    /// desvanecimiento corto al pasar por debajo de lo fijo). En horizontal, todo se desplaza junto.
+    @ViewBuilder
+    private func splitScreen<Fixed: View, Content: View>(topGap: CGFloat = 8, spacing: CGFloat = 18,
+                                                         @ViewBuilder fixed: @escaping () -> Fixed,
+                                                         @ViewBuilder content: @escaping () -> Content) -> some View {
+        if isLandscapeNow {
+            screen(topGap: topGap) {
+                VStack(alignment: .leading, spacing: spacing) {
+                    fixed()
+                    content()
+                }
+            }
+        } else {
+            VStack(spacing: 0) {
+                VStack(alignment: .leading, spacing: spacing) {
+                    fixed()
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(.horizontal, 16)
+                .padding(.top, metrics.headerHeight + topGap)
+                .padding(.bottom, 6)
+                ScrollViewReader { proxy in
+                    followSelection(splitScrollBody(spacing: spacing, content), proxy: proxy)
+                        .reportFrame("scroll")
+                        .edgeFade(clear: 0, fade: 14, bottom: 34, bottomClear: 0)
+                }
+            }
+        }
+    }
+
+    private func splitScrollBody<Content: View>(spacing: CGFloat, _ content: @escaping () -> Content) -> some View {
+        let owner: String = selectedSection.rawValue
+        return ScrollView(showsIndicators: false) {
+            VStack(spacing: 0) {
+                Color.clear.frame(height: 0).id("screen-top")
+                VStack(alignment: .leading, spacing: spacing) {
+                    content()
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(.horizontal, 16)
+                .padding(.top, 8)
+                .padding(.bottom, Self.tabBarReserve + 24)
+                .reportFrame("content-" + owner)
+                Color.clear.frame(height: 1).id("screen-bottom")
+            }
+        }
+        .modifier(ScrollOffsetReader(progress: scrollProgress, owner: owner))
+    }
+
     private func scrollBody<Content: View>(topGap: CGFloat, _ content: @escaping () -> Content) -> some View {
         let owner: String = selectedSection.rawValue
         let topPadding: CGFloat = metrics.headerHeight + topGap
@@ -4589,12 +4639,48 @@ struct HomeView: View {
         // Se calcula una vez por pintado (antes se recalculaba en cada uso).
         let list: [Game] = filteredGames
         let showFeatured: Bool = selectedPlatform == "Todos"
+        return Group {
+            if landscape {
+                homeLandscape(list: list, showFeatured: showFeatured)
+            } else {
+                homePortrait(list: list, showFeatured: showFeatured)
+            }
+        }
+    }
+
+    /// Vertical: la barra de plataformas va fija con el título. Al bajar, «Más jugado» se encoge
+    /// hacia «Tu biblioteca», que se queda fijo debajo de las plataformas; solo bajan las tarjetas.
+    /// Al subir, todo vuelve a su sitio.
+    private func homePortrait(list: [Game], showFeatured: Bool) -> some View {
+        splitScreen(topGap: 5, spacing: 0, fixed: { Color.clear.frame(height: 0) }) {
+            LazyVStack(alignment: .leading, spacing: 18, pinnedViews: [.sectionHeaders]) {
+                if showFeatured {
+                    featuredPanel
+                        .modifier(ScrollShrink())
+                }
+                Section {
+                    gameGrid(list, columns: compactGrid ? 3 : 2, compact: compactGrid)
+                    if libraryGames.isEmpty {
+                        notice
+                    } else if list.isEmpty {
+                        emptyResults
+                    }
+                } header: {
+                    sectionHeading(tr("Tu biblioteca"), detail: tr("%ld elementos", list.count))
+                        .padding(.horizontal, 10)
+                        .padding(.vertical, 9)
+                        .background { PinnedGlass(cornerRadius: 16) }
+                        .padding(.horizontal, -10)
+                }
+            }
+        }
+    }
+
+    private func homeLandscape(list: [Game], showFeatured: Bool) -> some View {
+        let landscape: Bool = true
         return screen(topGap: 5) {
             VStack(alignment: .leading, spacing: landscape ? 15 : 20) {
-                // En vertical la barra de plataformas va fija arriba, con el título.
-                if landscape {
-                    platformFilters(compact: landscape)
-                }
+                platformFilters(compact: landscape)
 
                 if landscape {
                     HStack(alignment: .top, spacing: 16) {
@@ -4893,6 +4979,12 @@ struct HomeView: View {
             ForEach(items) { game in
                 gameTile(game, compact: compact, isFavorite: favorites.contains(game.id), selected: padSelection == game.id)
                     .reportFrame("firstTile", if: game.id == firstID)
+                    // Toque líquido: al entrar o salir por un borde se encogen y aclaran un poco.
+                    .scrollTransition(.interactive, axis: .vertical) { content, phase in
+                        content
+                            .scaleEffect(phase.isIdentity ? 1 : 0.93)
+                            .opacity(phase.isIdentity ? 1 : 0.55)
+                    }
             }
         }
     }
@@ -4926,15 +5018,15 @@ struct HomeView: View {
     private func searchContent(landscape: Bool) -> some View {
         let list: [Game] = filteredGames
         let columns: Int = landscape ? 4 : (compactGrid ? 3 : 2)
-        return screen {
-            VStack(alignment: .leading, spacing: 18) {
-                screenTitle(tr("Búsqueda"), subtitle: tr("Encuentra un juego o filtra por plataforma."))
-                searchInput(landscape: landscape)
-                platformFilters(compact: landscape)
-                sectionHeading(tr("Resultados"), detail: tr("%ld encontrados", list.count))
-                gameGrid(list, columns: columns, compact: landscape || compactGrid)
-                if list.isEmpty { emptyResults }
-            }
+        // Vertical: todo fijo menos las tarjetas de los juegos.
+        return splitScreen(fixed: {
+            screenTitle(tr("Búsqueda"), subtitle: tr("Encuentra un juego o filtra por plataforma."))
+            searchInput(landscape: landscape)
+            platformFilters(compact: landscape)
+            sectionHeading(tr("Resultados"), detail: tr("%ld encontrados", list.count))
+        }) {
+            gameGrid(list, columns: columns, compact: landscape || compactGrid)
+            if list.isEmpty { emptyResults }
         }
     }
 
@@ -5034,17 +5126,18 @@ struct HomeView: View {
         let list: [Game] = favoriteGames
         let columns: Int = landscape ? 4 : (compactGrid ? 3 : 2)
         let highlight: String? = favoritesHighlight
-        return screen {
-            VStack(alignment: .leading, spacing: 18) {
-                screenTitle(tr("Favoritos"), subtitle: tr("Tus juegos marcados con estrella."))
-                platformFilters(compact: landscape, display: true, highlight: highlight)
-
-                if list.isEmpty {
-                    emptyFavorites
-                } else {
-                    sectionHeading(tr("Tus favoritos"), detail: tr("%ld elementos", list.count))
-                    gameGrid(list, columns: columns, compact: landscape || compactGrid)
-                }
+        // Vertical: título, plataforma y encabezado fijos; solo bajan las tarjetas.
+        return splitScreen(fixed: {
+            screenTitle(tr("Favoritos"), subtitle: tr("Tus juegos marcados con estrella."))
+            platformFilters(compact: landscape, display: true, highlight: highlight)
+            if !list.isEmpty {
+                sectionHeading(tr("Tus favoritos"), detail: tr("%ld elementos", list.count))
+            }
+        }) {
+            if list.isEmpty {
+                emptyFavorites
+            } else {
+                gameGrid(list, columns: columns, compact: landscape || compactGrid)
             }
         }
     }
@@ -5527,15 +5620,15 @@ struct HomeView: View {
     private func settingsContent(landscape: Bool) -> some View {
         let groups: [SettingGroup] = settingGroups
         let starts: [Int] = settingStarts(groups)
-        return screen {
-            VStack(alignment: .leading, spacing: 14) {
-                screenTitle(tr("Ajustes"), subtitle: tr("Personaliza tu experiencia."))
-                    .padding(.bottom, 2)
-                settingsCategoryBar
-                    .padding(.bottom, 2)
-                ForEach(groups.indices, id: \.self) { groupIndex in
-                    settingsSection(groups[groupIndex], start: starts[groupIndex], landscape: landscape)
-                }
+        // Vertical: fijos el título y las pestañas (General, Biblioteca…); se desplazan los ajustes.
+        return splitScreen(spacing: 14, fixed: {
+            screenTitle(tr("Ajustes"), subtitle: tr("Personaliza tu experiencia."))
+                .padding(.bottom, 2)
+            settingsCategoryBar
+                .padding(.bottom, 2)
+        }) {
+            ForEach(groups.indices, id: \.self) { groupIndex in
+                settingsSection(groups[groupIndex], start: starts[groupIndex], landscape: landscape)
             }
         }
     }
@@ -6751,5 +6844,36 @@ private struct TabBarCollapse<Content: View>: View {
 
     var body: some View {
         content(enabled && progress.moving)
+    }
+}
+
+
+/// «Más jugado» al bajar: se encoge hacia abajo (hacia «Tu biblioteca») y se desvanece; al subir
+/// vuelve a su tamaño.
+private struct ScrollShrink: ViewModifier {
+    func body(content: Content) -> some View {
+        content.visualEffect { view, proxy in
+            let minY: CGFloat = proxy.frame(in: .scrollView).minY
+            let height: CGFloat = max(proxy.size.height, 1)
+            let t: CGFloat = min(1, max(0, (8 - minY) / height))
+            return view
+                .scaleEffect(1 - 0.25 * t, anchor: .bottom)
+                .opacity(Double(1 - 0.95 * t))
+                .blur(radius: 6 * t)
+        }
+    }
+}
+
+/// Fondo de cristal de un encabezado fijo: solo aparece cuando se queda pegado arriba.
+private struct PinnedGlass: View {
+    var cornerRadius: CGFloat
+
+    var body: some View {
+        Color.clear
+            .liquidGlass(in: RoundedRectangle(cornerRadius: cornerRadius, style: .continuous))
+            .visualEffect { view, proxy in
+                let minY: CGFloat = proxy.frame(in: .scrollView).minY
+                return view.opacity(Double(min(1, max(0, (14 - minY) / 14))))
+            }
     }
 }

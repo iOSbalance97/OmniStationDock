@@ -886,11 +886,17 @@ final class ControllerMonitor: ObservableObject {
 /// Estilo común de botones: se encoge un poco al pulsar.
 /// No usa el foco de iOS: el mando tiene su propia selección, y el foco de iOS hacía que
 /// apareciera un recuadro al tocar sin mando y que algunos toques solo enfocaran sin pulsar.
+/// Tinte suave de todo el cristal de la app (el azul de las plataformas, casi transparente).
+let liquidGlassWash: Color = Color(red: 0.05, green: 0.38, blue: 1.0).opacity(0.10)
+
 struct ControllerFocusableButtonStyle: ButtonStyle {
     func makeBody(configuration: Configuration) -> some View {
+        // Toque líquido: se aplasta un poco al pulsar y rebota al soltar (como la barra de abajo).
         configuration.label
-            .scaleEffect(configuration.isPressed ? 0.96 : 1.0)
-            .animation(.easeOut(duration: 0.1), value: configuration.isPressed)
+            .scaleEffect(x: configuration.isPressed ? 0.95 : 1.0, y: configuration.isPressed ? 0.93 : 1.0)
+            .animation(configuration.isPressed ? .spring(response: 0.18, dampingFraction: 0.8)
+                                               : .spring(response: 0.42, dampingFraction: 0.55),
+                       value: configuration.isPressed)
     }
 }
 
@@ -908,8 +914,10 @@ struct TapHighlightButtonStyle: ButtonStyle {
                         .allowsHitTesting(false)
                 }
             }
-            .scaleEffect(configuration.isPressed ? 0.97 : 1.0)
-            .animation(.easeOut(duration: 0.12), value: configuration.isPressed)
+            .scaleEffect(x: configuration.isPressed ? 0.97 : 1.0, y: configuration.isPressed ? 0.955 : 1.0)
+            .animation(configuration.isPressed ? .spring(response: 0.18, dampingFraction: 0.8)
+                                               : .spring(response: 0.45, dampingFraction: 0.55),
+                       value: configuration.isPressed)
     }
 }
 
@@ -1289,7 +1297,8 @@ extension View {
     @available(iOS 26.0, *)
     private func nativeGlass(tint: Color?, interactive: Bool) -> Glass {
         var glass = Glass.regular
-        if let tint { glass = glass.tint(tint.opacity(0.55)) }
+        // Sin color propio, un azul noche muy suave para que todo el cristal de la app case.
+        if let tint { glass = glass.tint(tint.opacity(0.55)) } else { glass = glass.tint(liquidGlassWash) }
         if interactive { glass = glass.interactive() }
         return glass
     }
@@ -1412,7 +1421,7 @@ private struct LiquidGlassFallback<S: InsettableShape>: ViewModifier {
             )
         }
         return LinearGradient(
-            colors: [Color.blue.opacity(0.09), Color.black.opacity(0.22)],
+            colors: [Color(red: 0.05, green: 0.38, blue: 1.0).opacity(0.12), Color.black.opacity(0.20)],
             startPoint: .topLeading,
             endPoint: .bottomTrailing
         )
