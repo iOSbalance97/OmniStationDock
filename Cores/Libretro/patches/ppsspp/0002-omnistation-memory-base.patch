@@ -1,0 +1,39 @@
+diff --git a/Core/MemMap.cpp b/Core/MemMap.cpp
+index a7b5cae..1bf2e7b 100644
+--- a/Core/MemMap.cpp
++++ b/Core/MemMap.cpp
+@@ -26,6 +26,10 @@
+ 
+ #include "Common/CommonTypes.h"
+ #include "Common/MemArena.h"
++#if PPSSPP_PLATFORM(IOS) && PPSSPP_ARCH(ARM64)
++#include <mach/mach.h>
++#include <mach/vm_map.h>
++#endif
+ #include "Common/Serialize/Serializer.h"
+ #include "Common/Serialize/SerializeFuncs.h"
+ 
+@@ -246,6 +250,23 @@ bool MemoryMap_Setup(MemMapSetupFlags flags) {
+ 		uintptr_t stride = 0;
+ 		ERROR_LOG(Log::MemMap, "MemoryMap_Setup: Hit a wrong path, should not be needed on this platform.");
+ 		return false;
++#endif
++#if PPSSPP_ARCH(ARM64) && PPSSPP_PLATFORM(IOS)
++		// OmniStation: with several cores loaded in one app (Dolphin, Azahar, ARMSX2...), the fixed
++		// window below is often already taken and every base fails (KERN_NO_SPACE). On iOS the PSP
++		// memory is masked, so the base can be anywhere: ask the kernel for a free spot first.
++		{
++			const vm_size_t span = 0x10000000;  // highest masked view end (0x0BE00000 + 64 MB RAM), rounded up
++			vm_address_t probe = 0;
++			if (vm_allocate(mach_task_self(), &probe, span, VM_FLAGS_ANYWHERE) == KERN_SUCCESS) {
++				vm_deallocate(mach_task_self(), probe, span);
++				base = (u8 *)probe;
++				if (Memory_TryBase(flags)) {
++					INFO_LOG(Log::MemMap, "Found valid memory base at %p (kernel-chosen).", base);
++					return true;
++				}
++			}
++		}
+ #endif
+ 		for (uintptr_t base_addr = min_base_addr; base_addr < max_base_addr; base_addr += stride) {
+ 			base_attempts++;
