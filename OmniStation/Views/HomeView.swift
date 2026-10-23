@@ -144,7 +144,8 @@ struct HomeView: View {
     @AppStorage("hapticsEnabled") private var hapticsEnabled = true
     @AppStorage("clickSound") private var clickSound = true
     @AppStorage("keepLandscape") private var keepLandscape = false
-    @AppStorage("hdmiAutoLandscape") private var hdmiAutoLandscape = false
+    /// Al conectar la tele (AirPlay o HDMI): Modo Dock a pantalla completa y en horizontal.
+    @AppStorage("tvAutoDock") private var hdmiAutoLandscape = true
     @AppStorage("appLanguage") private var appLanguage = "system"
     @AppStorage("platformOrder") private var platformOrderRaw = ""
     @AppStorage("libraryFolderBookmark") private var folderBookmark = Data()
@@ -397,6 +398,11 @@ struct HomeView: View {
         UIScreen.main.bounds.width > UIScreen.main.bounds.height
     }
 
+    /// Dock a pantalla completa: el ajuste, o siempre con la tele conectada.
+    private var dockStretch: Bool {
+        dockFullWidth || hdmiForced
+    }
+
     /// Modo Dock: carrusel en horizontal (con el ajuste activado) o forzado por una pantalla HDMI.
     private var dockActive: Bool {
         isLandscapeNow && (dockModeEnabled || hdmiForced)
@@ -462,7 +468,7 @@ struct HomeView: View {
 
     private func layeredContent(landscape: Bool, dock: Bool) -> some View {
         // En el Dock la interfaz puede ocupar todo el ancho (ajuste «Dock a pantalla completa»).
-        let stretch: Edge.Set = (dock && dockFullWidth) ? .horizontal : []
+        let stretch: Edge.Set = (dock && dockStretch) ? .horizontal : []
         return ZStack(alignment: .top) {
             background
             screenContent(landscape: landscape, dock: dock)
@@ -2137,18 +2143,10 @@ struct HomeView: View {
         hdmiPending = false
         if connected {
             guard hdmiAutoLandscape, !hdmiForced else { return }
-            hdmiPending = true
-            showToast(tr("Pantalla HDMI detectada. Activando Modo Dock…"), seconds: 3, actionTitle: tr("Cancelar")) {
-                hdmiTask?.cancel()
-                hdmiPending = false
-            }
-            hdmiTask = Task {
-                try? await Task.sleep(nanoseconds: 3_000_000_000)
-                guard !Task.isCancelled else { return }
-                hdmiPending = false
-                hdmiForced = true
-                OrientationController.apply(landscape: true)
-            }
+            // Al momento: Modo Dock a pantalla completa y en horizontal.
+            hdmiForced = true
+            OrientationController.apply(landscape: true)
+            showToast(tr("Tele conectada: Modo Dock a pantalla completa"), seconds: 2.5)
         } else {
             releaseHDMILandscape()
         }
@@ -5167,7 +5165,7 @@ struct HomeView: View {
         var items: [SettingItem] = []
         items.append(toggleSetting("dock", tr("Modo Dock"), tr("Carrusel al girar a horizontal"), "tv.fill", SettingTint.blue, $dockModeEnabled))
         items.append(toggleSetting("dockFull", tr("Dock a pantalla completa"), tr("Usa todo el ancho en horizontal"), "arrow.left.and.right", SettingTint.sky, $dockFullWidth))
-        items.append(toggleSetting("hdmi", tr("Dock con HDMI"), tr("Activa Dock y horizontal al conectar HDMI"), "display", SettingTint.aqua, $hdmiAutoLandscape))
+        items.append(toggleSetting("hdmi", tr("Dock con la tele"), tr("Al conectar AirPlay o HDMI: Modo Dock a pantalla completa y en horizontal"), "display", SettingTint.aqua, $hdmiAutoLandscape))
         items.append(toggleSetting("tvGame", tr("Juego en la tele"), tr("AirPlay o HDMI: el juego a pantalla completa y el iPhone de mando"), "airplayvideo", SettingTint.aqua, $tvGameOutput))
         items.append(toggleSetting("landscape", tr("Bloquear horizontal"), tr("Mantener la app en horizontal"), "iphone.landscape", SettingTint.periwinkle, $keepLandscape))
         items.append(toggleSetting("clock", tr("Reloj 24 horas"), tr("Formato de la hora en Dock"), "clock.fill", SettingTint.sky, $clock24h))
@@ -5635,7 +5633,7 @@ struct HomeView: View {
             DockStatus(use24h: clock24h, jitActive: jitIndicatorOn, onJITTap: { explainJITIndicator() })
                 .frame(maxWidth: .infinity, alignment: .trailing)
         }
-        .padding(.horizontal, dockFullWidth ? 34 : 22)
+        .padding(.horizontal, dockStretch ? 34 : 22)
         .padding(.top, 8)
         .padding(.bottom, 6)
         .reportFrame("header")
@@ -5724,7 +5722,7 @@ struct HomeView: View {
                 dockOptionsWheel
             }
         }
-        .padding(.horizontal, dockFullWidth ? 34 : 22)
+        .padding(.horizontal, dockStretch ? 34 : 22)
         .padding(.vertical, 6)
         .frame(maxWidth: .infinity)
         .background { dockBarBackground }
@@ -6327,35 +6325,30 @@ extension HomeView {
         .animation(.spring(response: 0.32, dampingFraction: 0.68), value: touching)
     }
 
-    /// Cristal de cada grupo: muy translúcido, con el borde claro y un brillo azul-cian como el
-    /// botón «Jugar».
+    /// Cristal de cada grupo: casi transparente, con el borde de luz de los botones de horizontal.
     private func tabBarGlass(_ capsule: Capsule) -> some View {
-        let accent: [Color] = Self.tabBarAccent
-        let rim: [Color] = [Color.white.opacity(0.30), accent[1].opacity(0.22), accent[0].opacity(0.30)]
-        return ZStack {
-            capsule.fill(LinearGradient(colors: [accent[0].opacity(0.07), accent[1].opacity(0.05)], startPoint: .leading, endPoint: .trailing))
-            capsule.strokeBorder(LinearGradient(colors: rim, startPoint: .topLeading, endPoint: .bottomTrailing), lineWidth: 0.8)
-        }
-        .clearGlass(in: capsule, tint: accent[0].opacity(0.10))
-        .shadow(color: accent[0].opacity(0.18), radius: 10, y: 3)
+        capsule
+            .fill(Color.white.opacity(0.015))
+            .clearGlass(in: capsule)
+            .shadow(color: Color.black.opacity(0.25), radius: 8, y: 4)
     }
 
-    /// Burbuja de la pestaña elegida: el degradado del botón «Jugar».
+    /// Burbuja de la pestaña elegida: el cian de los botones de horizontal (cristal teñido,
+    /// borde cian y brillo).
     private func tabBarPill(touching: Bool) -> some View {
         let capsule = Capsule(style: .continuous)
-        let accent: [Color] = Self.tabBarAccent
         return capsule
-            .fill(LinearGradient(colors: [accent[0].opacity(touching ? 0.75 : 0.85), accent[1].opacity(touching ? 0.65 : 0.80)],
-                                 startPoint: .leading, endPoint: .trailing))
-            .overlay(capsule.strokeBorder(Color.white.opacity(0.25), lineWidth: 0.8))
-            .shadow(color: accent[0].opacity(touching ? 0.55 : 0.4), radius: touching ? 12 : 8, y: 2)
+            .fill(LinearGradient(colors: [Color.cyan.opacity(touching ? 0.26 : 0.22), Color.cyan.opacity(0.10)],
+                                 startPoint: .topLeading, endPoint: .bottomTrailing))
+            .overlay(capsule.strokeBorder(Color.cyan.opacity(0.9), lineWidth: 1.1))
+            .background(capsule.fill(Color.cyan.opacity(touching ? 0.40 : 0.30)).blur(radius: 10))
     }
 
     private func tabBarIcon(_ item: DockSection?, selected: Bool) -> some View {
         let count: Int = controllers.controllers.count
         return Image(systemName: tabBarSymbol(item, selected: selected))
-            .font(.system(size: 17, weight: selected ? .semibold : .regular))
-            .foregroundStyle(selected ? Color.white : Color.white.opacity(0.8))
+            .font(.system(size: 17, weight: .semibold))
+            .foregroundStyle(selected ? Color.cyan : Color.white.opacity(0.76))
             .scaleEffect(selected ? 1.05 : 1.0)
             .overlay(alignment: .topTrailing) {
                 if item == nil && count > 0 {

@@ -200,6 +200,9 @@ enum L10n {
         "Desplazamiento por menús": "Menu navigation",
         "Interruptores de opciones": "Option switches",
         "Táctil": "Touch",
+        "Dock con la tele": "Dock with the TV",
+        "Al conectar AirPlay o HDMI: Modo Dock a pantalla completa y en horizontal": "When AirPlay or HDMI connects: full-screen Dock Mode in landscape",
+        "Tele conectada: Modo Dock a pantalla completa": "TV connected: full-screen Dock Mode",
         "Ajustes junto a las pestañas": "Settings next to the tabs",
         "Barra de abajo: Ajustes en su propio botón (apagado) o en el grupo de pestañas (encendido)": "Bottom bar: Settings as its own button (off) or in the tab group (on)",
         "Gamepad táctil activo": "Touch gamepad active",
@@ -673,14 +676,20 @@ final class HDMIMonitor: ObservableObject {
     private var tokens: [NSObjectProtocol] = []
 
     init() {
-        isConnected = UIScreen.screens.count > 1
+        isConnected = Self.tvPresent
         let center = NotificationCenter.default
-        let names: [Notification.Name] = [UIScreen.didConnectNotification, UIScreen.didDisconnectNotification]
+        // HDMI y AirPlay: la pantalla de iOS o la escena de la tele (OSExternalDisplay).
+        let names: [Notification.Name] = [UIScreen.didConnectNotification, UIScreen.didDisconnectNotification,
+                                          Notification.Name(rawValue: "OSExternalDisplayDidChangeNotification")]
         for name in names {
             tokens.append(center.addObserver(forName: name, object: nil, queue: .main) { [weak self] _ in
-                self?.isConnected = UIScreen.screens.count > 1
+                self?.isConnected = Self.tvPresent
             })
         }
+    }
+
+    private static var tvPresent: Bool {
+        UIScreen.screens.count > 1 || OSExternalDisplay.shared.connected
     }
 
     deinit {
