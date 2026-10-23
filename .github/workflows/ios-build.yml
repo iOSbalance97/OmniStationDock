@@ -12,7 +12,8 @@ jobs:
     env:
       # Versiones fijas de lo que se descarga. Al cambiarlas se invalida su caché y se vuelve a bajar.
       STIKJIT_COMMIT: 32287268fa5824f9edce4cb359f5833ce0cf7b00
-      MANIC_TAG: v2.0.1
+      # Vulkan sobre Metal para los núcleos de 3DS y GameCube/Wii (antes venía con ManicEMU).
+      MOLTENVK_TAG: v1.3.0
       XCODEGEN_VERSION: "2.42.0"
       VULKAN_HEADERS_TAG: v1.3.296
 
@@ -167,34 +168,48 @@ jobs:
           test -f Vendor/Vulkan-Headers/include/vulkan/vulkan.h
           test -f Vendor/Vulkan-Headers/include/vulkan/vulkan_metal.h
 
-      # Núcleos libretro de ManicEMU (NES, SNES, Game Boy, GBA, NDS, PS1, N64, PSP, Dreamcast, 3DS y GameCube/Wii)
-      # sacados de su IPA pública. Opcionales: si no se consiguen, la app va sin ellos. En caché por
-      # versión de ManicEMU y por la lista de núcleos (tools/fetch_manic_cores.py).
-      - name: Cache ManicEMU cores
-        id: manic-cache
+      # MoltenVK (Apache-2.0, KhronosGroup): el Vulkan de los núcleos de 3DS y GameCube/Wii. Su
+      # framework dinámico de iOS, de la release oficial. Opcional: sin él, esos núcleos usan el de
+      # MeloNX (si va en la app). En caché por versión.
+      - name: Cache MoltenVK
+        id: moltenvk-cache
         uses: actions/cache@v4
         with:
-          path: Vendor/Libretro
-          key: manic-cores-${{ env.MANIC_TAG }}-${{ hashFiles('tools/fetch_manic_cores.py') }}
+          path: Vendor/MoltenVK
+          key: moltenvk-${{ env.MOLTENVK_TAG }}-v1
 
-      - name: Fetch ManicEMU cores (optional)
-        if: steps.manic-cache.outputs.cache-hit != 'true'
+      - name: Fetch MoltenVK (optional)
+        if: steps.moltenvk-cache.outputs.cache-hit != 'true'
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -uo pipefail
-          rm -rf Vendor/Libretro "$RUNNER_TEMP/manic"
-          mkdir -p "$RUNNER_TEMP/manic" Vendor
-          if ! gh release download "$MANIC_TAG" --repo Manic-EMU/ManicEMU --pattern '*.ipa' --dir "$RUNNER_TEMP/manic"; then
-            echo "::warning::No se pudo descargar la IPA de ManicEMU $MANIC_TAG: la app va sin sus núcleos."
+          rm -rf Vendor/MoltenVK "$RUNNER_TEMP/mvk"
+          mkdir -p "$RUNNER_TEMP/mvk"
+          got=""
+          for pattern in 'MoltenVK-ios.tar*' 'MoltenVK-all.tar*'; do
+            if gh release download "$MOLTENVK_TAG" --repo KhronosGroup/MoltenVK --pattern "$pattern" --dir "$RUNNER_TEMP/mvk" 2>/dev/null; then
+              got="yes"; break
+            fi
+          done
+          if [ -z "$got" ]; then
+            echo "::warning::No se pudo bajar MoltenVK $MOLTENVK_TAG: 3DS y GameCube/Wii usarán el de MeloNX (si está)."
             exit 0
           fi
-          ls -l "$RUNNER_TEMP/manic"
-          python3 -I tools/fetch_manic_cores.py Vendor/Libretro "$RUNNER_TEMP/manic"
-          rm -rf "$RUNNER_TEMP/manic"
+          for archive in "$RUNNER_TEMP"/mvk/*.tar*; do tar -xf "$archive" -C "$RUNNER_TEMP/mvk"; done
+          FW="$(find "$RUNNER_TEMP/mvk" -type d -path '*dynamic*' -path '*ios-arm64/MoltenVK.framework' -print -quit)"
+          if [ -z "$FW" ] || [ ! -f "$FW/MoltenVK" ] || ! nm -gU "$FW/MoltenVK" | grep -q ' _vkGetInstanceProcAddr$'; then
+            echo "::warning::La descarga de MoltenVK no trae el framework dinámico de iOS: 3DS y GameCube/Wii usarán el de MeloNX (si está)."
+            exit 0
+          fi
+          mkdir -p Vendor/MoltenVK
+          cp -R "$FW" Vendor/MoltenVK/MoltenVK.framework
+          lipo -info Vendor/MoltenVK/MoltenVK.framework/MoltenVK
+          rm -rf "$RUNNER_TEMP/mvk"
 
       # Núcleos libretro compilados por OmniStation desde su código (workflow «Build libretro cores»):
-      # Dolphin con JIT permanente. Opcionales: sin la release «libretro-cores» van solo los de ManicEMU.
+      # todos los de la app (los de JIT permanente y los sin JIT). Sin la release «libretro-cores»,
+      # la app va sin núcleos integrados.
       - name: Fetch OmniStation libretro cores (optional)
         env:
           GH_TOKEN: ${{ github.token }}
@@ -224,49 +239,46 @@ jobs:
           fi
           ls -l Vendor/OmniCores
 
-      # Archivos de sistema de los núcleos: los de PPSSPP (assets) más las tablas VFPU de ManicEMU, y
-      # la carpeta Sys de Dolphin de ManicEMU (la de su núcleo). Opcionales y en caché.
+      # Archivos de sistema de los núcleos: los de PPSSPP (sus assets, con las tablas VFPU) y la
+      # carpeta Sys de Dolphin (de su mismo código, por si la release no la trae). Opcionales y en caché.
       - name: Cache core system files
         id: ppsspp-cache
         uses: actions/cache@v4
         with:
           path: Vendor/LibretroSystem
-          key: libretro-system-v2
+          key: libretro-system-v3-${{ hashFiles('Cores/Libretro/sources.json') }}
 
       - name: Fetch core system files (optional)
         if: steps.ppsspp-cache.outputs.cache-hit != 'true'
         run: |
           set -uo pipefail
-          rm -rf Vendor/LibretroSystem "$RUNNER_TEMP/ppsspp" "$RUNNER_TEMP/manic-src"
-          if git clone --depth 1 --filter=blob:none --sparse https://github.com/hrydgard/ppsspp.git "$RUNNER_TEMP/ppsspp" \
-             && git -C "$RUNNER_TEMP/ppsspp" sparse-checkout set assets; then
+          rm -rf Vendor/LibretroSystem "$RUNNER_TEMP/ppsspp" "$RUNNER_TEMP/dolphin-src"
+          read -r PPSSPP_REV DOLPHIN_REV < <(python3 -c 'import json; d=json.load(open("Cores/Libretro/sources.json")); print(d["ppsspp"]["revision"], d["dolphin"]["revision"])')
+          if git clone -q --filter=blob:none --no-checkout https://github.com/hrydgard/ppsspp.git "$RUNNER_TEMP/ppsspp" \
+             && git -C "$RUNNER_TEMP/ppsspp" sparse-checkout set assets \
+             && git -C "$RUNNER_TEMP/ppsspp" checkout -q "$PPSSPP_REV"; then
             mkdir -p Vendor/LibretroSystem
             cp -R "$RUNNER_TEMP/ppsspp/assets" Vendor/LibretroSystem/PPSSPP
             rm -rf Vendor/LibretroSystem/PPSSPP/debugger Vendor/LibretroSystem/PPSSPP/upload \
               Vendor/LibretroSystem/PPSSPP/themes Vendor/LibretroSystem/PPSSPP/ui_images
             if [ ! -f Vendor/LibretroSystem/PPSSPP/ppge_atlas.zim ]; then
               echo "::warning::Los archivos de PPSSPP no están completos: la PSP irá sin ellos."
-              rm -rf Vendor/LibretroSystem
+              rm -rf Vendor/LibretroSystem/PPSSPP
             fi
+            ls Vendor/LibretroSystem/PPSSPP/vfpu 2>/dev/null | head -3 || echo "::warning::PPSSPP sin tablas VFPU."
           else
             echo "::warning::No se pudieron descargar los archivos de PPSSPP: la PSP irá sin ellos."
           fi
-          if GIT_LFS_SKIP_SMUDGE=1 git clone --depth 1 --filter=blob:none --sparse https://github.com/Manic-EMU/ManicEMU.git "$RUNNER_TEMP/manic-src" \
-             && git -C "$RUNNER_TEMP/manic-src" sparse-checkout set System.core/Libretro/system/PPSSPP/vfpu System.core/Libretro/system/dolphin-emu; then
-            if [ -d Vendor/LibretroSystem/PPSSPP ]; then
-              mkdir -p Vendor/LibretroSystem/PPSSPP/vfpu
-              cp "$RUNNER_TEMP"/manic-src/System.core/Libretro/system/PPSSPP/vfpu/*.dat Vendor/LibretroSystem/PPSSPP/vfpu/ || true
-            fi
-            if [ -d "$RUNNER_TEMP/manic-src/System.core/Libretro/system/dolphin-emu/Sys" ]; then
-              mkdir -p Vendor/LibretroSystem
-              cp -R "$RUNNER_TEMP/manic-src/System.core/Libretro/system/dolphin-emu" Vendor/LibretroSystem/dolphin-emu
-            else
-              echo "::warning::No se encontró la carpeta Sys de Dolphin: GameCube y Wii irán sin ella."
-            fi
+          if git clone -q --filter=blob:none --no-checkout https://github.com/libretro/dolphin.git "$RUNNER_TEMP/dolphin-src" \
+             && git -C "$RUNNER_TEMP/dolphin-src" sparse-checkout set Data/Sys \
+             && git -C "$RUNNER_TEMP/dolphin-src" checkout -q "$DOLPHIN_REV" \
+             && [ -d "$RUNNER_TEMP/dolphin-src/Data/Sys" ]; then
+            mkdir -p Vendor/LibretroSystem/dolphin-emu
+            cp -R "$RUNNER_TEMP/dolphin-src/Data/Sys" Vendor/LibretroSystem/dolphin-emu/Sys
           else
-            echo "::warning::No se pudo descargar lo de ManicEMU (VFPU y Sys de Dolphin)."
+            echo "::warning::No se pudo bajar la carpeta Sys de Dolphin (se usa la de la release, si está)."
           fi
-          rm -rf "$RUNNER_TEMP/ppsspp" "$RUNNER_TEMP/manic-src"
+          rm -rf "$RUNNER_TEMP/ppsspp" "$RUNNER_TEMP/dolphin-src"
           du -sh Vendor/LibretroSystem 2>/dev/null || true
 
       - name: Generate Xcode project
@@ -312,18 +324,9 @@ jobs:
             done
             cp Vendor/MeloNX/MeloNXRuntime.json Payload/OmniStationDock.app/MeloNXRuntime.json
           fi
-          # Núcleos libretro de ManicEMU (si se consiguieron).
-          if [ -f Vendor/Libretro/cores.json ]; then
-            for item in Vendor/Libretro/*; do
-              name="$(basename "$item")"
-              [ "$name" = "cores.json" ] && continue
-              if [ -e "Payload/OmniStationDock.app/Frameworks/$name" ]; then
-                echo "::warning::$name ya existe en la app; no se copia."
-                continue
-              fi
-              cp -R "$item" "Payload/OmniStationDock.app/Frameworks/$name"
-            done
-            cp Vendor/Libretro/cores.json Payload/OmniStationDock.app/LibretroCores.json
+          # MoltenVK (Vulkan de 3DS y GameCube/Wii), si se bajó y MeloNX no trae ya el suyo.
+          if [ -d Vendor/MoltenVK/MoltenVK.framework ] && [ ! -e Payload/OmniStationDock.app/Frameworks/MoltenVK.framework ]; then
+            cp -R Vendor/MoltenVK/MoltenVK.framework Payload/OmniStationDock.app/Frameworks/MoltenVK.framework
           fi
           # Archivos de sistema de los núcleos (PPSSPP y Dolphin); la app los copia a su BIOS al jugar.
           for item in PPSSPP dolphin-emu; do
@@ -333,7 +336,7 @@ jobs:
             fi
           done
           # Núcleos libretro propios (si se descargaron) y, con el Dolphin propio, su carpeta Sys
-          # (la de su mismo código) en lugar de la de ManicEMU.
+          # (la de su mismo código, de la release).
           if [ -d Vendor/OmniCores ]; then
             for fw in Vendor/OmniCores/*.libretro.framework; do
               [ -d "$fw" ] || continue
