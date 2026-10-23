@@ -122,7 +122,7 @@
     "revision": "5aa091fde632fb332c8d8c34e280d62dc951954c",
     "framework": "flycast_jitless_omni",
     "bundleID": "com.omnistation.core.flycastjitless",
-    "submodules": false,
-    "notes": "Flycast (GPL-2.0) sin recompilador (TARGET_NO_REC), el mismo código que «flycast»: es el que se usa para Dreamcast cuando no hay JIT."
+    "submodules": true,
+    "notes": "Flycast (GPL-2.0) sin recompilador (TARGET_NO_REC), el mismo código que «flycast»: es el que se usa para Dreamcast cuando no hay JIT. Necesita sus submódulos (core/deps), como «flycast»."
   }
 }
