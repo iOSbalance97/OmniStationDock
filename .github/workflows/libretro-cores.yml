@@ -2,9 +2,13 @@ name: Build libretro cores (OmniStation)
 
 # Compila núcleos libretro desde su código (Cores/Libretro/sources.json) y los publica como release
 # «libretro-cores» de este repositorio. El workflow de la app los descarga de ahí (no los vuelve a
-# compilar). De momento: Dolphin (GameCube/Wii), Azahar (3DS), melonDS DS (NDS), PCSX ReARMed
-# (PS1), PPSSPP (PSP), Mupen64Plus-Next (N64) y Flycast (Dreamcast), que piden su memoria de JIT a OmniStation y usan el JIT permanente. Tarda bastante (30-90 min de Mac): lánzalo solo cuando
-# quieras un núcleo nuevo. Cada núcleo se compila aparte; la release guarda todos.
+# compilar). La app ya no usa los núcleos de ManicEMU: todos salen de aquí.
+# - Con JIT permanente (piden su memoria de JIT a OmniStation): Dolphin (GameCube/Wii), Azahar (3DS),
+#   melonDS DS (NDS), PCSX ReARMed (PS1), PPSSPP (PSP), Mupen64Plus-Next (N64) y Flycast (Dreamcast).
+# - Sin JIT: Nestopia (NES), Snes9x (SNES), Gambatte (GB/GBC), mGBA y gpSP y VBA-M (GBA), DeSmuME
+#   (NDS), Beetle PSX HW (PS1) y Flycast sin JIT (Dreamcast, cuando no hay JIT).
+# «sin_jit_todos» compila todos los sin JIT seguidos en una sola ejecución y publica una vez.
+# Tarda bastante (de 10 a 90 min de Mac según el núcleo): lánzalo solo cuando quieras un núcleo nuevo.
 on:
   workflow_dispatch:
     inputs:
@@ -12,6 +16,7 @@ on:
         description: "Núcleo"
         type: choice
         options:
+          - sin_jit_todos
           - dolphin
           - azahar
           - melondsds
@@ -19,7 +24,16 @@ on:
           - ppsspp
           - mupen64plus_next
           - flycast
-        default: flycast
+          - nestopia
+          - snes9x
+          - gambatte
+          - mgba
+          - gpsp
+          - vbam
+          - desmume
+          - beetle_psx_hw
+          - flycast_jitless
+        default: sin_jit_todos
 
 permissions:
   contents: write
@@ -29,7 +43,9 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  # Un núcleo (los de JIT permanente, con sus submódulos, o cualquiera de los otros).
   core:
+    if: inputs.core != 'sin_jit_todos'
     runs-on: macos-26
     timeout-minutes: 150
     env:
@@ -55,7 +71,7 @@ jobs:
               print('repository=' + repo, file=output)
               print('revision=' + info['revision'], file=output)
               print('framework=' + info['framework'], file=output)
-              # Mupen64Plus-Next lo trae todo dentro (y un submódulo roto sin URL): sin submódulos.
+              # Sin submódulos (Mupen64Plus-Next trae uno roto; VBA-M, uno de Windows): git a secas.
               print('submodules=' + ('recursive' if info.get('submodules', True) else 'false'), file=output)
           PY
 
@@ -69,23 +85,12 @@ jobs:
           submodules: recursive
           persist-credentials: false
 
-      # Sin submódulos (Mupen64Plus-Next): su submódulo roto hace fallar a actions/checkout aunque no
-      # se pidan, así que se baja con git a secas.
       - name: Checkout core source (git, sin submódulos)
         if: steps.source.outputs.submodules == 'false'
         env:
           REPO: ${{ steps.source.outputs.repository }}
           REV: ${{ steps.source.outputs.revision }}
-        run: |
-          set -euo pipefail
-          DEST=".native-sources/$CORE"
-          rm -rf "$DEST"
-          mkdir -p "$DEST"
-          git -C "$DEST" init -q
-          git -C "$DEST" remote add origin "https://github.com/$REPO.git"
-          git -C "$DEST" fetch -q --depth 1 origin "$REV"
-          git -C "$DEST" checkout -q FETCH_HEAD
-          test "$(git -C "$DEST" rev-parse HEAD)" = "$REV"
+        run: bash Cores/Libretro/fetch_source.sh "$REPO" "$REV" ".native-sources/$CORE"
 
       - name: Select Xcode and tools
         run: |
@@ -101,53 +106,12 @@ jobs:
         run: bash Cores/Libretro/build_core.sh "$CORE" ".native-sources/$CORE"
 
       - name: Package core
-        run: |
-          set -euo pipefail
-          cd dist/libretro
-          FW="${{ steps.source.outputs.framework }}.libretro.framework"
-          ditto -c -k --keepParent "$FW" "$FW.zip"
-          if [ -d dolphin-sys ]; then ditto -c -k dolphin-sys dolphin-sys.zip; fi
-          python3 - "$CORE" "${{ steps.source.outputs.repository }}" "${{ steps.source.outputs.revision }}" "$FW" <<'PY'
-          import json, sys
-          core, repo, revision, framework = sys.argv[1:5]
-          try:
-              data = json.load(open('cores.json'))
-          except Exception:
-              data = {}
-          data[core] = {"repository": repo, "revision": revision, "framework": framework}
-          json.dump(data, open('cores.json', 'w'), indent=2)
-          PY
-          ls -l
+        run: bash Cores/Libretro/package_core.sh "$CORE" "${{ steps.source.outputs.repository }}" "${{ steps.source.outputs.revision }}"
 
-      # La release guarda todos los núcleos: se bajan los que ya había, se añade/cambia este.
       - name: Publish release libretro-cores
         env:
           GH_TOKEN: ${{ github.token }}
-        run: |
-          set -euo pipefail
-          cd dist/libretro
-          mkdir -p previous
-          gh release download libretro-cores --repo "$GITHUB_REPOSITORY" --dir previous 2>/dev/null || true
-          if [ -f previous/cores.json ]; then
-            python3 - <<'PY'
-          import json
-          old = json.load(open('previous/cores.json'))
-          new = json.load(open('cores.json'))
-          old.update(new)
-          json.dump(old, open('cores.json', 'w'), indent=2)
-          PY
-          fi
-          FW="${{ steps.source.outputs.framework }}.libretro.framework"
-          for file in previous/*.zip; do
-            [ -f "$file" ] || continue
-            name="$(basename "$file")"
-            [ -f "$name" ] || cp "$file" "$name"
-          done
-          gh release delete libretro-cores --repo "$GITHUB_REPOSITORY" --cleanup-tag --yes 2>/dev/null || true
-          gh release create libretro-cores --repo "$GITHUB_REPOSITORY" ./*.zip cores.json \
-            --title "Núcleos libretro (OmniStation)" \
-            --notes "Núcleos libretro compilados por OmniStation Dock desde su código (Cores/Libretro/sources.json). Los usa el workflow de la app." \
-            --prerelease
+        run: bash Cores/Libretro/publish_release.sh
 
       - name: Upload build logs
         if: failure()
@@ -155,5 +119,82 @@ jobs:
         with:
           name: libretro-${{ inputs.core }}-logs
           path: build/libretro-${{ inputs.core }}/*.log
+          if-no-files-found: ignore
+          retention-days: 7
+
+  # Todos los sin JIT seguidos (ninguno tiene submódulos que hagan falta). Si uno falla, sigue con
+  # los demás y publica los que salieron; al final el paso falla y dice cuáles no.
+  sin_jit:
+    if: inputs.core == 'sin_jit_todos'
+    runs-on: macos-26
+    timeout-minutes: 180
+    env:
+      HOMEBREW_NO_AUTO_UPDATE: "1"
+      CORES: nestopia snes9x gambatte mgba gpsp vbam desmume beetle_psx_hw flycast_jitless
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Select Xcode and tools
+        run: |
+          set -euo pipefail
+          sudo xcode-select -switch /Applications/Xcode.app
+          xcodebuild -version
+          cmake --version
+          bash -n Cores/Libretro/build_core.sh
+
+      - name: Compile and package cores
+        id: build
+        run: |
+          set -uo pipefail
+          failed=""
+          built=""
+          for CORE in $CORES; do
+            echo "::group::$CORE"
+            read -r REPO REV < <(python3 - "$CORE" <<'PY'
+          import json, sys
+          info = json.load(open('Cores/Libretro/sources.json'))[sys.argv[1]]
+          print(info['repository'].removeprefix('https://github.com/').removesuffix('.git'), info['revision'])
+          PY
+          )
+            DEST=".native-sources/$CORE"
+            if bash Cores/Libretro/fetch_source.sh "$REPO" "$REV" "$DEST" \
+               && bash Cores/Libretro/build_core.sh "$CORE" "$DEST" \
+               && bash Cores/Libretro/package_core.sh "$CORE" "$REPO" "$REV"; then
+              built="$built $CORE"
+            else
+              echo "::error::No se pudo compilar $CORE (registro en el artefacto de logs)."
+              failed="$failed $CORE"
+            fi
+            # Sitio en el disco para el siguiente.
+            rm -rf "$DEST"
+            echo "::endgroup::"
+          done
+          echo "Compilados:$built"
+          echo "Fallidos:${failed:- ninguno}"
+          echo "built=$built" >> "$GITHUB_OUTPUT"
+          echo "failed=$failed" >> "$GITHUB_OUTPUT"
+          [ -n "$built" ]
+
+      - name: Publish release libretro-cores
+        if: steps.build.outputs.built != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: bash Cores/Libretro/publish_release.sh
+
+      - name: Report failed cores
+        if: steps.build.outputs.failed != ''
+        run: |
+          echo "::error::Fallaron:${{ steps.build.outputs.failed }}. Los demás ya están publicados."
+          exit 1
+
+      - name: Upload build logs
+        if: failure() || steps.build.outputs.failed != ''
+        uses: actions/upload-artifact@v4
+        with:
+          name: libretro-sin-jit-logs
+          path: build/libretro-*/*.log
           if-no-files-found: ignore
           retention-days: 7
