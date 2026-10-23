@@ -3645,7 +3645,7 @@ typedef NS_ENUM(NSInteger, OSLRMenuAction) {
     _optionIndex = 0;
     _menuView.hidden = YES;
     _optionsView.hidden = NO;
-    [self.view bringSubviewToFront:_optionsView];
+    [self placeMenuView:_optionsView];
     [self layoutOptionsPage];
     [self refreshOptionsPage];
 }
@@ -3655,7 +3655,7 @@ typedef NS_ENUM(NSInteger, OSLRMenuAction) {
     _optionsVisible = NO;
     _optionsView.hidden = YES;
     _menuView.hidden = NO;
-    [self.view bringSubviewToFront:_menuView];
+    [self placeMenuView:_menuView];
     [self showPage:nil];
     [self refreshMenu];
 }
@@ -4032,8 +4032,10 @@ typedef NS_ENUM(NSInteger, OSLRMenuAction) {
 - (void)pollMenuInput {
     GCExtendedGamepad *pad = _controller.extendedGamepad;
     if (pad == nil) return;
-    BOOL home = pad.buttonHome != nil && pad.buttonHome.isPressed;
-    BOOL combo = pad.buttonMenu.isPressed && pad.buttonOptions != nil && pad.buttonOptions.isPressed;
+    // Home o SELECT+START en cualquier mando (no solo en el que maneja el menú): algunos núcleos
+    // dejaban como «mando actual» otro distinto y la combinación no abría el menú.
+    BOOL home = NO;
+    BOOL combo = OSAnyPadMenuCombo(&home);
     float y = pad.dpad.yAxis.value;
     if (fabsf(y) < 0.5f) y = pad.leftThumbstick.yAxis.value;
     BOOL up = y > 0.5f, down = y < -0.5f;
@@ -4107,7 +4109,7 @@ typedef NS_ENUM(NSInteger, OSLRMenuAction) {
     [self refreshMenu];
     [_skinView releaseAll];
     _menuView.hidden = NO;
-    [self.view bringSubviewToFront:_menuView];
+    [self placeMenuView:_menuView];
     atomic_store(&gTouchBits, 0);
     if (self.menuChanged) self.menuChanged(YES);
 }
@@ -4120,7 +4122,27 @@ typedef NS_ENUM(NSInteger, OSLRMenuAction) {
     }
     _menuVisible = NO;
     _menuView.hidden = YES;
+    [self returnMenuViews];
     if (self.menuChanged) self.menuChanged(NO);
+}
+
+/// Con el juego en la tele y un mando conectado, el menú se ve en la tele (si no, en el iPhone,
+/// que es donde se toca).
+- (void)placeMenuView:(UIView *)view {
+    if (view == nil) return;
+    UIView *target = self.view;
+    if (_onTV && _controller != nil) target = OSTVMenuContainer(_tvHost, self.view.bounds.size) ?: self.view;
+    if (view.superview != target) {
+        [target addSubview:view];
+        [self.view setNeedsLayout];
+    }
+    [target bringSubviewToFront:view];
+}
+
+- (void)returnMenuViews {
+    for (UIView *view in @[_menuView ?: [UIView new], _optionsView ?: [UIView new]]) {
+        if (view.superview != nil && view.superview != self.view) [self.view addSubview:view];
+    }
 }
 
 - (void)menuRowTapped:(UIButton *)sender {
@@ -4159,6 +4181,8 @@ typedef NS_ENUM(NSInteger, OSLRMenuAction) {
 
 - (void)layoutTV {
     if (_tvHost == nil) return;
+    // El cuadro del menú en la tele sigue el tamaño del iPhone.
+    if (_menuView.superview != nil && _menuView.superview != self.view) OSTVMenuContainer(_tvHost, self.view.bounds.size);
     CGRect bounds = _tvHost.bounds;
     self.videoView.frame = [self videoFrameInBounds:bounds safe:UIEdgeInsetsZero portrait:NO];
 }
@@ -4232,6 +4256,9 @@ typedef NS_ENUM(NSInteger, OSLRMenuAction) {
     if (!_onTV) return;
     _onTV = NO;
     _tvLabel.hidden = YES;
+    // El menú (si está abierto en la tele) vuelve al iPhone.
+    [self returnMenuViews];
+    if (_menuVisible) [self.view bringSubviewToFront:_optionsVisible ? _optionsView : _menuView];
     [self setVideoScale:UIScreen.mainScreen.nativeScale];
     [self returnVideoToPhone];
     [OSExternalDisplay.shared releaseView:_tvHost];

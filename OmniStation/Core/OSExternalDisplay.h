@@ -47,6 +47,15 @@ extern NSNotificationName const OSExternalDisplayDidChangeNotification;
 
 @end
 
+/// Cuadro para enseñar el menú de pausa en la tele: mide como la pantalla del iPhone (así el menú
+/// se coloca igual que en el iPhone) y se escala para llenar la tele. Se crea en `tvHost` si no
+/// está y queda por encima del juego. nil si no hay `tvHost`.
+FOUNDATION_EXPORT UIView *_Nullable OSTVMenuContainer(UIView *_Nullable tvHost, CGSize phoneSize);
+
+/// Combinación del menú en CUALQUIER mando conectado: devuelve si hay SELECT+START pulsados y,
+/// en `home`, si hay un botón Home pulsado.
+FOUNDATION_EXPORT BOOL OSAnyPadMenuCombo(BOOL *_Nullable home);
+
 /// Lo usa AppDelegate para la escena de la pantalla externa.
 @interface OSExternalDisplaySceneDelegate : UIResponder <UIWindowSceneDelegate>
 @property (nonatomic, strong, nullable) UIWindow *window;

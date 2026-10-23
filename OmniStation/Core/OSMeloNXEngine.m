@@ -1174,6 +1174,7 @@ static void OSNXSetTouchVisible(UIViewController *controller, BOOL visible) {
     if (!_onTV) return;
     _onTV = NO;
     _tvLabel.hidden = YES;
+    if (_menuView.superview != self.view) [self.view addSubview:_menuView];
     [self returnMetalViewToPhone];
     [OSExternalDisplay.shared releaseView:_tvContainer];
 }
@@ -1221,7 +1222,11 @@ static void OSNXSetTouchVisible(UIViewController *controller, BOOL visible) {
     _menuIndex = 0;
     [self refreshMenu];
     _menuView.hidden = NO;
-    [self.view bringSubviewToFront:_menuView];
+    // Con el juego en la tele y un mando, el menú se ve en la tele.
+    UIView *target = self.view;
+    if (_onTV && GCController.controllers.count > 0) target = OSTVMenuContainer(_tvContainer, self.view.bounds.size) ?: self.view;
+    if (_menuView.superview != target) [target addSubview:_menuView];
+    [target bringSubviewToFront:_menuView];
     if (self.menuChanged) self.menuChanged(YES);
 }
 
@@ -1229,6 +1234,7 @@ static void OSNXSetTouchVisible(UIViewController *controller, BOOL visible) {
     if (!_menuVisible) return;
     _menuVisible = NO;
     _menuView.hidden = YES;
+    if (_menuView.superview != self.view) [self.view addSubview:_menuView];
     if (self.menuChanged) self.menuChanged(NO);
 }
 
@@ -1252,11 +1258,17 @@ static void OSNXSetTouchVisible(UIViewController *controller, BOOL visible) {
 /// Mando: Home o SELECT+START abren el menú; dentro del menú, cruceta, ✕ y ○.
 - (void)pollController {
     if (self.textInputOpen) return;
-    GCController *controller = GCController.current ?: GCController.controllers.firstObject;
+    GCController *controller = GCController.current.extendedGamepad ? GCController.current : nil;
+    if (controller == nil) {
+        for (GCController *candidate in GCController.controllers) {
+            if (candidate.extendedGamepad != nil) { controller = candidate; break; }
+        }
+    }
     GCExtendedGamepad *pad = controller.extendedGamepad;
     if (pad == nil) return;
-    BOOL home = pad.buttonHome != nil && pad.buttonHome.isPressed;
-    BOOL combo = pad.buttonMenu.isPressed && pad.buttonOptions != nil && pad.buttonOptions.isPressed;
+    // Home o SELECT+START en cualquier mando conectado.
+    BOOL home = NO;
+    BOOL combo = OSAnyPadMenuCombo(&home);
     float y = pad.dpad.yAxis.value;
     if (fabsf(y) < 0.5f) y = pad.leftThumbstick.yAxis.value;
     BOOL up = y > 0.5f;

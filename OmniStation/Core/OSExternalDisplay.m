@@ -2,6 +2,41 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 #import "OSExternalDisplay.h"
 #import <AVFoundation/AVFoundation.h>
+#import <GameController/GameController.h>
+
+static const NSInteger kOSTVMenuTag = 770077;
+
+UIView *OSTVMenuContainer(UIView *tvHost, CGSize phoneSize) {
+    if (tvHost == nil || phoneSize.width < 1 || phoneSize.height < 1) return nil;
+    UIView *container = [tvHost viewWithTag:kOSTVMenuTag];
+    if (container == nil) {
+        container = [UIView new];
+        container.tag = kOSTVMenuTag;
+        container.backgroundColor = UIColor.clearColor;
+        [tvHost addSubview:container];
+    }
+    CGSize tv = tvHost.bounds.size;
+    CGFloat scale = MIN(tv.width / phoneSize.width, tv.height / phoneSize.height);
+    if (!(scale > 0)) scale = 1;
+    container.transform = CGAffineTransformIdentity;
+    container.bounds = CGRectMake(0, 0, phoneSize.width, phoneSize.height);
+    container.transform = CGAffineTransformMakeScale(scale, scale);
+    container.center = CGPointMake(tv.width * 0.5, tv.height * 0.5);
+    [tvHost bringSubviewToFront:container];
+    return container;
+}
+
+BOOL OSAnyPadMenuCombo(BOOL *home) {
+    BOOL combo = NO, anyHome = NO;
+    for (GCController *controller in GCController.controllers) {
+        GCExtendedGamepad *pad = controller.extendedGamepad;
+        if (pad == nil) continue;
+        if (pad.buttonHome != nil && pad.buttonHome.isPressed) anyHome = YES;
+        if (pad.buttonMenu.isPressed && pad.buttonOptions != nil && pad.buttonOptions.isPressed) combo = YES;
+    }
+    if (home) *home = anyHome;
+    return combo;
+}
 
 NSNotificationName const OSExternalDisplayDidChangeNotification = @"OSExternalDisplayDidChangeNotification";
 
