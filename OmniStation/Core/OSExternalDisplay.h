@@ -34,6 +34,13 @@ extern NSNotificationName const OSExternalDisplayDidChangeNotification;
 /// Cómo está la escena y la ventana de la tele (para el registro).
 @property (nonatomic, readonly, copy) NSString *stateDescription;
 
+/// Para el registro: si la app admite varias escenas (en LiveContainer manda la app anfitriona),
+/// cuántas pantallas ve iOS, qué escenas hay y lo que ha pasado con la tele desde que se abrió.
+@property (nonatomic, readonly, copy) NSString *diagnosticsDescription;
+
+/// Apunta en los eventos que iOS pidió una escena (lo llama AppDelegate).
++ (void)noteSceneRequestForRole:(NSString *)role;
+
 @end
 
 /// Lo usa AppDelegate para la escena de la pantalla externa.

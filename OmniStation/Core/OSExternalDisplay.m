@@ -32,6 +32,52 @@ static NSString *const kOSTVOutputKey = @"tvGameOutput";
     __weak UIWindowScene *_scene;
     UIWindow *_window;
     __weak UIView *_hostedView;
+    NSMutableArray<NSString *> *_events;
+}
+
++ (void)noteSceneRequestForRole:(NSString *)role {
+    [OSExternalDisplay.shared note:[NSString stringWithFormat:@"iOS pide escena %@", role]];
+}
+
+- (void)note:(NSString *)text {
+    NSDateFormatter *formatter = [NSDateFormatter new];
+    formatter.dateFormat = @"HH:mm:ss";
+    NSString *line = [NSString stringWithFormat:@"%@ %@", [formatter stringFromDate:NSDate.date], text];
+    dispatch_block_t block = ^{
+        if (self->_events == nil) self->_events = [NSMutableArray array];
+        [self->_events addObject:line];
+        if (self->_events.count > 12) [self->_events removeObjectAtIndex:0];
+    };
+    if (NSThread.isMainThread) block(); else dispatch_async(dispatch_get_main_queue(), block);
+}
+
+/// Si iOS ya tiene una escena de pantalla externa conectada pero no pasó por el delegado
+/// (otra app anfitriona, como LiveContainer), se usa igualmente.
+- (void)adoptConnectedScene {
+    if (_scene != nil || !NSThread.isMainThread) return;
+    for (UIScene *scene in UIApplication.sharedApplication.connectedScenes) {
+        if (![scene isKindOfClass:UIWindowScene.class]) continue;
+        if (![scene.session.role isEqualToString:UIWindowSceneSessionRoleExternalDisplayNonInteractive]) continue;
+        _scene = (UIWindowScene *)scene;
+        [self note:@"escena de la tele adoptada (sin delegado)"];
+        return;
+    }
+}
+
+- (NSString *)diagnosticsDescription {
+    NSMutableArray<NSString *> *roles = [NSMutableArray array];
+    for (UIScene *scene in UIApplication.sharedApplication.connectedScenes) {
+        NSString *delegate = scene.delegate ? NSStringFromClass([(NSObject *)scene.delegate class]) : @"sin delegado";
+        [roles addObject:[NSString stringWithFormat:@"%@ (%@)", scene.session.role, delegate]];
+    }
+    #pragma clang diagnostic push
+    #pragma clang diagnostic ignored "-Wdeprecated-declarations"
+    NSUInteger screens = UIScreen.screens.count;
+    #pragma clang diagnostic pop
+    return [NSString stringWithFormat:@"varias escenas %@, pantallas %lu, escenas [%@], eventos [%@]",
+            UIApplication.sharedApplication.supportsMultipleScenes ? @"sí" : @"NO",
+            (unsigned long)screens, [roles componentsJoinedByString:@"; "],
+            [(_events ?: @[]) componentsJoinedByString:@"; "]];
 }
 
 + (OSExternalDisplay *)shared {
@@ -47,6 +93,7 @@ static NSString *const kOSTVOutputKey = @"tvGameOutput";
 }
 
 - (BOOL)connected {
+    [self adoptConnectedScene];
     return _scene != nil;
 }
 
@@ -69,11 +116,13 @@ static NSString *const kOSTVOutputKey = @"tvGameOutput";
 }
 
 - (void)sceneConnected:(UIWindowScene *)scene {
+    [self note:[NSString stringWithFormat:@"tele conectada %.0fx%.0f", scene.coordinateSpace.bounds.size.width, scene.coordinateSpace.bounds.size.height]];
     _scene = scene;
     [NSNotificationCenter.defaultCenter postNotificationName:OSExternalDisplayDidChangeNotification object:self];
 }
 
 - (void)sceneDisconnected:(UIWindowScene *)scene {
+    [self note:@"tele desconectada"];
     if (_scene != nil && _scene != scene) return;
     _scene = nil;
     // Primero avisa (el núcleo recupera su pantalla en el iPhone) y luego quita la ventana.
@@ -101,9 +150,29 @@ static NSString *const kOSTVOutputKey = @"tvGameOutput";
     view.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
     [root addSubview:view];
     _hostedView = view;
+    [self showProbeLabelIn:root];
     [_window layoutIfNeeded];
     [view setNeedsLayout];
     return YES;
+}
+
+/// Prueba: un rótulo en la tele durante 5 s. Si se ve, la ventana de la tele funciona y lo que
+/// falla es la imagen del núcleo; si no se ve, iOS no está enseñando la ventana.
+- (void)showProbeLabelIn:(UIView *)root {
+    UILabel *label = [UILabel new];
+    label.text = @"OmniStation · TV";
+    label.font = [UIFont systemFontOfSize:34 weight:UIFontWeightBold];
+    label.textColor = UIColor.cyanColor;
+    label.backgroundColor = [UIColor colorWithWhite:0 alpha:0.6];
+    label.textAlignment = NSTextAlignmentCenter;
+    label.layer.cornerRadius = 14;
+    label.layer.masksToBounds = YES;
+    label.frame = CGRectMake(40, 40, 420, 64);
+    label.autoresizingMask = UIViewAutoresizingFlexibleRightMargin | UIViewAutoresizingFlexibleBottomMargin;
+    [root addSubview:label];
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(5 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+        [label removeFromSuperview];
+    });
 }
 
 - (void)releaseView:(UIView *)view {

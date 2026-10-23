@@ -4169,8 +4169,8 @@ typedef NS_ENUM(NSInteger, OSLRMenuAction) {
     int state = (OSExternalDisplay.shared.connected ? 1 : 0) | (OSExternalDisplay.enabled ? 2 : 0) | 4;
     if (state != _tvLogged) {
         _tvLogged = state;
-        OSLRTrace([NSString stringWithFormat:@"tele: %@, ajuste %@", OSExternalDisplay.shared.connected ? @"conectada" : @"no (iOS solo duplica la pantalla)",
-                   OSExternalDisplay.enabled ? @"sí" : @"no"], NO);
+        OSLRTrace([NSString stringWithFormat:@"tele: %@, ajuste %@; %@", OSExternalDisplay.shared.connected ? @"conectada" : @"no (iOS solo duplica la pantalla)",
+                   OSExternalDisplay.enabled ? @"sí" : @"no", OSExternalDisplay.shared.diagnosticsDescription], NO);
     }
     if (wantTV && !_onTV) {
         if (_tvHost == nil) {
@@ -4192,8 +4192,11 @@ typedef NS_ENUM(NSInteger, OSLRMenuAction) {
                 OSLRGameViewController *strongSelf = weakSelf;
                 if (strongSelf == nil || !strongSelf->_onTV) return;
                 OSLRVideoView *video = strongSelf.videoView;
-                OSLRTrace([NSString stringWithFormat:@"tele (2 s): %@; imagen %@ en %@, oculta %@, capa %@, fotogramas %llu",
-                           OSExternalDisplay.shared.stateDescription, NSStringFromCGRect(video.frame),
+                OSLRTrace([NSString stringWithFormat:@"tele (2 s): %@; capa Metal %@ escala %.0f, GL %@; imagen %@ en %@, oculta %@, capa %@, fotogramas %llu",
+                           OSExternalDisplay.shared.stateDescription,
+                           video.metalLayer ? NSStringFromCGSize(video.metalLayer.drawableSize) : @"-", video.metalLayer.contentsScale,
+                           video.glLayer ? NSStringFromCGRect(video.glLayer.frame) : @"-",
+                           NSStringFromCGRect(video.frame),
                            video.window == nil ? @"ninguna ventana" : [NSString stringWithFormat:@"ventana %@ (%@)", NSStringFromCGRect(video.window.bounds), video.window.windowScene.session.role],
                            video.hidden ? @"sí" : @"no",
                            video.glLayer ? (video.glLayer.hidden ? @"GL oculta" : @"GL") : (video.metalLayer ? (video.metalLayer.hidden ? @"Metal oculta" : @"Metal") : (video.layer.contents ? @"CPU con imagen" : @"CPU sin imagen")),
