@@ -1,0 +1,1 @@
+RomPatcher.js de Marc Robledo (MIT), revisión 4f17297cd1dc0835a0b0747497fa15f5f63f1623 de https://github.com/marcrobledo/RomPatcher.js
