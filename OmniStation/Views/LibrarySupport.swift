@@ -17,12 +17,13 @@ enum Platforms {
         ("Switch", "rectangle.on.rectangle"),
         ("3DS", "square.3.layers.3d"),
         ("NDS", "rectangle.portrait"),
-        ("GBA", "gameboy"),
+        ("GBA", "rectangle.inset.filled"),
         ("Juegos iOS", "apps.iphone"),
         ("Ports", "shippingbox.fill")
     ]
 
-    /// Las reconoce la carpeta externa; su filtro solo aparece cuando hay juegos suyos.
+    /// Las reconoce la carpeta externa; su filtro solo aparece cuando hay juegos suyos. Solo las que
+    /// OmniStation puede jugar (más PS3 y Xbox 360, para más adelante).
     static let extended: [Entry] = [
         ("PS1", "gamecontroller.fill"),
         ("PS3", "gamecontroller.fill"),
@@ -31,11 +32,9 @@ enum Platforms {
         ("NES", "gamecontroller"),
         ("Game Boy", "rectangle.portrait"),
         ("Game Boy Color", "rectangle.portrait"),
-        ("Mega Drive", "gamecontroller"),
-        ("Master System", "gamecontroller"),
-        ("Game Gear", "rectangle.portrait"),
         ("Dreamcast", "circle.circle"),
-        ("Saturn", "circle.hexagongrid.fill")
+        // Aún sin emulador: preparadas para cuando lo haya.
+        ("Xbox 360", "xmark.circle.fill")
     ]
 
     /// Iconos que se pueden elegir al crear una plataforma.
@@ -121,11 +120,8 @@ enum Platforms {
         case "N64": return "Nintendo 64"
         case "SNES": return "Super Nintendo"
         case "NES": return "Nintendo Entertainment System"
-        case "Mega Drive": return "Sega Mega Drive"
-        case "Master System": return "Sega Master System"
-        case "Game Gear": return "Sega Game Gear"
         case "Dreamcast": return "Sega Dreamcast"
-        case "Saturn": return "Sega Saturn"
+        case "Xbox 360": return "Xbox 360"
         default: return name
         }
     }
@@ -323,9 +319,6 @@ enum LibraryScanner {
         "cso": "PSP", "pbp": "PSP",
         "iso": "PS2", "chd": "PS2",
         "cue": "PS1", "m3u": "PS1", "bin": "PS1",
-        "md": "Mega Drive", "gen": "Mega Drive", "smd": "Mega Drive",
-        "sms": "Master System",
-        "gg": "Game Gear",
         "gdi": "Dreamcast", "cdi": "Dreamcast"
     ]
 
@@ -348,11 +341,8 @@ enum LibraryScanner {
             case "nes", "famicom": return "NES"
             case "snes", "super nintendo", "sfc": return "SNES"
             case "n64", "nintendo 64": return "N64"
-            case "genesis", "megadrive", "mega drive", "md": return "Mega Drive"
-            case "mastersystem", "master system", "sms": return "Master System"
-            case "gamegear", "game gear", "gg": return "Game Gear"
             case "dreamcast", "dc": return "Dreamcast"
-            case "saturn": return "Saturn"
+            case "xbox 360", "xbox360", "x360": return "Xbox 360"
             case "ports": return "Ports"
             default: continue
             }

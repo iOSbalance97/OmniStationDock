@@ -4,7 +4,7 @@ import SwiftUI
 
 /// Ajustes de emulación de ARMSX2 o MeloNX. Sin `gameID` son los generales (Ajustes); con él,
 /// los de ese juego: cada uno puede usar el general o tener su propio valor.
-/// Con el mando: L1/R1 cambian de pestaña, ↑↓ elige, ←→ o ✕ cambian el valor, △ restablece
+/// Con el mando: L1/R1 cambian de pestaña, ↑↓ elige, ✕ abre la ventana de valores, △ restablece
 /// («Por defecto», arriba a la izquierda), □ guarda y cierra («Listo», arriba a la derecha) y
 /// ○ sale sin guardar (deja los ajustes como estaban al abrir).
 struct EmulatorConfigSheet: View {
@@ -20,6 +20,9 @@ struct EmulatorConfigSheet: View {
     @State private var selected: Int = 1
     /// Ajustes al abrir la ventana (○ los deja así).
     @State private var snapshot: [String: String]? = nil
+    /// Ventana de valores abierta (de qué ajuste) y valor marcado en ella.
+    @State private var picking: EmuOption? = nil
+    @State private var pickIndex: Int = 0
 
     private func tr(_ key: String, _ args: CVarArg...) -> String {
         let base = L10n.tr(key, lang)
@@ -133,6 +136,7 @@ struct EmulatorConfigSheet: View {
                 }
             }
         }
+        .overlay { choiceOverlay }
         .presentationDetents([.large])
         .appSheetBackground()
         .preferredColorScheme(.dark)
@@ -151,7 +155,7 @@ struct EmulatorConfigSheet: View {
                 return true
             }
             pad.shoulderHandler = { step in
-                stepTab(step)
+                if picking == nil { stepTab(step) }
                 return true
             }
             pad.triangleHandler = {
@@ -284,21 +288,8 @@ struct EmulatorConfigSheet: View {
                 .labelsHidden()
                 .tint(Color.cyan)
             } else {
-                Menu {
-                    if gameID != nil {
-                        Button {
-                            set(option, nil)
-                        } label: {
-                            menuLabel(tr("General (%@)", tr(option.label(for: EmulatorConfig.globalValue(option, emulator)))), checked: inherited)
-                        }
-                    }
-                    ForEach(option.choices, id: \.self) { choice in
-                        Button {
-                            set(option, choice.value)
-                        } label: {
-                            menuLabel(tr(choice.label), checked: !inherited && value == choice.value)
-                        }
-                    }
+                Button {
+                    openChoices(option)
                 } label: {
                     HStack(spacing: 4) {
                         VStack(alignment: .trailing, spacing: 1) {
@@ -318,6 +309,7 @@ struct EmulatorConfigSheet: View {
                             .foregroundStyle(.white.opacity(0.35))
                     }
                 }
+                .buttonStyle(ControllerFocusableButtonStyle())
             }
         }
         .padding(.horizontal, 16)
@@ -357,17 +349,119 @@ struct EmulatorConfigSheet: View {
         revision += 1
     }
 
-    /// Valores por los que pasa ←→ (en un juego, el primero es «General»).
-    private func cycle(_ option: EmuOption, step: Int) {
-        var values: [String?] = option.choices.map { Optional($0.value) }
-        if gameID != nil { values.insert(nil, at: 0) }
+    // MARK: Ventana de valores
+
+    /// Valores que se pueden elegir (en un juego, el primero es «General»).
+    private func choiceList(_ option: EmuOption) -> [(label: String, value: String?)] {
+        var list: [(label: String, value: String?)] = option.choices.map { (label: tr($0.label), value: Optional($0.value)) }
+        if gameID != nil {
+            list.insert((label: tr("General (%@)", tr(option.label(for: EmulatorConfig.globalValue(option, emulator)))), value: nil), at: 0)
+        }
+        return list
+    }
+
+    private func choiceIndex(_ option: EmuOption) -> Int {
         let current: String? = gameID != nil ? ownValue(option) : currentValue(option)
-        let index: Int = values.firstIndex(where: { $0 == current }) ?? 0
-        let next: Int = (index + step + values.count) % values.count
-        set(option, values[next])
+        return choiceList(option).firstIndex(where: { $0.value == current }) ?? 0
+    }
+
+    private func openChoices(_ option: EmuOption) {
+        pickIndex = choiceIndex(option)
+        withAnimation(.spring(response: 0.36, dampingFraction: 0.78)) { picking = option }
+    }
+
+    private func closeChoices() {
+        withAnimation(.spring(response: 0.3, dampingFraction: 0.85)) { picking = nil }
+    }
+
+    private func choose(_ index: Int) {
+        guard let option = picking else { return }
+        let list = choiceList(option)
+        guard list.indices.contains(index) else { return }
+        set(option, list[index].value)
+        closeChoices()
+    }
+
+    /// Lista de valores encima de los ajustes (como las de iOS), con el mando: ↑↓, ✕ elige, ○ vuelve.
+    @ViewBuilder
+    private var choiceOverlay: some View {
+        if let option = picking {
+            let list = choiceList(option)
+            let current: Int = choiceIndex(option)
+            ZStack {
+                Color.black.opacity(0.5)
+                    .ignoresSafeArea()
+                    .onTapGesture { closeChoices() }
+                VStack(spacing: 10) {
+                    Text(tr(option.title))
+                        .font(AppFont.text(14, .bold))
+                        .foregroundStyle(.white)
+                        .multilineTextAlignment(.center)
+                    ScrollViewReader { proxy in
+                        ScrollView(showsIndicators: false) {
+                            VStack(spacing: 0) {
+                                ForEach(Array(list.enumerated()), id: \.offset) { index, item in
+                                    if index > 0 { IOSRowDivider(inset: 0) }
+                                    Button {
+                                        choose(index)
+                                    } label: {
+                                        HStack(spacing: 10) {
+                                            Image(systemName: index == current ? "checkmark.circle.fill" : "circle")
+                                                .foregroundStyle(index == current ? Color.cyan : Color.white.opacity(0.35))
+                                            Text(item.label)
+                                                .font(AppFont.text(13, index == current ? .bold : .medium))
+                                                .foregroundStyle(.white)
+                                                .lineLimit(2)
+                                                .minimumScaleFactor(0.75)
+                                            Spacer(minLength: 0)
+                                        }
+                                        .padding(.horizontal, 14)
+                                        .frame(maxWidth: .infinity, minHeight: 46, alignment: .leading)
+                                        .contentShape(Rectangle())
+                                        .iosRowHighlight(pad.gamepadConnected && index == pickIndex)
+                                    }
+                                    .buttonStyle(.plain)
+                                    .id(index)
+                                }
+                            }
+                            .appSectionCard(cornerRadius: 14)
+                        }
+                        .frame(maxHeight: 380)
+                        .fixedSize(horizontal: false, vertical: list.count <= 7)
+                        .onAppear { proxy.scrollTo(pickIndex, anchor: .center) }
+                        .onChange(of: pickIndex) { _, value in
+                            withAnimation(.easeInOut(duration: 0.18)) { proxy.scrollTo(value, anchor: .center) }
+                        }
+                    }
+                }
+                .padding(16)
+                .frame(maxWidth: 360)
+                .background {
+                    ZStack {
+                        Rectangle().fill(.regularMaterial)
+                        AppPanelBackground().opacity(0.85)
+                    }
+                    .clipShape(RoundedRectangle(cornerRadius: 22, style: .continuous))
+                }
+                .overlay(RoundedRectangle(cornerRadius: 22, style: .continuous).strokeBorder(Color.cyan.opacity(0.4), lineWidth: 0.8))
+                .padding(24)
+                .transition(.scale(scale: 0.92).combined(with: .opacity))
+            }
+        }
     }
 
     private func handle(_ action: PadAction) {
+        if let option = picking {
+            let count: Int = choiceList(option).count
+            switch action {
+            case .up: pickIndex = max(0, pickIndex - 1)
+            case .down: pickIndex = min(count - 1, pickIndex + 1)
+            case .accept: choose(pickIndex)
+            case .cancel: closeChoices()
+            case .left, .right: break
+            }
+            return
+        }
         let list: [EmuOption] = options
         switch action {
         case .up:
@@ -376,17 +470,21 @@ struct EmulatorConfigSheet: View {
             selected = min(lastRow, selected + 1)
         case .left, .right:
             let step: Int = action == .left ? -1 : 1
+            // ←→ solo cambian de pestaña (en la fila de pestañas); los valores, con ✕.
             if selected == 0 {
                 stepTab(step)
                 selected = 0
-            } else if selected <= list.count {
-                cycle(list[selected - 1], step: step)
             }
         case .accept:
             if selected == 0 {
                 selected = list.isEmpty ? 0 : 1
             } else if selected <= list.count {
-                cycle(list[selected - 1], step: 1)
+                let option: EmuOption = list[selected - 1]
+                if option.isToggle && gameID == nil {
+                    set(option, currentValue(option) == "true" ? "false" : "true")
+                } else {
+                    openChoices(option)
+                }
             }
         case .cancel:
             // ○: salir sin guardar.

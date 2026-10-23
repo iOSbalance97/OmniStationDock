@@ -1331,49 +1331,66 @@ struct LibraryListSheet: View {
     let lang: String
     @ObservedObject var pad: SheetPad
     let games: [LibraryGame]
-    var onRemove: (LibraryGame) -> Void
-    var onRemoveAll: () -> Void
     @Environment(\.dismiss) private var dismiss
 
-    // 0..<n juegos, n = Quitar todos, n+1 = Listo.
+    // Con el mando: 0 = primera plataforma… (se mueve por plataformas), último = Listo.
     @State private var selected = 0
-    @State private var confirmAll = false
 
     private func tr(_ key: String, _ args: CVarArg...) -> String {
         let base = L10n.tr(key, lang)
         return args.isEmpty ? base : String(format: base, arguments: args)
     }
 
-    private var removeAllIndex: Int { games.count }
-    private var doneIndex: Int { games.count + 1 }
+    /// Los juegos por plataforma, en el orden de la barra de plataformas.
+    private var groups: [(platform: String, games: [LibraryGame])] {
+        let byPlatform: [String: [LibraryGame]] = Dictionary(grouping: games, by: \.platform)
+        let order: [String] = Platforms.ordered(UserDefaults.standard.string(forKey: "platformOrder") ?? "")
+        let known: [String] = order.filter { byPlatform[$0] != nil }
+        let others: [String] = byPlatform.keys.filter { !known.contains($0) }.sorted()
+        return (known + others).map { name in
+            (platform: name, games: (byPlatform[name] ?? []).sorted { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending })
+        }
+    }
+
+    private var doneIndex: Int { groups.count }
 
     var body: some View {
         NavigationStack {
             ScrollViewReader { proxy in
                 ScrollView {
-                    VStack(spacing: 8) {
+                    LazyVStack(alignment: .leading, spacing: 14, pinnedViews: [.sectionHeaders]) {
                         if games.isEmpty {
                             SheetInfoCard(symbol: "tray", text: tr("No hay juegos añadidos."))
                         }
-                        ForEach(games.indices, id: \.self) { index in
-                            gameRow(index)
-                                .id(index)
+                        Text(tr("Para borrar un juego: Opciones del juego → Borrar."))
+                            .font(AppFont.text(11))
+                            .foregroundStyle(.white.opacity(0.55))
+                        let list = groups
+                        ForEach(list.indices, id: \.self) { index in
+                            Section {
+                                VStack(spacing: 0) {
+                                    ForEach(Array(list[index].games.enumerated()), id: \.offset) { position, game in
+                                        if position > 0 { IOSRowDivider() }
+                                        gameRow(game)
+                                    }
+                                }
+                                .glassCard(cornerRadius: 16)
+                                .padRing(pad.gamepadConnected && selected == index, cornerRadius: 16)
+                            } header: {
+                                platformHeader(list[index].platform, count: list[index].games.count)
+                                    .id(index)
+                            }
                         }
-                        HStack(spacing: 10) {
-                            SheetActionButton(title: confirmAll ? tr("Pulsa otra vez para confirmar") : tr("Quitar todos"), tint: Color.orange, selected: pad.gamepadConnected && selected == removeAllIndex, enabled: !games.isEmpty) {
-                                removeAll()
-                            }
-                            SheetActionButton(title: tr("Listo"), tint: Color.white.opacity(0.85), selected: pad.gamepadConnected && selected == doneIndex) {
-                                dismiss()
-                            }
+                        SheetActionButton(title: tr("Listo"), tint: Color.white.opacity(0.85), selected: pad.gamepadConnected && selected == doneIndex) {
+                            dismiss()
                         }
                         .padding(.top, 6)
-                        .id(removeAllIndex)
+                        .id(doneIndex)
                     }
                     .padding(16)
                 }
                 .onChange(of: selected) { _, value in
-                    withAnimation(.easeInOut(duration: 0.2)) { proxy.scrollTo(min(value, removeAllIndex), anchor: .center) }
+                    withAnimation(.easeInOut(duration: 0.2)) { proxy.scrollTo(value, anchor: .top) }
                 }
             }
             .navigationTitle(tr("Juegos añadidos"))
@@ -1387,87 +1404,61 @@ struct LibraryListSheet: View {
             }
         }
         .onDisappear { pad.handler = nil }
-        .onChange(of: games.count) { _, count in
-            selected = min(selected, count + 1)
+    }
+
+    private func platformHeader(_ platform: String, count: Int) -> some View {
+        HStack(spacing: 8) {
+            Image(systemName: Platforms.symbol(for: platform))
+                .font(.system(size: 13, weight: .semibold))
+                .foregroundStyle(Platforms.tint(for: platform))
+            Text(Platforms.fullName(for: platform))
+                .font(AppFont.text(13, .bold))
+            Spacer(minLength: 4)
+            Text("\(count)")
+                .font(AppFont.text(11, .bold))
+                .foregroundStyle(.white.opacity(0.6))
         }
+        .padding(.vertical, 6)
+        .padding(.horizontal, 4)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(Color.black.opacity(0.001))
     }
 
     private func sourceLabel(_ source: String) -> String {
         switch source {
         case "scan": return tr("Carpeta externa")
         case "ios": return tr("App iOS")
-        default: return tr("Acceso directo")
+        default:
+            if source.hasPrefix("core:") || source.hasPrefix("emu:") { return tr("Carpeta del emulador") }
+            return tr("Acceso directo")
         }
     }
 
-    private func gameRow(_ index: Int) -> some View {
-        let game: LibraryGame = games[index]
-        return HStack(spacing: 12) {
-            Image(systemName: Platforms.symbol(for: game.platform))
-                .font(.system(size: 15, weight: .semibold))
-                .foregroundStyle(Color.cyan)
-                .frame(width: 36, height: 36)
-                .background(Color.cyan.opacity(0.14), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
-            VStack(alignment: .leading, spacing: 3) {
-                Text(game.name)
-                    .font(AppFont.text(14, .semibold))
-                    .lineLimit(1)
-                Text(game.platform + " · " + sourceLabel(game.source))
-                    .font(AppFont.text(11))
-                    .foregroundStyle(.white.opacity(0.55))
-            }
-            Spacer(minLength: 6)
-            Button {
-                onRemove(game)
-            } label: {
-                Image(systemName: "trash")
-                    .font(.system(size: 14, weight: .semibold))
-                    .foregroundStyle(Color.orange)
-                    .frame(width: 36, height: 36)
-                    .contentShape(Rectangle())
-            }
-            .buttonStyle(ControllerFocusableButtonStyle())
-            .accessibilityLabel(tr("Quitar"))
+    private func gameRow(_ game: LibraryGame) -> some View {
+        VStack(alignment: .leading, spacing: 2) {
+            Text(game.name)
+                .font(AppFont.text(14, .semibold))
+                .lineLimit(1)
+            Text(sourceLabel(game.source) + (game.fileName.map { " · " + $0 } ?? ""))
+                .font(AppFont.text(10))
+                .foregroundStyle(.white.opacity(0.5))
+                .lineLimit(1)
         }
-        .padding(10)
-        .glassCard(cornerRadius: 16)
-        .padRing(pad.gamepadConnected && selected == index, cornerRadius: 16)
-    }
-
-    private func removeAll() {
-        guard !games.isEmpty else { return }
-        if confirmAll {
-            confirmAll = false
-            onRemoveAll()
-        } else {
-            confirmAll = true
-        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(.horizontal, 12)
+        .padding(.vertical, 9)
     }
 
     private func handle(_ action: PadAction) {
         switch action {
-        case .cancel:
-            if confirmAll { confirmAll = false } else { dismiss() }
-        case .up:
-            if selected == doneIndex {
-                selected = max(0, games.count - 1)
-            } else {
-                selected = max(0, selected - 1)
-            }
-        case .down:
-            selected = min(removeAllIndex, selected + 1)
-        case .left:
-            if selected >= removeAllIndex { selected = removeAllIndex }
-        case .right:
-            if selected >= removeAllIndex { selected = doneIndex }
-        case .accept:
-            if selected < games.count {
-                onRemove(games[selected])
-            } else if selected == removeAllIndex {
-                removeAll()
-            } else {
-                dismiss()
-            }
+        case .cancel, .accept where selected == doneIndex:
+            dismiss()
+        case .up, .left:
+            selected = max(0, selected - 1)
+        case .down, .right:
+            selected = min(doneIndex, selected + 1)
+        default:
+            break
         }
     }
 }

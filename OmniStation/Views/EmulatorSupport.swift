@@ -168,8 +168,10 @@ enum EmulatorStore {
         emulator.rawValue + suffix
     }
 
+    /// Siempre activos: el interruptor «PS2 con ARMSX2» / «Switch con MeloNX» no servía de nada
+    /// (sin la app o sin carpeta, no hay juegos suyos). Se quitó de Ajustes.
     static func isEnabled(_ emulator: Emulator) -> Bool {
-        defaults.object(forKey: key(emulator, "Enabled")) as? Bool ?? true
+        true
     }
 
     static func setEnabled(_ value: Bool, _ emulator: Emulator) {
@@ -247,8 +249,9 @@ enum EmulatorStore {
         defaults.set(value, forKey: key(emulator, "AutoCheck"))
     }
 
+    /// Las versiones nuevas solo se avisan (instalar es cosa de LiveContainer / SideStore).
     static func autoInstall(_ emulator: Emulator) -> Bool {
-        defaults.bool(forKey: key(emulator, "AutoInstall"))
+        false
     }
 
     static func setAutoInstall(_ value: Bool, _ emulator: Emulator) {

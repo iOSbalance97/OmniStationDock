@@ -23,7 +23,7 @@ struct EmulatorSetupSheet: View {
     @State private var folders: [String: String] = [:]
     @State private var pickingFor: Emulator?
     @State private var showImporter = false
-    // Con el mando: por cada emulador, 0 = lo tengo / no, 1 = carpeta. Al final, Listo.
+    // Con el mando: una fila por emulador (su carpeta). Al final, Listo.
     @State private var selected = 0
 
     private func tr(_ key: String, _ args: CVarArg...) -> String {
@@ -32,11 +32,11 @@ struct EmulatorSetupSheet: View {
     }
 
     private var emulators: [Emulator] { Emulator.allCases.filter { !integrated.contains($0) } }
-    private var doneIndex: Int { emulators.count * 2 }
+    private var doneIndex: Int { emulators.count }
 
     var body: some View {
         NavigationStack {
-            PadScrollView(selection: selected, anchor: selected / 2) {
+            PadScrollView(selection: selected) {
                 VStack(spacing: 14) {
                     if !integrated.isEmpty || !retroFolders.isEmpty {
                         integratedNotice
@@ -121,7 +121,6 @@ struct EmulatorSetupSheet: View {
     }
 
     private func emulatorCard(_ emulator: Emulator, index: Int) -> some View {
-        let isOn: Bool = enabled[emulator.rawValue] ?? true
         let folder: String = folders[emulator.rawValue] ?? ""
         let location: Emulator.Location = EmulatorStore.location(emulator, installMethod: installMethod)
         let whereText: String = location == .liveContainer ? "LiveContainer" : tr("SideStore / AltStore")
@@ -152,16 +151,9 @@ struct EmulatorSetupSheet: View {
                 }
                 Spacer(minLength: 0)
             }
-            HStack(spacing: 10) {
-                SheetActionButton(title: isOn ? tr("Lo tengo: SÍ") : tr("Lo tengo: NO"), tint: Color.white.opacity(0.85), selected: pad.gamepadConnected && selected == index * 2) {
-                    toggle(emulator)
-                }
-                // En LiveContainer sus juegos se leen solos de su carpeta: no hay nada que elegir.
-                if !direct {
-                    SheetActionButton(title: folder.isEmpty ? tr("Elegir carpeta") : tr("Cambiar carpeta"), selected: pad.gamepadConnected && selected == index * 2 + 1, enabled: isOn) {
-                        pick(emulator)
-                    }
-                }
+            // En LiveContainer sus juegos se leen solos de su carpeta: solo se vuelve a leer.
+            SheetActionButton(title: direct ? tr("Volver a leer") : (folder.isEmpty ? tr("Elegir carpeta") : tr("Cambiar carpeta")), selected: pad.gamepadConnected && selected == index) {
+                pick(emulator)
             }
             Text(emulator.setupHint(liveContainer: direct, lang: lang))
                 .font(AppFont.text(10))
@@ -177,14 +169,7 @@ struct EmulatorSetupSheet: View {
         DebugSupport.isInsideLiveContainer && EmulatorStore.location(emulator, installMethod: installMethod) == .liveContainer
     }
 
-    private func toggle(_ emulator: Emulator) {
-        let value: Bool = !(enabled[emulator.rawValue] ?? true)
-        EmulatorStore.setEnabled(value, emulator)
-        enabled[emulator.rawValue] = value
-    }
-
     private func pick(_ emulator: Emulator) {
-        guard enabled[emulator.rawValue] ?? true else { return }
         if DebugSupport.isInsideLiveContainer && EmulatorStore.location(emulator, installMethod: installMethod) == .liveContainer {
             onScanLiveContainer(emulator)
             return
@@ -209,28 +194,17 @@ struct EmulatorSetupSheet: View {
         switch action {
         case .cancel:
             finish()
-        case .left:
-            if selected < doneIndex && selected % 2 == 1 { selected -= 1 }
-        case .right:
-            if selected < doneIndex && selected % 2 == 0 && !readsFolderDirectly(emulators[selected / 2]) { selected += 1 }
+        case .left, .right:
+            break
         case .up:
-            if selected == doneIndex {
-                selected = doneIndex - 2
-            } else if selected >= 2 {
-                selected -= 2
-            }
-            if selected < doneIndex && selected % 2 == 1 && readsFolderDirectly(emulators[selected / 2]) { selected -= 1 }
+            selected = max(0, selected - 1)
         case .down:
-            if selected < doneIndex {
-                selected = selected + 2 >= doneIndex ? doneIndex : selected + 2
-            }
-            if selected < doneIndex && selected % 2 == 1 && readsFolderDirectly(emulators[selected / 2]) { selected -= 1 }
+            selected = min(doneIndex, selected + 1)
         case .accept:
-            if selected == doneIndex {
+            if selected >= doneIndex {
                 finish()
             } else {
-                let emulator: Emulator = emulators[selected / 2]
-                if selected % 2 == 0 { toggle(emulator) } else { pick(emulator) }
+                pick(emulators[selected])
             }
         }
     }

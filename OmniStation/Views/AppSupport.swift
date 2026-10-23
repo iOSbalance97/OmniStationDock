@@ -18,7 +18,7 @@ enum L10n {
     /// El español es el idioma base: la clave es el propio texto. En inglés se busca la traducción.
     static func tr(_ key: String, _ raw: String) -> String {
         guard resolve(raw) == "en" else { return key }
-        return english[key] ?? englishExtra[key] ?? key
+        return english[key] ?? englishExtra[key] ?? english091[key] ?? key
     }
 
     static let english: [String: String] = [
@@ -200,6 +200,8 @@ enum L10n {
         "Desplazamiento por menús": "Menu navigation",
         "Interruptores de opciones": "Option switches",
         "Táctil": "Touch",
+        "Cristal de iOS": "iOS glass",
+        "El cristal líquido de iOS 26. Si el iPhone se calienta en la interfaz, apágalo: se usa una imitación que gasta mucho menos.": "iOS 26 Liquid Glass. If the iPhone gets warm in the interface, turn it off: a much lighter imitation is used instead.",
         "Dock con la tele": "Dock with the TV",
         "Al conectar AirPlay o HDMI: Modo Dock a pantalla completa y en horizontal": "When AirPlay or HDMI connects: full-screen Dock Mode in landscape",
         "Tele conectada: Modo Dock a pantalla completa": "TV connected: full-screen Dock Mode",
@@ -883,12 +885,21 @@ final class ControllerMonitor: ObservableObject {
 }
 
 
+/// Tinte suave de todo el cristal de la app (el azul de las plataformas, casi transparente).
+/// Ajuste «Cristal de iOS» (Apariencia): con él apagado, el cristal es la imitación pintada (gasta
+/// mucho menos: el de iOS se recalcula con lo que pasa por detrás).
+enum LiquidGlassSetting {
+    static let key = "nativeLiquidGlass"
+    static var native: Bool {
+        UserDefaults.standard.object(forKey: key) as? Bool ?? true
+    }
+}
+
+let liquidGlassWash: Color = Color(red: 0.05, green: 0.38, blue: 1.0).opacity(0.10)
+
 /// Estilo común de botones: se encoge un poco al pulsar.
 /// No usa el foco de iOS: el mando tiene su propia selección, y el foco de iOS hacía que
 /// apareciera un recuadro al tocar sin mando y que algunos toques solo enfocaran sin pulsar.
-/// Tinte suave de todo el cristal de la app (el azul de las plataformas, casi transparente).
-let liquidGlassWash: Color = Color(red: 0.05, green: 0.38, blue: 1.0).opacity(0.10)
-
 struct ControllerFocusableButtonStyle: ButtonStyle {
     func makeBody(configuration: Configuration) -> some View {
         // Toque líquido: se aplasta un poco al pulsar y rebota al soltar (como la barra de abajo).
@@ -1179,7 +1190,9 @@ struct ScrollOffsetReader: ViewModifier {
                 progress.set(newValue, from: owner)
             }
             .onScrollPhaseChange { _, phase in
-                progress.setMoving(phase != .idle, from: owner)
+                // Solo cuando la mueve el dedo: si se desplaza sola (el mando lleva la pantalla a lo
+                // seleccionado), la barra de abajo no se pliega (antes desaparecía a ratos).
+                progress.setMoving(phase == .tracking || phase == .interacting || phase == .decelerating, from: owner)
             }
         } else {
             content
@@ -1265,7 +1278,11 @@ extension View {
     func liquidGlass<S: InsettableShape>(in shape: S, tint: Color? = nil, interactive: Bool = false) -> some View {
         #if compiler(>=6.2)
         if #available(iOS 26.0, *) {
-            glassEffect(nativeGlass(tint: tint, interactive: interactive), in: shape)
+            if LiquidGlassSetting.native {
+                glassEffect(nativeGlass(tint: tint, interactive: interactive), in: shape)
+            } else {
+                modifier(LiquidGlassFallback(shape: shape, tint: tint))
+            }
         } else {
             modifier(LiquidGlassFallback(shape: shape, tint: tint))
         }
@@ -1279,7 +1296,11 @@ extension View {
     func clearGlass<S: InsettableShape>(in shape: S, tint: Color? = nil) -> some View {
         #if compiler(>=6.2)
         if #available(iOS 26.0, *) {
-            glassEffect(Glass.clear.tint(tint ?? Color.clear), in: shape)
+            if LiquidGlassSetting.native {
+                glassEffect(Glass.clear.tint(tint ?? Color.clear), in: shape)
+            } else {
+                modifier(ClearGlassFallback(shape: shape))
+            }
         } else {
             modifier(ClearGlassFallback(shape: shape))
         }
@@ -1299,7 +1320,9 @@ extension View {
         var glass = Glass.regular
         // Sin color propio, un azul noche muy suave para que todo el cristal de la app case.
         if let tint { glass = glass.tint(tint.opacity(0.55)) } else { glass = glass.tint(liquidGlassWash) }
-        if interactive { glass = glass.interactive() }
+        // Sin «interactive»: su brillo al tocar es una animación más del cristal (el rebote ya lo
+        // dan los estilos de botón de la app).
+        _ = interactive
         return glass
     }
     #endif

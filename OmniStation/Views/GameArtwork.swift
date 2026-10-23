@@ -203,6 +203,15 @@ enum PlayStats {
         UserDefaults.standard.set(values, forKey: lastKey)
     }
 
+    /// Olvida la última partida y el tiempo jugado de un juego (Borrar datos).
+    static func forget(_ id: String) {
+        for key in [lastKey, timeKey] {
+            var values: [String: Double] = (UserDefaults.standard.dictionary(forKey: key) as? [String: Double]) ?? [:]
+            values[id] = nil
+            UserDefaults.standard.set(values, forKey: key)
+        }
+    }
+
     static func addPlayTime(_ id: String, seconds: TimeInterval) {
         guard seconds > 5 else { return }
         var values: [String: Double] = (UserDefaults.standard.dictionary(forKey: timeKey) as? [String: Double]) ?? [:]

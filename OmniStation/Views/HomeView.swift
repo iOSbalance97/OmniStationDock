@@ -6,13 +6,22 @@ import UniformTypeIdentifiers
 private enum DockSection: String, CaseIterable {
     case busqueda = "Búsqueda"
     case inicio = "Inicio"
+    /// Horizontal y Dock (en vertical, Favoritos va dentro de Inicio).
     case favoritos = "Favoritos"
+    /// Vertical: pestaña propia; en horizontal y en el Dock se abre con □.
+    case transfer = "Importar/Exportar"
     case ajustes = "Ajustes"
+
+    /// Pestañas de cada orientación.
+    static func tabs(landscape: Bool) -> [DockSection] {
+        landscape ? [.busqueda, .inicio, .favoritos, .ajustes] : [.busqueda, .inicio, .transfer, .ajustes]
+    }
 
     var symbol: String {
         switch self {
         case .inicio: return "house.fill"
         case .favoritos: return "star.fill"
+        case .transfer: return "arrow.up.arrow.down.circle.fill"
         case .busqueda: return "magnifyingglass"
         case .ajustes: return "gearshape.fill"
         }
@@ -29,6 +38,8 @@ private enum HomeSheet: Identifiable, Hashable {
     case textEntry(TextEntryTarget)
     case emulatorConfig(EmuConfigTarget, String?)
     case switchAddons(String)
+    /// Parcheador de ROMs (RomPatcher.js).
+    case patcher
     var id: Int { hashValue }
 }
 
@@ -86,6 +97,8 @@ private enum ImporterPurpose: Equatable {
     case lcAppFolder(Emulator)
     /// seeddb.bin de 3DS (algunos juegos cifrados lo necesitan) para 3DS/BIOS.
     case n3dsKeys
+    /// Importar/Exportar → Archivos: cualquier cosa, OmniStation la coloca sola.
+    case hubImport
 }
 
 /// Para qué se abre el selector de fotos.
@@ -104,6 +117,16 @@ private enum SettingsDialog {
     case melonxMode, melonxCoreGames, melonxCoreHelp, memoryHelp
     case retroSystem
     case lcFolderPick
+    case settingInfo
+    case importChoice, importSummary, exportKind, exportSource
+    case deleteGame, deleteGameCustom, deleteGameConfirm
+    case jitInfo
+    case shortcutJIT
+}
+
+/// Lo que se puede borrar de un juego (Opciones → Borrar).
+private enum GameDataPart: String, CaseIterable {
+    case file, saves, settings, artwork, data
 }
 
 private struct Toast: Identifiable {
@@ -133,6 +156,11 @@ struct HomeView: View {
     // Ventanas de selección: puente con el mando y fila marcada en los menús propios.
     @StateObject private var sheetPad = SheetPad()
     @State private var menuIndex = 0
+    // Ajuste mantenido pulsado: su explicación entera en una ventana.
+    @State private var settingInfo: (title: String, text: String)? = nil
+    @State private var settingLongPressed = false
+    // Borrar personalizado: lo marcado.
+    @State private var deleteParts: Set<GameDataPart> = Set(GameDataPart.allCases)
     // Modo Dock: botón marcado entre los 4 iconos de opciones del juego.
     @State private var dockOptionIndex = 0
     // Plataforma a la que debe desplazarse la barra de filtros.
@@ -175,6 +203,8 @@ struct HomeView: View {
     @AppStorage(JITEnabler.storageKey) private var jitEnablerRaw = JITEnabler.builtIn.rawValue
     @AppStorage("emulatorSetupDone") private var emulatorSetupDone = false
     @AppStorage("closeAfterLaunch") private var closeAfterLaunch = true
+    /// Cristal de iOS 26 (con él apagado, una imitación pintada que gasta mucho menos).
+    @AppStorage(LiquidGlassSetting.key) private var nativeGlass = true
     @AppStorage(CoverDownloader.enabledKey) private var autoCoversEnabled = true
 
     // Dispositivos
@@ -187,7 +217,20 @@ struct HomeView: View {
     // Biblioteca
     @State private var libraryGames: [LibraryGame] = []
     @State private var games: [Game] = []
-    @State private var featured: [Game] = []
+    @State private var libraryFeatured: [Game] = []
+    /// Vertical: Inicio enseña «Tu biblioteca» o «Favoritos» (la cabecera «Tu biblioteca | Favoritos»).
+    @State private var portraitFavorites = false
+    /// Sube Inicio hasta arriba (al pulsar Inicio).
+    @State private var homeTopToken = 0
+    // Importar/Exportar: tarjeta marcada con el mando (0 Exportar, 1 Parcheador, 2 Archivos).
+    @State private var transferIndex = 2
+    @State private var dropTargeted = false
+    @State private var importBusy = false
+    /// Juegos que pueden ser de varias consolas: se pregunta uno a uno.
+    @State private var importPending: [ImportItem] = []
+    @State private var importDone: [String] = []
+    @State private var importFailed: [String] = []
+    @State private var exportKind: ExportKind = .saves
     @State private var playCounts: [String: Int] = [:]
     @State private var isScanning = false
 
@@ -252,7 +295,6 @@ struct HomeView: View {
     @State private var settingsCategory: SettingsCategory = .general
     /// Pantalla de mandos (panel desde la izquierda; en vertical también con un gesto).
     @State private var controllersDrawerOpen = false
-    @State private var drawerDrag: CGFloat = 0
     /// Barra inferior: dedo encima (la burbuja lo sigue) y la pestaña bajo el dedo.
     @State private var tabBarTouchX: CGFloat?
     @State private var tabBarHover: Int?
@@ -271,7 +313,7 @@ struct HomeView: View {
         _libraryGames = State(initialValue: library)
         _playCounts = State(initialValue: counts)
         _games = State(initialValue: built.games)
-        _featured = State(initialValue: built.featured)
+        _libraryFeatured = State(initialValue: built.featured)
         _customBackground = State(initialValue: BackgroundStore.load())
     }
 
@@ -305,7 +347,7 @@ struct HomeView: View {
         }
         let built = Self.makeLibrary(library: visible, counts: playCounts, meta: gameMeta)
         games = built.games
-        featured = built.featured
+        libraryFeatured = built.featured
         featuredIndex = 0
     }
 
@@ -424,6 +466,123 @@ struct HomeView: View {
         return games.filter { names.contains($0.id) }
     }
 
+    /// Favoritos dentro de Inicio: solo en vertical (en horizontal y en el Dock tienen su pestaña).
+    private var homeShowsFavorites: Bool {
+        portraitFavorites && !isLandscapeNow
+    }
+
+    /// Tarjeta deslizante de arriba: los más jugados de la biblioteca o, en Favoritos, de los favoritos.
+    private var featured: [Game] {
+        homeShowsFavorites ? favoriteFeatured : libraryFeatured
+    }
+
+    private var favoriteFeatured: [Game] {
+        let list: [Game] = favoriteGames
+        let ranked = list.enumerated().sorted { a, b in
+            let countA: Int = playCounts[a.element.id] ?? 0
+            let countB: Int = playCounts[b.element.id] ?? 0
+            return countA != countB ? countA > countB : a.offset < b.offset
+        }
+        return ranked.prefix(4).map(\.element)
+    }
+
+    /// Lo que enseña Inicio: la biblioteca o los favoritos, con el filtro de plataforma.
+    private var homeGames: [Game] {
+        guard homeShowsFavorites else { return filteredGames }
+        let names: Set<String> = favoriteNames
+        return filteredGames.filter { names.contains($0.id) }
+    }
+
+    /// Vertical, en «Todos»: las tarjetas van por plataformas (en el orden de Reorganizar plataformas).
+    private var homeGrouped: Bool {
+        !isLandscapeNow && !dockActive && selectedSection == .inicio && selectedPlatform == "Todos"
+    }
+
+    /// Los juegos de Inicio por plataforma, en el orden de la barra.
+    private func platformGroups(_ list: [Game]) -> [(platform: String, games: [Game])] {
+        let byPlatform: [String: [Game]] = Dictionary(grouping: list, by: \.platform)
+        let ordered: [String] = Platforms.ordered(platformOrderRaw, customRaw: customPlatformsRaw)
+        var names: [String] = ordered.filter { byPlatform[$0] != nil }
+        for game in list where !names.contains(game.platform) { names.append(game.platform) }
+        return names.map { (platform: $0, games: byPlatform[$0] ?? []) }
+    }
+
+    /// Juegos de Inicio en el orden en que se ven (agrupados en vertical).
+    private var homeOrderedGames: [Game] {
+        let list: [Game] = homeGames
+        guard homeGrouped else { return list }
+        return platformGroups(list).flatMap(\.games)
+    }
+
+    /// Filas de la cuadrícula tal como se ven (índices en `controllerGames`): con las plataformas
+    /// separadas, cada grupo empieza fila nueva.
+    private func controllerRows(_ items: [Game], columns: Int) -> [[Int]] {
+        guard columns > 0, !items.isEmpty else { return [] }
+        let groups: [[Int]]
+        if selectedSection == .inicio && homeGrouped {
+            var result: [[Int]] = []
+            var start: Int = 0
+            for group in platformGroups(homeGames) {
+                result.append(Array(start..<(start + group.games.count)))
+                start += group.games.count
+            }
+            groups = result
+        } else {
+            groups = [Array(items.indices)]
+        }
+        var rows: [[Int]] = []
+        for group in groups {
+            for first in stride(from: 0, to: group.count, by: columns) {
+                rows.append(Array(group[first..<min(first + columns, group.count)]))
+            }
+        }
+        return rows
+    }
+
+    /// Al girar: Favoritos es pestaña en horizontal y parte de Inicio en vertical.
+    private func handleRotation(_ landscape: Bool) {
+        if !landscape && selectedSection == .favoritos {
+            portraitFavorites = true
+            selectedSection = .inicio
+        } else if landscape && selectedSection == .inicio && portraitFavorites {
+            portraitFavorites = false
+            selectedSection = .favoritos
+        }
+    }
+
+    /// Horizontal y Dock: □ abre Importar/Exportar (no está en sus pestañas) y □ otra vez vuelve.
+    private func toggleTransferPage() {
+        feedback(.navigate)
+        withAnimation(.easeInOut(duration: 0.2)) {
+            selectedSection = selectedSection == .transfer ? .inicio : .transfer
+        }
+    }
+
+    /// Inicio: el botón de la barra siempre vuelve al principio de «Todos» (la biblioteca).
+    private func goHomeTop() {
+        selectedPlatform = "Todos"
+        portraitFavorites = false
+        featuredIndex = 0
+        homeTopToken += 1
+        if gamepadConnected {
+            controllerSelectedArea = libraryFeatured.isEmpty ? "games" : "featured"
+            controllerSelectedGameID = libraryFeatured.isEmpty ? homeOrderedGames.first?.id : nil
+        }
+    }
+
+    /// Cambia entre «Tu biblioteca» y «Favoritos».
+    private func setHomeFavorites(_ value: Bool) {
+        guard value != homeShowsFavorites else { return }
+        feedback(.navigate)
+        withAnimation(.spring(response: 0.36, dampingFraction: 0.82)) {
+            portraitFavorites = value
+            featuredIndex = 0
+        }
+        homeTopToken += 1
+        controllerSelectedGameID = homeOrderedGames.first?.id
+        if controllerSelectedArea == "featured" && featured.isEmpty { controllerSelectedArea = "games" }
+    }
+
     private var scannedCount: Int {
         libraryGames.filter { $0.source == "scan" }.count
     }
@@ -460,6 +619,7 @@ struct HomeView: View {
         let presented = withPresentations(decorated)
         let observed = withSettingObservers(presented)
         return withNavigationObservers(observed)
+            .onChange(of: landscape) { _, isLandscape in handleRotation(isLandscape) }
             .onAppear { handleAppear() }
             .preferredColorScheme(.dark)
     }
@@ -489,6 +649,7 @@ struct HomeView: View {
             switch selectedSection {
             case .inicio: homeContent(landscape: landscape)
             case .favoritos: favoritesContent(landscape: landscape)
+            case .transfer: transferContent(landscape: landscape)
             case .busqueda: searchContent(landscape: landscape)
             case .ajustes: settingsContent(landscape: landscape)
             }
@@ -529,7 +690,6 @@ struct HomeView: View {
             .overlay { optionsDismissLayer(dock) }
             .overlay(alignment: .bottom) { dockBottomOverlay(dock) }
             .overlay(alignment: .bottom) { portraitTabBarOverlay }
-            .overlay(alignment: .leading) { controllersEdgeGesture }
             .overlay { controllersDrawerOverlay }
             .overlay { jitTransitionOverlay }
             .overlay(alignment: .bottom) { toastOverlay }
@@ -558,6 +718,12 @@ struct HomeView: View {
             addShortcutSheet()
         case .renameGame:
             renameSheet()
+        case .patcher:
+            PatcherSheet(lang: appLanguage) { file in
+                showToast(tr("Parcheado: %@ (Archivos → OmniStation Dock → Parcheados)", file.lastPathComponent), seconds: 6, actionTitle: tr("Importar")) {
+                    startImport([file])
+                }
+            }
         case .switchAddons(let gameID):
             SwitchAddonsSheet(
                 lang: appLanguage,
@@ -740,7 +906,44 @@ struct HomeView: View {
     private func addShortcutSheet() -> some View {
         AddShortcutSheet(lang: appLanguage, pad: sheetPad, initialMode: shortcutMode) { item, coverData in
             addShortcut(item, cover: coverData)
+            askShortcutJITIfNeeded(item)
         }
+    }
+
+    /// Al vincular una app instalada con SideStore (no de LiveContainer): se pregunta ya si necesita
+    /// JIT y cuál es (su enlace no lo dice). Así no hay que buscarlo luego en las opciones del juego.
+    private func askShortcutJITIfNeeded(_ item: LibraryGame) {
+        guard installMethodRaw == InstallMethod.sideStore.rawValue, let link = item.launchURL,
+              !JITLauncher.isLiveContainerLink(link), JITLauncher.bundleID(fromLink: link) == nil else { return }
+        let id: String = item.id
+        // Cuando se haya cerrado la ventana del acceso directo.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.7) {
+            guard sheet == nil else { return }
+            editingGameID = id
+            menuIndex = 0
+            dialog = .shortcutJIT
+        }
+    }
+
+    private func shortcutJITMenu(_ cancel: PadMenuItem) -> PadMenuContent? {
+        guard let game = editingGame else { return nil }
+        let id: String = game.id
+        var items: [PadMenuItem] = []
+        if usesBuiltInJIT {
+            items.append(PadMenuItem(title: tr("Sí: elegir la app")) {
+                closePadMenu()
+                updateMeta(id) { meta in meta.useJIT = true }
+                appPickerTarget = .game(id)
+                sheet = .installedApps
+            })
+        }
+        items.append(PadMenuItem(title: usesBuiltInJIT ? tr("Sí: escribir su Bundle ID") : tr("Sí: escribir el Bundle ID de la app")) {
+            closePadMenu()
+            updateMeta(id) { meta in meta.useJIT = true }
+            sheet = .bundleID
+        })
+        items.append(PadMenuItem(title: tr("No necesita JIT"), kind: .cancel) { closePadMenu() })
+        return (tr("¿«%@» necesita JIT?", game.name), tr("Su enlace no dice qué app abre: para darle JIT hay que vincular la app (su Bundle ID). Luego se cambia en Opciones del juego → Cambiar app para el JIT."), items)
     }
 
     private func renameSheet() -> some View {
@@ -768,9 +971,7 @@ struct HomeView: View {
         LibraryListSheet(
             lang: appLanguage,
             pad: sheetPad,
-            games: libraryGames,
-            onRemove: { item in removeLibraryItem(item) },
-            onRemoveAll: { setLibrary([]) }
+            games: libraryGames
         )
     }
 
@@ -1008,6 +1209,7 @@ struct HomeView: View {
         case .inicio: controllerSelectedArea = "games"
         case .busqueda: controllerSelectedArea = gamepadConnected ? "search" : "games"
         case .favoritos: controllerSelectedArea = "games"
+        case .transfer: controllerSelectedArea = "transfer"; transferIndex = 2
         case .ajustes:
             controllerSelectedArea = "settings"
             controllerSelectedSettingIndex = 0
@@ -1035,6 +1237,7 @@ struct HomeView: View {
     }
 
     private func handleAppear() {
+        // Toques de toda la ventana: para dejar quieto lo animado cuando no se usa la app.
         // El mando siempre maneja la interfaz.
         controllers.navigationEnabled = true
         sheetPad.gamepadConnected = gamepadConnected
@@ -1080,8 +1283,13 @@ struct HomeView: View {
         downloadMissingCovers()
         for emulator in Emulator.allCases where EmulatorStore.isEnabled(emulator) {
             // Con el núcleo integrado, la app aparte no se toca.
-            if emulator == .armsx2 && armsx2Integrated { continue }
-            if emulator == .melonx && melonxIntegrated { continue }
+            if (emulator == .armsx2 && armsx2Integrated) || (emulator == .melonx && melonxIntegrated) {
+                // Solo se mira si hay una versión nueva del emulador (llega con OmniStation).
+                if EmulatorStore.autoCheck(emulator) && EmulatorStore.shouldCheck(emulator) {
+                    checkIntegratedCoreUpdate(emulator, manual: false)
+                }
+                continue
+            }
             if EmulatorStore.folderBookmark(emulator) != nil || directLCFolder(emulator) != nil { scanEmulator(emulator, silent: true) }
             if EmulatorStore.autoCheck(emulator) && EmulatorStore.shouldCheck(emulator) {
                 checkEmulatorUpdate(emulator, manual: false)
@@ -1122,8 +1330,8 @@ struct HomeView: View {
             cycleSettingsCategory(step)
             return
         }
-        // En Favoritos no hay filtros visibles.
-        guard selectedSection != .favoritos else { return }
+        // En Favoritos (horizontal) y en Importar/Exportar no hay filtros.
+        guard selectedSection != .transfer && selectedSection != .favoritos else { return }
         cyclePlatform(step)
     }
 
@@ -1158,6 +1366,16 @@ struct HomeView: View {
         // Con una ventana con teclado abierta, □ borra la última letra en ella.
         if sheet != nil {
             if sheetPad.sendDelete() { feedback() }
+            return
+        }
+        // Horizontal y Dock: □ abre (o cierra) Importar/Exportar. Vertical, en Inicio: cambia entre
+        // «Tu biblioteca» y «Favoritos».
+        if !modalActive && detailGame == nil && isLandscapeNow && selectedSection != .busqueda {
+            toggleTransferPage()
+            return
+        }
+        if !modalActive && selectedSection == .inicio && detailGame == nil {
+            setHomeFavorites(!homeShowsFavorites)
             return
         }
         guard !modalActive, selectedSection == .busqueda, controllerSelectedArea == "alphabet" else { return }
@@ -1441,6 +1659,30 @@ struct HomeView: View {
             ])
         case .retroSystem:
             return retroSystemMenu(cancel)
+        case .deleteGame:
+            return deleteGameMenu(cancel)
+        case .deleteGameCustom:
+            return deleteGameCustomMenu(cancel)
+        case .deleteGameConfirm:
+            return deleteGameConfirmMenu(cancel)
+        case .shortcutJIT:
+            return shortcutJITMenu(cancel)
+        case .jitInfo:
+            return (tr("Cómo funciona el JIT"), jitExplanation, [
+                PadMenuItem(title: tr("Entendido"), kind: .cancel) { closePadMenu() }
+            ])
+        case .importChoice:
+            return importChoiceMenu()
+        case .importSummary:
+            return importSummaryMenu()
+        case .exportKind:
+            return exportKindMenu(cancel)
+        case .exportSource:
+            return exportSourceMenu(cancel)
+        case .settingInfo:
+            return (settingInfo?.title ?? "", settingInfo?.text, [
+                PadMenuItem(title: tr("Entendido"), kind: .cancel) { closePadMenu() }
+            ])
         case .memoryHelp:
             return (tr("Más memoria para MeloNX"), tr("Esta versión de OmniStation pide el permiso «Increased Memory Limit». Para que iOS lo conceda:\n1. Abre la app GetMoreRam, inicia sesión con la cuenta con la que firmas OmniStation y añade «Increased Memory Limit» al App ID de OmniStation.\n2. En SideStore, refresca o reinstala OmniStation.\n3. Vuelve aquí: la tarjeta «Memoria» se pondrá en verde."), [
                 PadMenuItem(title: tr("Entendido"), kind: .cancel) { closePadMenu() }
@@ -1494,7 +1736,7 @@ struct HomeView: View {
             })
         }
         items.append(cancel)
-        return (tr("Script JIT"), tr("Solo cuenta en iPhone con TXM (iOS 26+). Automático usa el que necesita cada emulador conocido."), items)
+        return (tr("Script JIT"), tr("Desde iOS 26 no basta con enganchar el depurador: mientras juegas, la app pide memoria para el JIT y un pequeño programa (el script) le contesta.\n• Universal: el de las apps nuevas; suele bastar.\n• Legacy: apps antiguas (DolphiniOS, UTM, Flycast, ARMSX2 aparte).\n• Ninguno: solo engancha y suelta.\n• Automático: lo elige por el nombre de la app (la tabla de StikDebug) y, si no la conoce, Universal.\nCámbialo solo si la app se cierra al usar el JIT."), items)
     }
 
     private func jitScriptTitle(_ choice: JITScriptChoice) -> String {
@@ -1763,13 +2005,25 @@ struct HomeView: View {
                 openRetroConfig(system, gameID: id)
             }, at: 0)
         }
+        // Los núcleos integrados ponen el JIT solos: las opciones de JIT solo valen para juegos
+        // que se abren en otra app (accesos directos, LiveContainer, emuladores aparte).
+        let opensOtherApp: Bool = integratedConfigTarget(for: id) == nil
         let jitOn: Bool = wantsJIT(game)
-        let jitTitle: String = jitOn ? "✓ " + tr("Abrir con JIT") : tr("Abrir con JIT")
-        items.append(PadMenuItem(title: jitTitle) {
-            updateMeta(id) { meta in meta.useJIT = !jitOn }
-            closePadMenu()
-            showToast(jitOn ? tr("Se abrirá sin JIT") : tr("Se abrirá con JIT"))
-        })
+        if opensOtherApp && emulatorFor(game) == nil {
+            let jitTitle: String = jitOn ? "✓ " + tr("Abrir con JIT") : tr("Abrir con JIT")
+            items.append(PadMenuItem(title: jitTitle) {
+                // App de SideStore sin vincular: para darle JIT hay que saber cuál es.
+                if !jitOn && installMethodRaw == InstallMethod.sideStore.rawValue && jitBundleID(game) == nil
+                    && JITLauncher.liveContainerJITURL(game.launchURL) == nil {
+                    menuIndex = 0
+                    dialog = .shortcutJIT
+                    return
+                }
+                updateMeta(id) { meta in meta.useJIT = !jitOn }
+                closePadMenu()
+                showToast(jitOn ? tr("Se abrirá sin JIT") : tr("Se abrirá con JIT (para apps que no son núcleos integrados)"))
+            })
+        }
         if game.platform == Emulator.melonx.platform {
             let addonCount: Int = switchTitleID(id).map { SwitchAddonStore.shared.addons(baseTitleID: $0).count } ?? 0
             items.append(PadMenuItem(title: addonCount > 0 ? tr("Actualizaciones y DLC (%ld)", addonCount) : tr("Actualizaciones y DLC")) {
@@ -1783,31 +2037,172 @@ struct HomeView: View {
                 sheet = .textEntry(.emulatorGame(id))
             })
         }
-        items.append(PadMenuItem(title: tr("Bundle ID para JIT")) {
-            closePadMenu()
-            sheet = .bundleID
-        })
-        if installMethodRaw == InstallMethod.sideStore.rawValue {
-            if usesBuiltInJIT {
-                items.append(PadMenuItem(title: tr("Elegir app instalada")) {
-                    closePadMenu()
+        // App vinculada para el JIT (SideStore, accesos directos que no son de LiveContainer): se pide
+        // al crear el acceso directo; aquí solo se cambia.
+        if opensOtherApp && emulatorFor(game) == nil && installMethodRaw == InstallMethod.sideStore.rawValue,
+           let bundle = gameMeta[id]?.bundleID {
+            items.append(PadMenuItem(title: tr("Cambiar app para el JIT (%@)", bundle)) {
+                closePadMenu()
+                if usesBuiltInJIT {
                     appPickerTarget = .game(id)
                     sheet = .installedApps
-                })
-            }
+                } else {
+                    sheet = .bundleID
+                }
+            })
+        }
+        // Script JIT: solo con el JIT integrado y el juego abriéndose con JIT.
+        if opensOtherApp && emulatorFor(game) == nil && usesBuiltInJIT && jitOn {
             let script: JITScriptChoice = JITScriptChoice(stored: gameMeta[id]?.jitScript)
             items.append(PadMenuItem(title: tr("Script JIT: %@", jitScriptTitle(script))) {
                 dialog = .jitScript
             })
         }
-        if game.isCustom {
-            items.append(PadMenuItem(title: tr("Quitar de la biblioteca"), kind: .destructive) {
-                removeGame(game)
-                closePadMenu()
-            })
-        }
+        items.append(PadMenuItem(title: tr("Borrar…"), kind: .destructive) {
+            dialog = .deleteGame
+        })
         items.append(cancel)
         return (game.name, game.platform, items)
+    }
+
+    // MARK: Borrar un juego
+
+    /// Las tres formas de borrar: de la biblioteca, todo, o eligiendo.
+    private func deleteGameMenu(_ cancel: PadMenuItem) -> PadMenuContent? {
+        guard let game = editingGame else { return nil }
+        var items: [PadMenuItem] = []
+        items.append(PadMenuItem(title: tr("Borrar de la biblioteca")) {
+            removeGame(game)
+            closePadMenu()
+            showToast(tr("Quitado de la biblioteca. Si su archivo sigue en la carpeta, vuelve al escanear."), seconds: 4)
+        })
+        items.append(PadMenuItem(title: tr("Borrar datos"), kind: .destructive) {
+            deleteParts = Set(availableDeleteParts(game))
+            dialog = .deleteGameConfirm
+        })
+        items.append(PadMenuItem(title: tr("Borrar personalizado")) {
+            deleteParts = Set(availableDeleteParts(game))
+            dialog = .deleteGameCustom
+        })
+        items.append(cancel)
+        return (tr("Borrar «%@»", game.name), tr("De la biblioteca: solo se quita de la lista. Datos: el juego y todo lo suyo (partidas, ajustes, carátulas, tiempo jugado). Personalizado: eliges qué se borra."), items)
+    }
+
+    private func deleteGameConfirmMenu(_ cancel: PadMenuItem) -> PadMenuContent? {
+        guard let game = editingGame else { return nil }
+        let list: String = GameDataPart.allCases.filter { deleteParts.contains($0) }.map { deletePartTitle($0, game) }.joined(separator: "\n")
+        let items: [PadMenuItem] = [
+            PadMenuItem(title: tr("Borrar"), kind: .destructive) {
+                closePadMenu()
+                deleteGameData(game, parts: deleteParts)
+            },
+            cancel
+        ]
+        return (tr("¿Borrar «%@»?", game.name), tr("Se borra y no se puede deshacer:") + "\n" + list, items)
+    }
+
+    private func deleteGameCustomMenu(_ cancel: PadMenuItem) -> PadMenuContent? {
+        guard let game = editingGame else { return nil }
+        var items: [PadMenuItem] = []
+        for part in availableDeleteParts(game) {
+            let on: Bool = deleteParts.contains(part)
+            items.append(PadMenuItem(title: (on ? "☑︎  " : "☐  ") + deletePartTitle(part, game)) {
+                if on { deleteParts.remove(part) } else { deleteParts.insert(part) }
+                feedback(.toggle)
+            })
+        }
+        items.append(PadMenuItem(title: tr("Borrar lo marcado"), kind: .destructive) {
+            guard !deleteParts.isEmpty else {
+                showToast(tr("Marca algo para borrar"))
+                return
+            }
+            dialog = .deleteGameConfirm
+        })
+        items.append(cancel)
+        return (tr("Borrar personalizado"), tr("Marca lo que quieres borrar; lo demás se queda."), items)
+    }
+
+    /// Lo que tiene sentido borrar de este juego.
+    private func availableDeleteParts(_ game: Game) -> [GameDataPart] {
+        var parts: [GameDataPart] = []
+        if gameFileURLs(game.id) != nil { parts.append(.file) }
+        if retroSystem(for: game.id) != nil { parts.append(.saves) }
+        if integratedConfigTarget(for: game.id).map({ EmulatorConfig.hasGameSettings($0, game.id) }) == true { parts.append(.settings) }
+        parts.append(.artwork)
+        parts.append(.data)
+        return parts
+    }
+
+    private func deletePartTitle(_ part: GameDataPart, _ game: Game) -> String {
+        switch part {
+        case .file: return tr("Archivo del juego")
+        case .saves: return tr("Partidas, estados y trucos")
+        case .settings: return tr("Ajustes propios del juego")
+        case .artwork: return tr("Carátula, fondo y logo")
+        case .data: return tr("Nombre, plataforma, favorito, mapa de botones y tiempo jugado")
+        }
+    }
+
+    /// Archivos del juego en las carpetas de OmniStation (con sus pistas si es .cue, .gdi o .m3u).
+    /// nil si el juego no tiene archivo aquí (accesos directos, apps, carpetas externas).
+    private func gameFileURLs(_ id: String) -> [URL]? {
+        guard let path = detailFilePath(id) else { return nil }
+        let url: URL = URL(fileURLWithPath: path)
+        guard FileManager.default.fileExists(atPath: path) else { return nil }
+        var urls: [URL] = [url]
+        let ext: String = url.pathExtension.lowercased()
+        if ["cue", "gdi", "m3u", "ccd"].contains(ext) {
+            let base: String = url.deletingPathExtension().lastPathComponent
+            let folder: URL = url.deletingLastPathComponent()
+            let siblings: [URL] = (try? FileManager.default.contentsOfDirectory(at: folder, includingPropertiesForKeys: nil)) ?? []
+            urls += siblings.filter { $0 != url && $0.lastPathComponent.hasPrefix(base) }
+        }
+        return urls
+    }
+
+    /// Borra lo elegido de un juego. Lo que queda (si no se borró el archivo) sigue en la biblioteca.
+    private func deleteGameData(_ game: Game, parts: Set<GameDataPart>) {
+        let id: String = game.id
+        let item: LibraryGame? = libraryGames.first { $0.id == id }
+        let fileManager: FileManager = .default
+        var failed: Bool = false
+        if parts.contains(.file), let urls = gameFileURLs(id) {
+            for url in urls {
+                do { try fileManager.removeItem(at: url) } catch { failed = true }
+            }
+        }
+        if parts.contains(.saves), let system = retroSystem(for: id), let file = item?.fileName {
+            let base: String = (file as NSString).lastPathComponent
+            let stem: String = (base as NSString).deletingPathExtension
+            let folder: URL = RetroFolders.saves(system)
+            for name in [stem + ".srm", stem + ".state", stem + ".cheats.json", stem + ".state.png"] {
+                try? fileManager.removeItem(at: folder.appendingPathComponent(name))
+            }
+        }
+        if parts.contains(.settings), let target = integratedConfigTarget(for: id) {
+            EmulatorConfig.resetGame(target, id)
+        }
+        if parts.contains(.artwork) {
+            CoverStore.shared.remove(for: id)
+            BackdropStore.shared.remove(for: id)
+            GameLogoStore.shared.remove(for: id)
+            coverVersion += 1
+        }
+        if parts.contains(.data) {
+            gameMeta[id] = nil
+            GameMetaStore.save(gameMeta)
+            PlayStats.forget(id)
+            var names: Set<String> = favoriteNames
+            if names.remove(id) != nil { favoritesRaw = names.sorted().joined(separator: "|") }
+        }
+        // Sin su archivo (o si ya no queda nada suyo), fuera de la biblioteca.
+        if parts.contains(.file) || parts.contains(.data) && gameFileURLs(id) == nil {
+            removeGame(game)
+        } else {
+            refreshLibrary()
+        }
+        emulatorRevision += 1
+        showToast(failed ? tr("No se pudo borrar todo (algún archivo está en uso o protegido).") : tr("Borrado"), seconds: 3)
     }
 
     /// Cambiar carátula: descargarla, o importarla de Fotos o de Archivos.
@@ -1988,11 +2383,18 @@ struct HomeView: View {
                             .foregroundStyle(.white.opacity(0.9))
                             .multilineTextAlignment(.center)
                         if let message = menu.message {
-                            Text(message)
+                            let text = Text(message)
                                 .font(.system(size: 13))
                                 .foregroundStyle(.white.opacity(0.55))
-                                .multilineTextAlignment(.center)
+                                .multilineTextAlignment(message.count > 280 ? .leading : .center)
                                 .fixedSize(horizontal: false, vertical: true)
+                            // Las explicaciones largas (mantener pulsado un ajuste, el JIT) se desplazan.
+                            if message.count > 280 {
+                                ScrollView(showsIndicators: true) { text.padding(.vertical, 2) }
+                                    .frame(maxHeight: isLandscapeNow ? 170 : 380)
+                            } else {
+                                text
+                            }
                         }
                     }
                     .padding(.horizontal, 14)
@@ -2163,9 +2565,10 @@ struct HomeView: View {
     /// Los filtros y la navegación principal siguen reservados a L1/R1 y L2/R2.
     private var controllerGames: [Game] {
         switch selectedSection {
-        case .inicio, .busqueda: return filteredGames
+        case .inicio: return homeOrderedGames
+        case .busqueda: return filteredGames
         case .favoritos: return favoriteGames
-        case .ajustes: return []
+        case .transfer, .ajustes: return []
         }
     }
 
@@ -2176,6 +2579,10 @@ struct HomeView: View {
         }
         if selectedSection == .ajustes {
             moveSettingsSelection(direction)
+            return
+        }
+        if selectedSection == .transfer {
+            moveTransferSelection(direction)
             return
         }
         if selectedSection == .busqueda, controllerSelectedArea == "alphabet" {
@@ -2226,7 +2633,11 @@ struct HomeView: View {
         let current = items.firstIndex { $0.id == controllerSelectedGameID } ?? 0
         let landscape = UIScreen.main.bounds.width > UIScreen.main.bounds.height
         let columns = landscape ? (selectedSection == .inicio ? 3 : 4) : (compactGrid ? 3 : 2)
-        let isTopRow = current < columns
+        // Filas tal como se ven (en vertical, con las plataformas separadas, cada grupo empieza fila).
+        let rows: [[Int]] = controllerRows(items, columns: columns)
+        let rowIndex: Int = rows.firstIndex(where: { $0.contains(current) }) ?? 0
+        let column: Int = rows.indices.contains(rowIndex) ? (rows[rowIndex].firstIndex(of: current) ?? 0) : 0
+        let isTopRow = rowIndex == 0
         var next = current
 
         switch direction {
@@ -2251,11 +2662,13 @@ struct HomeView: View {
                     return
                 }
             } else {
-                next = max(0, current - columns)
+                let above: [Int] = rows[rowIndex - 1]
+                next = above[min(column, above.count - 1)]
             }
         case .down:
-            if current + columns < items.count {
-                next = current + columns
+            if rowIndex + 1 < rows.count {
+                let below: [Int] = rows[rowIndex + 1]
+                next = below[min(column, below.count - 1)]
             }
         }
 
@@ -2298,6 +2711,10 @@ struct HomeView: View {
             activateSelectedSetting()
             return
         }
+        if selectedSection == .transfer {
+            activateTransfer(transferIndex)
+            return
+        }
         if selectedSection == .inicio, controllerSelectedArea == "featured", !featured.isEmpty {
             open(featured[min(max(featuredIndex, 0), featured.count - 1)])
             return
@@ -2321,8 +2738,11 @@ struct HomeView: View {
     }
 
     private func cycleSection(_ step: Int) {
-        let all = DockSection.allCases
-        guard let index = all.firstIndex(of: selectedSection) else { return }
+        let all = DockSection.tabs(landscape: isLandscapeNow)
+        guard let index = all.firstIndex(of: selectedSection) else {
+            withAnimation(.easeInOut(duration: 0.2)) { selectedSection = .inicio }
+            return
+        }
         let next = all[(index + step + all.count) % all.count]
         feedback(.navigate)
         withAnimation(.easeInOut(duration: 0.2)) { selectedSection = next }
@@ -2362,6 +2782,11 @@ struct HomeView: View {
             } else {
                 closeDetail()
             }
+            return
+        }
+        // 1c) Horizontal: Importar/Exportar (abierta con □) vuelve a Inicio.
+        if isLandscapeNow && selectedSection == .transfer {
+            toggleTransferPage()
             return
         }
         // 2) Giro a horizontal por HDMI en cuenta atrás.
@@ -2588,7 +3013,7 @@ struct HomeView: View {
             return
         }
         guard let bundle = jitBundleID(game) else {
-            showToast(tr("Para abrirlo con JIT, añade su Bundle ID en las opciones del juego"))
+            showToast(tr("Para abrirlo con JIT, vincula su app: Opciones del juego → Abrir con JIT"), seconds: 4)
             return
         }
         if usesBuiltInJIT {
@@ -2909,7 +3334,9 @@ struct HomeView: View {
         let details: String = OSArmsx2Engine.omniStationCoreDetails
         let baseText: String = revision.isEmpty ? "ARMSX2 (OmniStation)" : "ARMSX2 " + String(revision.prefix(8))
         let coreText: String = bundled ? (details.isEmpty ? baseText : baseText + " · " + details) : tr("No incluido en esta compilación")
-        let coreControl: SettingControl = bundled ? .badge("OK", Color.green) : .badge(tr("FALTA"), Color.orange)
+        // Como Dolphin y Azahar: con el JIT permanente preparado, ARMSX2 lo usa (sin VPN ni depurador).
+        let coreControl: SettingControl = !bundled ? .badge(tr("FALTA"), Color.orange)
+            : (OSArmsx2Engine.permanentJITUsable ? .badge(tr("PERMANENTE"), Color.green) : .badge("OK", Color.green))
         items.append(SettingItem(id: "armsx2CoreStatus", title: tr("Núcleo"), subtitle: coreText, symbol: "cpu", tint: SettingTint.blue, control: coreControl, action: {
             dialog = .armsx2CoreHelp
         }))
@@ -2922,10 +3349,60 @@ struct HomeView: View {
         items.append(SettingItem(id: "armsx2CoreBIOS", title: "BIOS", subtitle: biosFiles.first ?? tr("Importa tu BIOS de PS2"), symbol: "memorychip", tint: SettingTint.blue, control: biosControl, action: {
             openCoreImporter(.coreBIOS)
         }))
+        items.append(integratedVersionItem(.armsx2, bundled: armsx2BundledVersion))
         items.append(emulatorConfigItem(.armsx2))
         items.append(toggleSetting("armsx2CoreTouch", tr("Controles táctiles siempre"), tr("Si no, se ocultan con un mando conectado"), "hand.tap.fill", SettingTint.blue, $armsx2TouchAlways))
         // La carpeta y arrancar la BIOS están en «Juegos»; los requisitos, en «Núcleo».
         return SettingGroup(id: "armsx2core", title: tr("ARMSX2 integrado (PS2)"), isSubsection: true, items: items)
+    }
+
+    /// Versión de ARMSX2 que trae esta compilación (p. ej. «iOSv2.6.0»).
+    private var armsx2BundledVersion: String {
+        OSArmsx2Engine.omniStationCoreDetails.components(separatedBy: " · ").first ?? ""
+    }
+
+    /// Solo los números de una versión («iOSv2.6.0» → «2.6.0»), para comparar etiquetas distintas.
+    private func versionDigits(_ text: String) -> String {
+        let short: String = EmulatorUpdater.shortName(text)
+        guard let start = short.firstIndex(where: { $0.isNumber }) else { return short }
+        return String(short[start...].prefix { $0.isNumber || $0 == "." })
+    }
+
+    /// Núcleo integrado: la versión que trae OmniStation y si el emulador ya sacó otra.
+    private func integratedVersionItem(_ emulator: Emulator, bundled: String) -> SettingItem {
+        let latest: String = EmulatorStore.latestTag(emulator)
+        let newer: Bool = !latest.isEmpty && !bundled.isEmpty && versionDigits(latest) != versionDigits(bundled)
+        let shown: String = bundled.isEmpty ? tr("Integrado") : bundled
+        let subtitle: String = newer ? tr("%@ · nueva: %@", shown, EmulatorUpdater.shortName(latest)) : tr("%@ · llega con cada versión de OmniStation", shown)
+        let control: SettingControl = checkingEmulators.contains(emulator.rawValue) ? .progress : (newer ? .badge(tr("NUEVA"), Color.green) : .symbol("arrow.triangle.2.circlepath"))
+        return SettingItem(id: emulator.rawValue + "CoreVersion", title: tr("Versión del núcleo"), subtitle: subtitle, symbol: "arrow.triangle.2.circlepath", tint: SettingTint.blue, control: control, action: {
+            checkIntegratedCoreUpdate(emulator, manual: true)
+        })
+    }
+
+    /// Mira si el emulador tiene versión nueva. Integrado no se puede instalar desde la app: iOS no deja
+    /// que una app cambie su propio código firmado; el núcleo nuevo llega con la siguiente OmniStation.
+    private func checkIntegratedCoreUpdate(_ emulator: Emulator, manual: Bool) {
+        guard !checkingEmulators.contains(emulator.rawValue) else { return }
+        checkingEmulators.insert(emulator.rawValue)
+        emulatorRevision += 1
+        Task {
+            let release: EmulatorRelease? = try? await EmulatorUpdater.latest(emulator)
+            checkingEmulators.remove(emulator.rawValue)
+            if let release { EmulatorStore.remember(release, emulator) }
+            emulatorRevision += 1
+            guard manual else { return }
+            guard let release else {
+                showToast(tr("No se pudo consultar las versiones de %@. ¿Hay conexión?", emulator.name))
+                return
+            }
+            let bundled: String = emulator == .armsx2 ? armsx2BundledVersion : OSMeloNXEngine.runtimeVersion
+            if !bundled.isEmpty && versionDigits(release.tag) == versionDigits(bundled) {
+                showToast(tr("%@ está al día (%@)", emulator.name, EmulatorUpdater.shortName(release.tag)))
+            } else {
+                showToast(tr("%@ %@ disponible. El núcleo integrado se actualiza con la próxima versión de OmniStation: iOS no deja que una app cambie su propio código.", emulator.name, EmulatorUpdater.shortName(release.tag)), seconds: 6)
+            }
+        }
     }
 
     /// Ajustes generales de emulación del núcleo integrado (cada juego puede tener los suyos).
@@ -3299,11 +3776,21 @@ struct HomeView: View {
             }
         }
         let jitNow: Bool = wanted.map { RetroConfig.jitAvailable(for: $0) } ?? OSLibretroEngine.jitActive
-        let jit: Bool = jitNow && RetroConfig.wantsJIT(system, gameID: game.id)
+        // Otro motor (ARMSX2, Dolphin…) se quedó casi todo el bloque permanente: sin JIT antes que
+        // un núcleo que arranca y se cierra porque no le cabe su memoria.
+        let poolFull: Bool = jitNow && !OSLibretroEngine.jitActive && wanted.map { !RetroConfig.jitPoolFits($0) } == true
+        let jit: Bool = jitNow && !poolFull && RetroConfig.wantsJIT(system, gameID: game.id)
         guard let file = item.fileName, let core = RetroConfig.playableCore(for: system, gameID: game.id, jit: jit) else {
-            showToast(tr("Este núcleo necesita JIT. Elige otro núcleo en los ajustes de %@.", system.title), seconds: 5)
+            if system == .dc {
+                showToast(tr("Sin JIT, Dreamcast necesita «Flycast (sin JIT)», que aún no está en esta compilación. Abre OmniStation con JIT o compila ese núcleo."), seconds: 6)
+            } else {
+                showToast(tr("Este núcleo necesita JIT. Elige otro núcleo en los ajustes de %@.", system.title), seconds: 5)
+            }
             releaseRetroJIT()
             return
+        }
+        if poolFull {
+            showToast(tr("No queda JIT permanente libre (lo ocupa otro emulador): este juego va sin JIT. Cierra y abre OmniStation para recuperarlo."), seconds: 6)
         }
         if let chosen = RetroConfig.core(for: system, gameID: game.id), chosen.id != core.id {
             showToast(tr("Sin JIT: se usa %@.", core.name), seconds: 3)
@@ -3315,6 +3802,7 @@ struct HomeView: View {
         // Una partida de estos núcleos no estropea el depurador: si sigue enganchado al salir
         // (el de NDS no lo suelta), vale para la siguiente. Solo ARMSX2 y MeloNX lo dejan inservible.
         var host: [String: String] = options.host
+        if poolFull { host["jit"] = "false" }
         host["touchHaptics"] = hapticsEnabled ? "true" : "false"
         host["touchAlways"] = retroTouchAlways ? "true" : "false"
         // Mapa de botones del juego (Opciones → Mapear botones).
@@ -3456,6 +3944,7 @@ struct HomeView: View {
         if !dolphinSystems.isEmpty {
             var items: [SettingItem] = [retroCoreItem(id: "dolphinCore", system: dolphinSystems[0])]
             for system in dolphinSystems { items.append(retroSystemItem(system, counts: counts)) }
+            for system in dolphinSystems { items.append(retroConfigItem(system, title: dolphinSystems.count > 1 ? tr("Ajustes de %@", system.title) : nil)) }
             groups.append(SettingGroup(id: "dolphin", title: tr("Dolphin integrado (GameCube / Wii)"), isSubsection: true, items: items))
         }
 
@@ -3467,11 +3956,18 @@ struct HomeView: View {
                 RetroFolders.ensure(.n3ds)
                 openCoreImporter(.n3dsKeys)
             }))
+            items.append(retroConfigItem(.n3ds, title: nil))
             groups.append(SettingGroup(id: "azahar", title: tr("Azahar integrado (3DS)"), isSubsection: true, items: items))
         }
 
+        // PSP: su propia sección, como Dolphin y Azahar.
+        if systems.contains(.psp) {
+            let items: [SettingItem] = [retroCoreItem(id: "ppssppCore", system: .psp), retroSystemItem(.psp, counts: counts), retroConfigItem(.psp, title: nil)]
+            groups.append(SettingGroup(id: "ppsspp", title: tr("PPSSPP integrado (PSP)"), isSubsection: true, items: items))
+        }
+
         var classic: [SettingItem] = []
-        for system in systems where system != .gc && system != .wii && system != .n3ds {
+        for system in systems where system != .gc && system != .wii && system != .n3ds && system != .psp {
             classic.append(retroSystemItem(system, counts: counts))
         }
         // Vale para todos los núcleos libretro (también Dolphin y Azahar).
@@ -3490,7 +3986,16 @@ struct HomeView: View {
         })
     }
 
-    /// Tarjeta del núcleo (Dolphin, Azahar): cuál se usa y si tiene el JIT permanente.
+    /// Ajustes de emulación generales de un sistema (cada juego puede tener los suyos).
+    private func retroConfigItem(_ system: RetroSystem, title: String?) -> SettingItem {
+        let changed: Int = EmulatorConfig.global(.retro(system)).count
+        let subtitle: String = changed == 0 ? tr("Gráficos, sistema, sonido y HUD") : tr("%ld cambiados", changed)
+        return SettingItem(id: "retroConfig." + system.rawValue, title: title ?? tr("Ajustes de emulación"), subtitle: subtitle, symbol: "slider.horizontal.3", tint: SettingTint.violet, control: .symbol("chevron.right"), action: {
+            openRetroConfig(system, gameID: nil)
+        })
+    }
+
+    /// Tarjeta del núcleo (Dolphin, Azahar, PPSSPP): cuál se usa y si tiene el JIT permanente.
     private func retroCoreItem(id: String, system: RetroSystem) -> SettingItem {
         let core: RetroCore? = RetroConfig.core(for: system, gameID: nil)
         let pooled: Bool = core?.execMem == true
@@ -3584,6 +4089,7 @@ struct HomeView: View {
         items.append(SettingItem(id: "melonxCoreMemory", title: tr("Memoria"), subtitle: (memoryOK ? tr("Límite ampliado") : tr("Límite normal")) + " · " + tr("libre: %@", MeloNXCoreFolders.availableMemoryText), symbol: "gauge.with.dots.needle.67percent", tint: SettingTint.blue, control: memoryOK ? .badge("OK", Color.green) : .badge(tr("NORMAL"), Color.orange), action: {
             dialog = .memoryHelp
         }))
+        items.append(integratedVersionItem(.melonx, bundled: OSMeloNXEngine.runtimeVersion))
         items.append(emulatorConfigItem(.melonx))
         items.append(toggleSetting("melonxCoreTouchAlways", tr("Mando táctil siempre"), tr("Si no, se oculta al conectar un mando"), "hand.tap.fill", SettingTint.blue, $melonxTouchAlways))
         // La carpeta está en «Juegos»; los requisitos, en «Núcleo».
@@ -4196,11 +4702,12 @@ struct HomeView: View {
         case .coreBIOS, .coreGames, .melonxKeys, .melonxGames, .n3dsKeys: return [.data]
         case .melonxFirmware: return [.zip, .data, .folder]
         case .lcAppFolder: return [.folder]
+        case .hubImport: return [.item, .folder]
         }
     }
 
     private var importerMultiple: Bool {
-        importerPurpose == .coreBIOS || importerPurpose == .coreGames || importerPurpose == .melonxKeys || importerPurpose == .melonxGames || importerPurpose == .n3dsKeys
+        importerPurpose == .coreBIOS || importerPurpose == .coreGames || importerPurpose == .melonxKeys || importerPurpose == .melonxGames || importerPurpose == .n3dsKeys || importerPurpose == .hubImport
     }
 
     private func openFolderImporter() {
@@ -4237,6 +4744,9 @@ struct HomeView: View {
             return
         case .melonxGames:
             importMeloNXGames(result)
+            return
+        case .hubImport:
+            if case .success(let urls) = result, !urls.isEmpty { startImport(urls) }
             return
         case .lcAppFolder(let emulator):
             // Solo hace falta el nombre de la carpeta (p. ej. «MeloNX.app»): no se copia nada.
@@ -4327,7 +4837,7 @@ struct HomeView: View {
         HStack(spacing: 6) {
             // Mandos conectados (abre su pantalla).
             controllersTabButton(compact: compact)
-            ForEach(DockSection.allCases, id: \.self) { section in
+            ForEach(DockSection.tabs(landscape: true), id: \.self) { section in
                 tabButton(section, compact: compact)
             }
         }
@@ -4371,6 +4881,7 @@ struct HomeView: View {
             withAnimation(.easeInOut(duration: 0.2)) {
                 selectedSection = section
             }
+            if section == .inicio { goHomeTop() }
         } label: {
             Image(systemName: section.symbol)
                 .font(.system(size: compact ? 15 : 17, weight: .semibold))
@@ -4486,6 +4997,12 @@ struct HomeView: View {
             .onChange(of: controllerSelectedArea) { _, _ in scrollToSelection(proxy) }
             .onChange(of: controllerSelectedSettingIndex) { _, _ in scrollToSelection(proxy) }
             .onChange(of: controllerSelectedLetterIndex) { _, _ in scrollToSelection(proxy) }
+            // Otra pestaña de Ajustes empieza arriba (antes se quedaba a media altura).
+            .onChange(of: settingsCategory) { _, _ in proxy.scrollTo("screen-top", anchor: .top) }
+            // Inicio pulsado (o cambio Tu biblioteca / Favoritos): arriba del todo.
+            .onChange(of: homeTopToken) { _, _ in
+                withAnimation(.easeOut(duration: 0.25)) { proxy.scrollTo("screen-top", anchor: .top) }
+            }
     }
 
     /// Lleva la pantalla hasta lo seleccionado con el mando. Si está en las primeras filas
@@ -4547,8 +5064,9 @@ struct HomeView: View {
         let items: [Game] = controllerGames
         guard let index = items.firstIndex(where: { $0.id == id }) else { return }
         let columns: Int = gameColumns
-        let lastRow: Int = (items.count - 1) / columns
-        let row: Int = index / columns
+        let rows: [[Int]] = controllerRows(items, columns: columns)
+        let lastRow: Int = max(0, rows.count - 1)
+        let row: Int = rows.firstIndex(where: { $0.contains(index) }) ?? index / columns
         // En Búsqueda la barra y el teclado ocupan la parte de arriba: la fila se centra.
         if selectedSection == .busqueda {
             if row == lastRow && row > 0 {
@@ -4634,7 +5152,7 @@ struct HomeView: View {
 
     private func homeContent(landscape: Bool) -> some View {
         // Se calcula una vez por pintado (antes se recalculaba en cada uso).
-        let list: [Game] = filteredGames
+        let list: [Game] = homeGames
         let showFeatured: Bool = selectedPlatform == "Todos"
         return Group {
             if landscape {
@@ -4658,14 +5176,21 @@ struct HomeView: View {
                         .modifier(ScrollShrink())
                 }
                 Section {
-                    gameGrid(list, columns: compactGrid ? 3 : 2, compact: compactGrid)
+                    if showFeatured {
+                        // «Todos»: las tarjetas por plataformas, en el orden de Reorganizar plataformas.
+                        groupedGameGrid(list, columns: compactGrid ? 3 : 2, compact: compactGrid)
+                    } else {
+                        gameGrid(list, columns: compactGrid ? 3 : 2, compact: compactGrid)
+                    }
                     if libraryGames.isEmpty {
                         notice
+                    } else if homeShowsFavorites && list.isEmpty {
+                        emptyFavorites
                     } else if list.isEmpty {
                         emptyResults
                     }
                 } header: {
-                    sectionHeading(tr("Tu biblioteca"), detail: tr("%ld elementos", list.count))
+                    libraryHeading(count: list.count)
                         .padding(.horizontal, 10)
                         .padding(.vertical, 9)
                         .background { PinnedGlass(cornerRadius: 16) }
@@ -4718,7 +5243,9 @@ struct HomeView: View {
     // Tarjeta destacada: 4 juegos (los más usados) que se deslizan, con puntos abajo a la derecha.
     @ViewBuilder
     private var featuredPanel: some View {
-        if featured.isEmpty {
+        if featured.isEmpty && homeShowsFavorites {
+            emptyFavorites
+        } else if featured.isEmpty {
             emptyFeatured
         } else {
             featuredPager
@@ -4834,7 +5361,7 @@ struct HomeView: View {
 
     private func featuredText(_ game: Game, plays: Int) -> some View {
         VStack(alignment: .leading, spacing: 8) {
-            Text(plays > 0 ? tr("MÁS JUGADO") : tr("DESTACADO"))
+            Text(homeShowsFavorites ? (plays > 0 ? tr("FAVORITO MÁS JUGADO") : tr("FAVORITO")) : (plays > 0 ? tr("MÁS JUGADO") : tr("DESTACADO")))
                 .font(AppFont.text(9, .bold))
                 .tracking(2)
                 .foregroundStyle(Color.cyan)
@@ -4968,12 +5495,87 @@ struct HomeView: View {
         }
     }
 
-    private func gameGrid(_ items: [Game], columns: Int, compact: Bool) -> some View {
+    /// «Tu biblioteca | Favoritos»: las dos se pueden tocar (con mando, □ cambia).
+    private func libraryHeading(count: Int) -> some View {
+        HStack(alignment: .firstTextBaseline, spacing: 8) {
+            headingTab(tr("Tu biblioteca"), active: !homeShowsFavorites) { setHomeFavorites(false) }
+            Text("|")
+                .font(AppFont.text(19, .light))
+                .foregroundStyle(.white.opacity(0.3))
+            headingTab(tr("Favoritos"), active: homeShowsFavorites) { setHomeFavorites(true) }
+            if gamepadConnected {
+                Text("□")
+                    .font(.system(size: 11, weight: .bold))
+                    .foregroundStyle(.white.opacity(0.45))
+            }
+            Spacer(minLength: 6)
+            Text(tr("%ld elementos", count))
+                .font(AppFont.text(11, .medium))
+                .foregroundStyle(.white.opacity(0.45))
+        }
+    }
+
+    private func headingTab(_ title: String, active: Bool, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Text(title)
+                .font(AppFont.text(active ? 21 : 17, .bold))
+                .foregroundStyle(active ? Color.white : Color.white.opacity(0.42))
+                .shadow(color: active ? Color.cyan.opacity(0.45) : .clear, radius: 6)
+                .lineLimit(1)
+                .minimumScaleFactor(0.7)
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .animation(.spring(response: 0.32, dampingFraction: 0.8), value: active)
+    }
+
+    /// Vertical, en «Todos»: un grupo de tarjetas por plataforma con su nombre encima.
+    private func groupedGameGrid(_ items: [Game], columns: Int, compact: Bool) -> some View {
+        let groups = platformGroups(items)
+        return VStack(alignment: .leading, spacing: 16) {
+            ForEach(Array(groups.enumerated()), id: \.element.platform) { index, group in
+                VStack(alignment: .leading, spacing: 9) {
+                    platformGroupHeader(group.platform, count: group.games.count)
+                    gameGrid(group.games, columns: columns, compact: compact, reportFirst: index == 0)
+                }
+            }
+        }
+    }
+
+    private func platformGroupHeader(_ platform: String, count: Int) -> some View {
+        Button {
+            feedback()
+            withAnimation(.easeInOut(duration: 0.2)) { selectedPlatform = platform }
+        } label: {
+            HStack(spacing: 7) {
+                Image(systemName: Platforms.symbol(for: platform))
+                    .font(.system(size: 12, weight: .semibold))
+                    .foregroundStyle(Platforms.tint(for: platform))
+                Text(Platforms.fullName(for: platform))
+                    .font(AppFont.text(13, .bold))
+                    .foregroundStyle(.white.opacity(0.85))
+                    .lineLimit(1)
+                Text("\(count)")
+                    .font(AppFont.text(10, .bold))
+                    .foregroundStyle(.white.opacity(0.5))
+                    .padding(.horizontal, 6)
+                    .padding(.vertical, 2)
+                    .background(Color.white.opacity(0.08), in: Capsule())
+                Rectangle()
+                    .fill(LinearGradient(colors: [Platforms.tint(for: platform).opacity(0.5), .clear], startPoint: .leading, endPoint: .trailing))
+                    .frame(height: 1)
+            }
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+    }
+
+    private func gameGrid(_ items: [Game], columns: Int, compact: Bool, reportFirst: Bool = true) -> some View {
         let gridColumns: [GridItem] = Array(repeating: GridItem(.flexible(), spacing: compact ? 10 : 12), count: columns)
         // Se leen una sola vez por cuadrícula, no una vez por tarjeta.
         let favorites: Set<String> = favoriteNames
         let padSelection: String? = padSelectedGameID
-        let firstID: String? = items.first?.id
+        let firstID: String? = reportFirst ? items.first?.id : nil
         return LazyVGrid(columns: gridColumns, alignment: .leading, spacing: compact ? 10 : 13) {
             ForEach(items) { game in
                 gameTile(game, compact: compact, isFavorite: favorites.contains(game.id), selected: padSelection == game.id)
@@ -5113,6 +5715,393 @@ struct HomeView: View {
 
     // MARK: - Favoritos
 
+    // MARK: - Importar / Exportar
+
+    private func transferContent(landscape: Bool) -> some View {
+        splitScreen(fixed: {
+            screenTitle(tr("Importar/Exportar"), subtitle: tr("Todo lo de tus emuladores, colocado solo."))
+        }) {
+            VStack(spacing: 12) {
+                HStack(alignment: .top, spacing: 12) {
+                    transferCard(0, title: tr("Exportar"), subtitle: tr("Partidas, BIOS, trucos o una copia de todo, en un zip"), symbol: "square.and.arrow.up.fill", tint: SettingTint.sky)
+                    transferCard(1, title: tr("Parcheador"), subtitle: tr("Parches IPS, BPS, UPS, PPF, xdelta… (Rom Patcher JS)"), symbol: "bandage.fill", tint: SettingTint.violet)
+                }
+                filesCard
+                transferGuide
+            }
+            .frame(maxWidth: landscape ? 620 : .infinity)
+            .frame(maxWidth: .infinity)
+        }
+    }
+
+    private func transferSelected(_ index: Int) -> Bool {
+        gamepadConnected && selectedSection == .transfer && controllerSelectedArea == "transfer" && transferIndex == index
+    }
+
+    /// Como las tarjetas de Ajustes, con todo centrado.
+    private func transferCard(_ index: Int, title: String, subtitle: String, symbol: String, tint: Color) -> some View {
+        let shape = RoundedRectangle(cornerRadius: 18, style: .continuous)
+        return Button {
+            feedback()
+            activateTransfer(index)
+        } label: {
+            VStack(spacing: 9) {
+                Image(systemName: symbol)
+                    .font(.system(size: 19, weight: .semibold))
+                    .foregroundStyle(tint)
+                    .frame(width: 44, height: 44)
+                    .background(tint.opacity(0.14), in: RoundedRectangle(cornerRadius: 13, style: .continuous))
+                Text(title)
+                    .font(AppFont.text(15, .semibold))
+                    .foregroundStyle(.white)
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.8)
+                Text(subtitle)
+                    .font(AppFont.text(11))
+                    .foregroundStyle(.white.opacity(0.5))
+                    .multilineTextAlignment(.center)
+                    .lineLimit(3)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            .padding(13)
+            .frame(maxWidth: .infinity, minHeight: 150)
+            .glassCard()
+            .contentShape(shape)
+        }
+        .buttonStyle(TapHighlightButtonStyle(cornerRadius: 18))
+        .padRing(transferSelected(index), cornerRadius: 18)
+    }
+
+    /// Tarjeta grande: Archivos arriba (elegir) y abajo la zona para arrastrar.
+    private var filesCard: some View {
+        let shape = RoundedRectangle(cornerRadius: 22, style: .continuous)
+        return VStack(spacing: 0) {
+            Button {
+                feedback()
+                activateTransfer(2)
+            } label: {
+                VStack(spacing: 10) {
+                    ZStack {
+                        RoundedRectangle(cornerRadius: 16, style: .continuous)
+                            .fill(LinearGradient(colors: [Color(red: 0.25, green: 0.62, blue: 1.0), Color(red: 0.05, green: 0.40, blue: 0.95)], startPoint: .top, endPoint: .bottom))
+                            .frame(width: 62, height: 62)
+                        Image(systemName: "folder.fill")
+                            .font(.system(size: 30, weight: .semibold))
+                            .foregroundStyle(.white)
+                    }
+                    .shadow(color: Color.blue.opacity(0.45), radius: 10)
+                    Text(tr("Archivos"))
+                        .font(AppFont.text(19, .bold))
+                        .foregroundStyle(.white)
+                    Text(tr("Elige juegos, BIOS, claves, firmware, texturas, trucos, mods o skins: OmniStation mira qué es cada cosa y la lleva a la carpeta de su núcleo."))
+                        .font(AppFont.text(12))
+                        .foregroundStyle(.white.opacity(0.55))
+                        .multilineTextAlignment(.center)
+                        .fixedSize(horizontal: false, vertical: true)
+                    if importBusy {
+                        ProgressView().tint(Color.cyan)
+                    }
+                }
+                .padding(.horizontal, 18)
+                .padding(.top, 20)
+                .padding(.bottom, 16)
+                .frame(maxWidth: .infinity)
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            dropZone
+                .padding(12)
+        }
+        .glassCard(cornerRadius: 22)
+        .contentShape(shape)
+        .padRing(transferSelected(2), cornerRadius: 22)
+    }
+
+    /// Zona de abajo: suelta aquí lo que arrastres desde Archivos u otra app.
+    private var dropZone: some View {
+        let shape = RoundedRectangle(cornerRadius: 16, style: .continuous)
+        return VStack(spacing: 6) {
+            Image(systemName: dropTargeted ? "arrow.down.circle.fill" : "arrow.down.to.line")
+                .font(.system(size: 22, weight: .semibold))
+                .foregroundStyle(dropTargeted ? Color.cyan : Color.white.opacity(0.55))
+                .symbolEffect(.bounce, value: dropTargeted)
+            Text(dropTargeted ? tr("Suelta para importar") : tr("Arrastra aquí archivos o carpetas"))
+                .font(AppFont.text(12, .semibold))
+                .foregroundStyle(dropTargeted ? Color.white : Color.white.opacity(0.6))
+        }
+        .frame(maxWidth: .infinity, minHeight: 96)
+        .background(shape.fill(Color.cyan.opacity(dropTargeted ? 0.16 : 0.04)))
+        .overlay(shape.strokeBorder(style: StrokeStyle(lineWidth: 1.4, dash: [6, 5])).foregroundStyle(dropTargeted ? Color.cyan : Color.white.opacity(0.25)))
+        .contentShape(shape)
+        .onDrop(of: [.fileURL, .item], isTargeted: $dropTargeted) { providers in
+            handleDrop(providers)
+            return true
+        }
+        .animation(.easeInOut(duration: 0.18), value: dropTargeted)
+    }
+
+    /// Qué reconoce cada núcleo (para saber qué se puede meter).
+    private var transferGuide: some View {
+        let rows: [(String, String)] = [
+            ("PlayStation 2", tr("Juegos, BIOS, trucos .pnach, texturas (carpeta o zip con la serie, p. ej. SLUS-20312) y tarjetas .ps2")),
+            ("Nintendo Switch", tr("Juegos, actualizaciones y DLC, prod.keys / title.keys, firmware (zip) y mods (carpeta con el Title ID)")),
+            ("GameCube / Wii", tr("Juegos, texturas (carpeta con el id del juego) y ajustes o trucos (.ini)")),
+            ("Nintendo 3DS", tr("Juegos, seeddb.bin, texturas y mods (carpeta con el Title ID) y trucos (.txt)")),
+            ("PSP", tr("Juegos, texturas, trucos (.ini) y partidas (carpetas de SAVEDATA)")),
+            (tr("Clásicos"), tr("Juegos, BIOS (PS1, GBA, NDS, Dreamcast, Game Boy, NES) y trucos de RetroArch (.cht)")),
+            (tr("Mando táctil"), tr("Skins de Delta y ManicEMU (.deltaskin, .manicskin)"))
+        ]
+        return VStack(alignment: .leading, spacing: 0) {
+            Text(tr("QUÉ SE COLOCA SOLO"))
+                .font(AppFont.text(10, .bold))
+                .tracking(1.5)
+                .foregroundStyle(Color.cyan.opacity(0.85))
+                .frame(maxWidth: .infinity)
+                .padding(.vertical, 10)
+            ForEach(Array(rows.enumerated()), id: \.offset) { index, row in
+                if index > 0 { IOSRowDivider(inset: 0) }
+                VStack(spacing: 3) {
+                    Text(row.0)
+                        .font(AppFont.text(13, .semibold))
+                        .foregroundStyle(.white)
+                    Text(row.1)
+                        .font(AppFont.text(11))
+                        .foregroundStyle(.white.opacity(0.55))
+                        .multilineTextAlignment(.center)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                .frame(maxWidth: .infinity)
+                .padding(.horizontal, 14)
+                .padding(.vertical, 9)
+            }
+            Text(tr("Los .zip se abren solos; los .7z y .rar, descomprímelos antes en Archivos."))
+                .font(AppFont.text(10))
+                .foregroundStyle(.white.opacity(0.4))
+                .multilineTextAlignment(.center)
+                .frame(maxWidth: .infinity)
+                .padding(10)
+        }
+        .glassCard(cornerRadius: 18)
+    }
+
+    private func moveTransferSelection(_ direction: ControllerMonitor.Direction) {
+        controllerSelectedArea = "transfer"
+        let next: Int
+        switch (transferIndex, direction) {
+        case (0, .right): next = 1
+        case (1, .left): next = 0
+        case (0, .down), (1, .down): next = 2
+        case (2, .up): next = 0
+        default: next = transferIndex
+        }
+        guard next != transferIndex else { return }
+        transferIndex = next
+        feedback(.navigate)
+    }
+
+    private func activateTransfer(_ index: Int) {
+        transferIndex = index
+        switch index {
+        case 0:
+            menuIndex = 0
+            dialog = .exportKind
+        case 1:
+            sheet = .patcher
+        default:
+            openCoreImporter(.hubImport)
+        }
+    }
+
+    // MARK: Importar
+
+    /// Archivos arrastrados: se copian a la carpeta temporal (lo que da iOS solo vale un momento).
+    private func handleDrop(_ providers: [NSItemProvider]) {
+        let group = DispatchGroup()
+        let staged = DroppedFiles()
+        for provider in providers {
+            group.enter()
+            let type: String = provider.hasItemConformingToTypeIdentifier(UTType.folder.identifier) ? UTType.folder.identifier : UTType.item.identifier
+            let suggested: String? = provider.suggestedName
+            provider.loadFileRepresentation(forTypeIdentifier: type) { url, _ in
+                defer { group.leave() }
+                guard let url else { return }
+                let folder: URL = ImportRouter.staging.appendingPathComponent(UUID().uuidString, isDirectory: true)
+                try? FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+                var name: String = url.lastPathComponent
+                if let suggested, !suggested.isEmpty, (suggested as NSString).pathExtension.isEmpty == false || url.pathExtension.isEmpty { name = suggested }
+                let target: URL = folder.appendingPathComponent(name)
+                if (try? FileManager.default.copyItem(at: url, to: target)) != nil { staged.add(target) }
+            }
+        }
+        group.notify(queue: .main) {
+            let urls: [URL] = staged.all
+            if urls.isEmpty {
+                showToast(tr("No se pudo leer lo arrastrado"))
+            } else {
+                startImport(urls)
+            }
+        }
+    }
+
+    /// Mira qué es cada cosa, la coloca y pregunta lo que no está claro.
+    private func startImport(_ urls: [URL], decided: [(url: URL, target: ImportTarget)] = []) {
+        if decided.isEmpty {
+            importDone = []
+            importFailed = []
+        }
+        importBusy = true
+        showToast(tr("Importando…"), seconds: 900)
+        Task {
+            let batch: ImportRouter.Batch = await Task.detached(priority: .userInitiated) {
+                ImportRouter.run(urls, decided: decided)
+            }.value
+            importDone += batch.outcome.done
+            importFailed += batch.outcome.failed
+            importPending += batch.pending
+            applyImportRescan(batch.outcome.rescan)
+            if let firmware = batch.outcome.firmware { installImportedFirmware(firmware) }
+            continueImport()
+        }
+    }
+
+    private func continueImport() {
+        if !importPending.isEmpty {
+            menuIndex = 0
+            dialog = .importChoice
+            return
+        }
+        importBusy = false
+        withAnimation { toast = nil }
+        if importDone.isEmpty && importFailed.isEmpty { return }
+        menuIndex = 0
+        dialog = .importSummary
+        // Lo sacado de zips y lo arrastrado ya está en su sitio: fuera la carpeta temporal.
+        if !OSMeloNXEngine.shared.busy { ImportRouter.cleanStaging() }
+    }
+
+    private func applyImportRescan(_ rescan: Set<ImportRescan>) {
+        if rescan.contains(.retro) { scanRetroGames(silent: true) }
+        if rescan.contains(.armsx2) { scanCoreGames(silent: true) }
+        if rescan.contains(.melonx) && melonxIntegrated { scanMeloNXGames(silent: true) }
+        if rescan.contains(.keys) {
+            if OSMeloNXEngine.keysInstalled { OSMeloNXEngine.shared.reloadKeys(); refreshMeloNXFirmware() }
+        }
+        emulatorRevision += 1
+    }
+
+    private func installImportedFirmware(_ url: URL) {
+        guard OSMeloNXEngine.keysInstalled else {
+            importFailed.append(url.lastPathComponent + " — " + tr("primero importa prod.keys"))
+            return
+        }
+        OSMeloNXEngine.shared.installFirmware(atPath: url.path) { success, message in
+            showToast(success ? tr("Firmware instalado: %@", message) : message, seconds: 5)
+            refreshMeloNXFirmware()
+        }
+    }
+
+    private func importChoiceMenu() -> PadMenuContent? {
+        guard let first = importPending.first else { return nil }
+        var items: [PadMenuItem] = []
+        for target in first.choices {
+            items.append(PadMenuItem(title: target.title) {
+                importPending.removeFirst()
+                closePadMenu()
+                startImport([], decided: [(url: first.url, target: target)])
+            })
+        }
+        items.append(PadMenuItem(title: tr("Omitir"), kind: .cancel) {
+            importPending.removeFirst()
+            importFailed.append(first.name + " — " + tr("omitido"))
+            closePadMenu()
+            DispatchQueue.main.async { continueImport() }
+        })
+        return (tr("¿De qué consola es «%@»?", first.name), tr("Su formato vale para varias consolas y no se distingue solo."), items)
+    }
+
+    private func importSummaryMenu() -> PadMenuContent? {
+        var lines: [String] = []
+        if !importDone.isEmpty { lines.append(tr("Colocado (%ld):", importDone.count)); lines += importDone.prefix(30).map { "• " + $0 } }
+        if importDone.count > 30 { lines.append(tr("… y %ld más", importDone.count - 30)) }
+        if !importFailed.isEmpty { lines.append(""); lines.append(tr("Sin colocar (%ld):", importFailed.count)); lines += importFailed.prefix(20).map { "• " + $0 } }
+        let title: String = importFailed.isEmpty ? tr("Importado") : (importDone.isEmpty ? tr("No se ha importado nada") : tr("Importado en parte"))
+        return (title, lines.joined(separator: "\n"), [
+            PadMenuItem(title: tr("Entendido"), kind: .cancel) { closePadMenu() }
+        ])
+    }
+
+    // MARK: Exportar
+
+    private func exportKindTitle(_ kind: ExportKind) -> String {
+        switch kind {
+        case .saves: return tr("Partidas y estados")
+        case .bios: return tr("BIOS y claves")
+        case .extras: return tr("Trucos, texturas, mods y skins")
+        case .backup: return tr("Copia de seguridad (todo menos los juegos)")
+        }
+    }
+
+    private func exportKindMenu(_ cancel: PadMenuItem) -> PadMenuContent {
+        var items: [PadMenuItem] = ExportKind.allCases.map { kind in
+            PadMenuItem(title: exportKindTitle(kind)) {
+                exportKind = kind
+                let sources: [ExportSource] = ExportBuilder.sources(for: kind)
+                if sources.isEmpty {
+                    closePadMenu()
+                    showToast(tr("Aún no hay nada de esto que exportar"))
+                } else if sources.count == 1 {
+                    closePadMenu()
+                    runExport(kind, sources[0])
+                } else {
+                    menuIndex = 0
+                    dialog = .exportSource
+                }
+            }
+        }
+        items.append(cancel)
+        return (tr("¿Qué quieres exportar?"), tr("Se hace un zip y eliges dónde guardarlo (Archivos, iCloud, AirDrop…)."), items)
+    }
+
+    private func exportSourceMenu(_ cancel: PadMenuItem) -> PadMenuContent {
+        let kind: ExportKind = exportKind
+        var items: [PadMenuItem] = ExportBuilder.sources(for: kind).map { source in
+            PadMenuItem(title: source.title.isEmpty ? tr("Todo") : source.title) {
+                closePadMenu()
+                runExport(kind, source)
+            }
+        }
+        items.append(cancel)
+        return (exportKindTitle(kind), tr("¿De dónde?"), items)
+    }
+
+    private func runExport(_ kind: ExportKind, _ source: ExportSource) {
+        let stamp: String = { let f = DateFormatter(); f.dateFormat = "yyyy-MM-dd"; return f.string(from: Date()) }()
+        let label: String = (source.title.isEmpty ? exportKindTitle(kind) : exportKindTitle(kind) + " - " + source.title)
+            .replacingOccurrences(of: "/", with: "-")
+        let name: String = "OmniStation - " + label + " - " + stamp
+        showToast(tr("Preparando el zip…"), seconds: 600)
+        Task {
+            let zip: URL? = await Task.detached(priority: .userInitiated) {
+                ExportBuilder.makeZip(named: name, folders: source.folders)
+            }.value
+            withAnimation { toast = nil }
+            guard let zip else {
+                showToast(tr("No se pudo hacer el zip"))
+                return
+            }
+            presentExport(zip)
+        }
+    }
+
+    /// Guardar el zip donde elija el usuario (Archivos, iCloud…).
+    private func presentExport(_ url: URL) {
+        let picker = UIDocumentPickerViewController(forExporting: [url], asCopy: true)
+        let scenes = UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }.filter { $0.session.role == .windowApplication }
+        guard var top = scenes.flatMap(\.windows).first(where: \.isKeyWindow)?.rootViewController else { return }
+        while let presented = top.presentedViewController { top = presented }
+        top.present(picker, animated: true)
+    }
+
     /// En Favoritos la barra de plataformas marca la del juego seleccionado (solo a la vista).
     private var favoritesHighlight: String? {
         let list: [Game] = favoriteGames
@@ -5121,11 +6110,11 @@ struct HomeView: View {
         return list.first { $0.id == id }?.platform
     }
 
+    /// Horizontal: la pestaña Favoritos de siempre.
     private func favoritesContent(landscape: Bool) -> some View {
         let list: [Game] = favoriteGames
         let columns: Int = landscape ? 4 : (compactGrid ? 3 : 2)
         let highlight: String? = favoritesHighlight
-        // Vertical: título, plataforma y encabezado fijos; solo bajan las tarjetas.
         return splitScreen(fixed: {
             screenTitle(tr("Favoritos"), subtitle: tr("Tus juegos marcados con estrella."))
             platformFilters(compact: landscape, display: true, highlight: highlight)
@@ -5253,7 +6242,7 @@ struct HomeView: View {
         items.append(SettingItem(id: "language", title: tr("Idioma"), subtitle: languageLabel, symbol: "globe", tint: SettingTint.sky, control: .symbol("chevron.up.chevron.down"), action: {
             dialog = .language
         }))
-        items.append(toggleSetting("closeAfterLaunch", tr("Cerrar al abrir un juego"), tr("Solo con juegos de otras apps (enlaces y LiveContainer): OmniStation se cierra detrás"), "xmark.app.fill", SettingTint.sky, $closeAfterLaunch))
+        items.append(toggleSetting("closeAfterLaunch", tr("Cerrar al abrir un juego"), tr("Con juegos que se abren en otra app: OmniStation se cierra detrás. Mantén pulsado para ver cuándo sirve"), "xmark.app.fill", SettingTint.sky, $closeAfterLaunch))
         items.append(toggleSetting("haptics", tr("Vibración"), tr("Al tocar y en el mando táctil de ARMSX2"), "iphone.radiowaves.left.and.right", SettingTint.sky, $hapticsEnabled))
         items.append(toggleSetting("sound", tr("Sonido al pulsar"), tr("Sonidos de navegación y selección"), "speaker.wave.2.fill", SettingTint.periwinkle, $clickSound))
         items.append(SettingItem(id: "about", title: tr("Acerca de"), subtitle: tr("Versión %@", appVersion), symbol: "info.circle.fill", tint: Color.cyan, control: .symbol("chevron.right"), action: {
@@ -5298,6 +6287,7 @@ struct HomeView: View {
             sheet = .platformManager
         }))
         items.append(toggleSetting("grid", tr("Cuadrícula completa"), tr("Más juegos por pantalla"), "square.grid.3x3.fill", Color.cyan, $compactGrid))
+        items.append(toggleSetting("nativeGlass", tr("Cristal de iOS"), tr("El cristal líquido de iOS 26. Si el iPhone se calienta en la interfaz, apágalo: se usa una imitación que gasta mucho menos."), "drop.fill", SettingTint.sky, $nativeGlass))
         return SettingGroup(id: "appearance", title: tr("Apariencia"), items: items)
     }
 
@@ -5333,7 +6323,7 @@ struct HomeView: View {
         items.append(SettingItem(id: "clearFavorites", title: tr("Borrar favoritos"), subtitle: tr("Quita todos los marcados"), symbol: "star.slash.fill", tint: Color.orange, control: .badge("\(favoriteCount)", Color.orange), action: {
             if !favoriteNames.isEmpty { dialog = .clearFavorites }
         }))
-        items.append(SettingItem(id: "library", title: tr("Juegos añadidos"), subtitle: tr("Ver y quitar uno a uno"), symbol: "list.bullet.rectangle.fill", tint: Color.orange, control: .badge("\(libraryCount)", Color.orange), action: {
+        items.append(SettingItem(id: "library", title: tr("Juegos añadidos"), subtitle: tr("Lista por plataformas"), symbol: "list.bullet.rectangle.fill", tint: Color.orange, control: .badge("\(libraryCount)", Color.orange), action: {
             sheet = .libraryList
         }))
         return SettingGroup(id: "games", title: tr("Juegos"), items: items)
@@ -5367,22 +6357,13 @@ struct HomeView: View {
         _ = emulatorRevision
         let key: String = emulator.rawValue
         let location: Emulator.Location = EmulatorStore.location(emulator, installMethod: installMethodRaw)
-        let enabled = Binding<Bool>(get: { EmulatorStore.isEnabled(emulator) }, set: { value in
-            EmulatorStore.setEnabled(value, emulator)
-            emulatorRevision += 1
-        })
         let autoCheck = Binding<Bool>(get: { EmulatorStore.autoCheck(emulator) }, set: { value in
             EmulatorStore.setAutoCheck(value, emulator)
-            emulatorRevision += 1
-        })
-        let autoInstall = Binding<Bool>(get: { EmulatorStore.autoInstall(emulator) }, set: { value in
-            EmulatorStore.setAutoInstall(value, emulator)
             emulatorRevision += 1
         })
         var items: [SettingItem] = []
         if emulator == .armsx2 { items.append(armsx2ModeItem) }
         if emulator == .melonx { items.append(melonxModeItem) }
-        items.append(toggleSetting(key + "On", tr("%@ con %@", emulator.platform, emulator.name), tr("Abre sus juegos directamente"), emulator.symbol, SettingTint.blue, enabled))
         items.append(emulatorFolderItem(emulator))
         let whereText: String = location == .liveContainer ? "LiveContainer" : tr("SideStore / AltStore")
         items.append(SettingItem(id: key + "Where", title: tr("Instalado en"), subtitle: whereText, symbol: "shippingbox.fill", tint: SettingTint.blue, control: .symbol("chevron.right"), action: {
@@ -5422,8 +6403,7 @@ struct HomeView: View {
             activeEmulator = emulator
             dialog = .emulatorUpdate
         }))
-        items.append(toggleSetting(key + "Check", tr("Buscar versiones nuevas"), tr("Al abrir la app"), "bell.badge.fill", SettingTint.blue, autoCheck))
-        items.append(toggleSetting(key + "AutoInstall", tr("Instalar sin preguntar"), tr("Abre el instalador al detectarla"), "square.and.arrow.down.fill", SettingTint.blue, autoInstall))
+        items.append(toggleSetting(key + "Check", tr("Avisar de versiones nuevas"), tr("Al abrir la app mira si hay una versión nueva y te avisa; la instalas tú desde LiveContainer o SideStore"), "bell.badge.fill", SettingTint.blue, autoCheck))
         return SettingGroup(id: key, title: emulator.name + " (" + emulator.platform + ")", isSubsection: true, items: items)
     }
 
@@ -5494,17 +6474,47 @@ struct HomeView: View {
         // El JIT de la propia OmniStation solo hace falta con StikDebug; el integrado da JIT a los juegos.
         if !usesBuiltInJIT {
             items.append(SettingItem(id: "jitStatus", title: tr("Estado JIT"), subtitle: jitSubtitle, symbol: "cpu", tint: SettingTint.violet, control: jitControl, action: {
-                refreshJITStatus(announce: true)
+                refreshJITStatus(announce: false)
+                menuIndex = 0
+                dialog = .jitInfo
             }))
             items.append(SettingItem(id: "enableJIT", title: tr("Activar JIT"), subtitle: tr("Con StikDebug, sin reiniciar la app"), symbol: "bolt.fill", tint: SettingTint.violet, control: .symbol("arrow.up.forward"), action: {
                 openExternal(DebugSupport.enableJITURL, failure: stikFailure)
             }))
         }
+        // El JIT permanente se ve siempre (también con el JIT integrado de SideStore, que lo prepara igual).
+        items.append(permanentJITSettingItem())
         items.append(SettingItem(id: "copyBundle", title: tr("Copiar Bundle ID"), subtitle: DebugSupport.bundleID, symbol: "doc.on.doc.fill", tint: SettingTint.violet, control: .plain, action: {
             UIPasteboard.general.string = DebugSupport.bundleID
             showToast(tr("Bundle ID copiado"))
         }))
         return SettingGroup(id: "debug", title: tr("Depuración"), items: items)
+    }
+
+    private func permanentJITSettingItem() -> SettingItem {
+        let ready: Bool = OSLibretroEngine.persistentJITReady
+        let free: Int = ready ? Int(OSPermanentJITLargestFree() / (1024 * 1024)) : 0
+        let subtitle: String = ready ? tr("Listo · %ld MB libres · lo usan ARMSX2 y los núcleos integrados, sin VPN ni depurador", free) : permanentJITText
+        let control: SettingControl = ready ? .badge(tr("PERMANENTE"), Color.green) : (PermanentJIT.shared.busy ? .progress : .badge("OFF", Color.gray))
+        return SettingItem(id: "jitPermanent", title: tr("JIT permanente"), subtitle: subtitle, symbol: "infinity", tint: SettingTint.violet, control: control, action: {
+            menuIndex = 0
+            dialog = .jitInfo
+            if !ready { schedulePermanentJIT() }
+        })
+    }
+
+    /// Explicación del JIT (Estado JIT y JIT permanente).
+    private var jitExplanation: String {
+        var lines: [String] = []
+        lines.append(tr("El JIT deja que un emulador traduzca el código de la consola a código del iPhone mientras juegas: va muchísimo más rápido. iOS solo lo permite con un depurador enganchado a la app."))
+        lines.append(tr("• JIT permanente: la primera vez que hay depurador (StikDebug al abrir OmniStation, o el JIT integrado de SideStore con la VPN), OmniStation reserva un bloque de 512 MB de memoria ejecutable y suelta el depurador. Desde entonces ARMSX2, Dolphin, Azahar, PPSSPP, melonDS, PCSX ReARMed, Mupen64Plus y Flycast usan ese bloque: sin VPN, sin StikDebug y sin calentar de más, hasta que cierres la app."))
+        lines.append(tr("• JIT al abrir el juego: MeloNX y los emuladores de otras apps (LiveContainer o SideStore) piden el JIT cada vez que abres uno de sus juegos."))
+        lines.append(tr("• Sin JIT: los núcleos pasan a su intérprete (más lento). Dreamcast usa Flycast sin JIT. ARMSX2 no tiene intérprete jugable."))
+        lines.append(tr("Ahora: %@.", permanentJITText))
+        if OSLibretroEngine.persistentJITReady {
+            lines.append(tr("Libre en el bloque: %ld MB.", Int(OSPermanentJITLargestFree() / (1024 * 1024))))
+        }
+        return lines.joined(separator: "\n\n")
     }
 
     private func builtInJITSettingItem() -> SettingItem {
@@ -5680,6 +6690,8 @@ struct HomeView: View {
     private func settingCard(_ item: SettingItem, index: Int) -> some View {
         let shape = RoundedRectangle(cornerRadius: 18, style: .continuous)
         return Button {
+            // Al soltar tras mantener pulsado solo se enseña la explicación.
+            if settingLongPressed { settingLongPressed = false; return }
             runSetting(item)
         } label: {
             // Vista aparte y comparable: al mover la selección solo se repintan las tarjetas que cambian.
@@ -5688,8 +6700,35 @@ struct HomeView: View {
                 .contentShape(shape)
         }
         .buttonStyle(TapHighlightButtonStyle(cornerRadius: 18))
+        .simultaneousGesture(LongPressGesture(minimumDuration: 0.45).onEnded { _ in
+            showSettingInfo(item)
+        })
         .id("setting-\(index)")
         .padRing(isSettingSelected(index), cornerRadius: 18)
+    }
+
+    /// Explicación entera de un ajuste (mantener pulsada su tarjeta).
+    private func showSettingInfo(_ item: SettingItem) {
+        guard !item.subtitle.isEmpty else { return }
+        settingLongPressed = true
+        feedback()
+        settingInfo = (title: item.title, text: settingExplanation(item))
+        menuIndex = 0
+        dialog = .settingInfo
+        // Si el dedo se soltó fuera de la tarjeta, el botón no llega a enterarse.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) { settingLongPressed = false }
+    }
+
+    /// Texto largo de los ajustes que lo necesitan (el resto, su subtítulo entero).
+    private func settingExplanation(_ item: SettingItem) -> String {
+        switch item.id {
+        case "closeAfterLaunch":
+            return tr("Solo cuenta con juegos que se abren en otra app. Al abrir uno, OmniStation se cierra del todo detrás: el juego tiene toda la memoria y al volver la app arranca de cero.\n\n• OmniStation instalada con SideStore: vale para todo lo que abre otra app (emuladores aparte, accesos directos y juegos de LiveContainer). Sin él, OmniStation se queda en segundo plano gastando memoria.\n• OmniStation dentro de LiveContainer: con otra app del mismo LiveContainer no hace falta (LiveContainer cambia de app y OmniStation ya se cierra). Sí vale con apps instaladas aparte (SideStore).\n• Núcleos integrados (los que juegan dentro de OmniStation): no hace nada.")
+        case "nativeGlass":
+            return tr("Usa el cristal líquido real de iOS 26 en tarjetas, barras y menús. Es el más bonito, pero el iPhone tiene que volver a difuminar todo lo de detrás en cada fotograma, y con el fondo animado eso calienta. Apagado se usa una imitación casi igual que gasta muchísimo menos.")
+        default:
+            return item.subtitle
+        }
     }
 
     private var controllersSubtitle: String {
@@ -5816,11 +6855,12 @@ struct HomeView: View {
                 dockHint("✕", tr("Jugar"))
                 dockHint("△", tr("Opciones"))
                 dockHint("○", tr("Atrás"))
+                dockHint("□", tr("Importar/Exportar"))
             }
             .lineLimit(1)
             .minimumScaleFactor(0.7)
             Spacer(minLength: 8)
-            if (selectedSection == .inicio || selectedSection == .favoritos), !controllerGames.isEmpty {
+            if selectedSection == .inicio || selectedSection == .favoritos, !controllerGames.isEmpty {
                 dockOptionsWheel
             }
         }
@@ -6351,7 +7391,7 @@ extension HomeView {
     }
 
     /// Pestañas de la barra, de izquierda a derecha (nil = Mandos).
-    private var tabBarItems: [DockSection?] { [nil, .busqueda, .inicio, .favoritos, .ajustes] }
+    private var tabBarItems: [DockSection?] { [nil, .busqueda, .inicio, .transfer, .ajustes] }
 
     private var tabBarSelectedIndex: Int {
         if controllersDrawerOpen { return 0 }
@@ -6363,6 +7403,7 @@ extension HomeView {
         case nil: return "gamecontroller.fill"
         case .busqueda?: return selected ? "magnifyingglass" : "magnifyingglass"
         case .inicio?: return selected ? "house.fill" : "house"
+        case .transfer?: return selected ? "arrow.up.arrow.down.circle.fill" : "arrow.up.arrow.down.circle"
         case .favoritos?: return selected ? "star.fill" : "star"
         case .ajustes?: return selected ? "gearshape.fill" : "gearshape"
         }
@@ -6373,7 +7414,9 @@ extension HomeView {
     /// y sigue al dedo. Mientras la pantalla se desplaza, los iconos se esconden detrás de Inicio
     /// (con rebote) y vuelven al pararse.
     private var portraitTabBar: some View {
-        TabBarCollapse(progress: scrollProgress, enabled: tabBarTouchX == nil && !controllersDrawerOpen) { collapsed in
+        // Con mando la barra no se esconde: cada paso de la cruceta mueve la pantalla y la barra
+        // parpadeaba (se iba y volvía).
+        TabBarCollapse(progress: scrollProgress, enabled: tabBarTouchX == nil && !controllersDrawerOpen && !gamepadConnected) { collapsed in
             tabBarBody(collapsed: collapsed)
         }
         .frame(height: Self.tabBarHeight)
@@ -6565,6 +7608,7 @@ extension HomeView {
         feedback()
         if controllersDrawerOpen { closeControllersDrawer(sound: false) }
         withAnimation(.spring(response: 0.38, dampingFraction: 0.72)) { selectedSection = section }
+        if section == .inicio { goHomeTop() }
     }
 
     // MARK: Pantalla de mandos
@@ -6579,76 +7623,31 @@ extension HomeView {
         controllers.refresh()
         withAnimation(.spring(response: 0.34, dampingFraction: 0.86)) {
             controllersDrawerOpen = true
-            drawerDrag = 0
         }
     }
 
     fileprivate func closeControllersDrawer(sound: Bool = true) {
-        guard controllersDrawerOpen || drawerDrag != 0 else { return }
+        guard controllersDrawerOpen else { return }
         if sound { feedback(.back) }
         withAnimation(.spring(response: 0.3, dampingFraction: 0.9)) {
             controllersDrawerOpen = false
-            drawerDrag = 0
         }
     }
 
-    /// Vertical: arrastrar desde el borde izquierdo hacia el centro abre la pantalla de mandos.
-    @ViewBuilder
-    fileprivate var controllersEdgeGesture: some View {
-        if !isLandscapeNow && !controllersDrawerOpen && detailGame == nil && padMenu == nil && sheet == nil && !activity.running {
-            Color.clear
-                .frame(width: 18)
-                .frame(maxHeight: .infinity)
-                .contentShape(Rectangle())
-                .gesture(
-                    DragGesture(minimumDistance: 10)
-                        .onChanged { value in
-                            drawerDrag = max(0, min(drawerWidth, value.translation.width))
-                        }
-                        .onEnded { value in
-                            if value.translation.width > 90 || value.predictedEndTranslation.width > drawerWidth * 0.5 {
-                                openControllersDrawer()
-                            } else {
-                                withAnimation(.spring(response: 0.3, dampingFraction: 0.9)) { drawerDrag = 0 }
-                            }
-                        }
-                )
-        }
-    }
-
-    @ViewBuilder
+    /// Vertical: arrastrar desde el borde izquierdo abre la pantalla de mandos; arrastrarla hacia
+    /// la izquierda (desde cualquier punto) la cierra. El arrastre vive en ControllersDrawerHost:
+    /// así no se repinta HomeView entera en cada fotograma del dedo (iba a saltos).
     fileprivate var controllersDrawerOverlay: some View {
-        if controllersDrawerOpen || drawerDrag > 0 {
-            let width: CGFloat = drawerWidth
-            let base: CGFloat = controllersDrawerOpen ? 0 : -width
-            let offset: CGFloat = max(-width, min(0, base + drawerDrag))
-            let shown: CGFloat = 1 + offset / width
-            ZStack(alignment: .leading) {
-                Color.black.opacity(0.55 * shown)
-                    .ignoresSafeArea()
-                    .onTapGesture { closeControllersDrawer() }
-                controllersPanel
-                    .frame(width: width)
-                    .frame(maxHeight: .infinity)
-                    .offset(x: offset)
-                    .gesture(
-                        DragGesture(minimumDistance: 10)
-                            .onChanged { value in
-                                guard controllersDrawerOpen else { return }
-                                drawerDrag = min(0, value.translation.width)
-                            }
-                            .onEnded { value in
-                                guard controllersDrawerOpen else { return }
-                                if value.translation.width < -width * 0.3 || value.predictedEndTranslation.width < -width * 0.5 {
-                                    closeControllersDrawer()
-                                } else {
-                                    withAnimation(.spring(response: 0.3, dampingFraction: 0.9)) { drawerDrag = 0 }
-                                }
-                            }
-                    )
-            }
-            .zIndex(20)
+        ControllersDrawerHost(
+            isOpen: controllersDrawerOpen,
+            edgeEnabled: !isLandscapeNow && detailGame == nil && padMenu == nil && sheet == nil && !activity.running,
+            width: drawerWidth,
+            onOpen: { openControllersDrawer() },
+            onClose: { closeControllersDrawer() }
+        ) {
+            controllersPanel
         }
+        .zIndex(20)
     }
 
     private var controllersPanel: some View {
@@ -6898,5 +7897,114 @@ private struct PinnedGlass: View {
                 let minY: CGFloat = proxy.frame(in: .scrollView).minY
                 return view.opacity(Double(min(1, max(0, (14 - minY) / 14))))
             }
+    }
+}
+
+
+// MARK: - Cajón de mandos (arrastre fluido)
+
+/// La pantalla de mandos que sale por la izquierda. El dedo solo mueve esta vista (estado propio):
+/// el panel sigue al dedo sin retraso y al soltar termina con un muelle desde donde quedó.
+private struct ControllersDrawerHost<Panel: View>: View {
+    let isOpen: Bool
+    let edgeEnabled: Bool
+    let width: CGFloat
+    let onOpen: () -> Void
+    let onClose: () -> Void
+    @ViewBuilder let panel: () -> Panel
+
+    /// Lo que el dedo ha movido el panel (positivo: abriendo; negativo: cerrando).
+    @State private var drag: CGFloat = 0
+    @State private var dragging = false
+
+    private var offset: CGFloat {
+        let base: CGFloat = isOpen ? 0 : -width
+        let raw: CGFloat = base + drag
+        // Un poco de goma al pasarse hacia la derecha.
+        return raw > 0 ? raw * 0.15 : max(-width, raw)
+    }
+
+    var body: some View {
+        let visible: Bool = isOpen || drag > 0
+        ZStack(alignment: .leading) {
+            if visible {
+                Color.black.opacity(0.55 * max(0, 1 + min(0, offset) / width))
+                    .ignoresSafeArea()
+                    .onTapGesture { onClose() }
+                    .transition(.opacity)
+                panel()
+                    .frame(width: width)
+                    .frame(maxHeight: .infinity)
+                    .offset(x: offset)
+                    .transition(.move(edge: .leading))
+            }
+            if edgeEnabled && !isOpen {
+                Color.clear
+                    .frame(width: 18)
+                    .frame(maxHeight: .infinity)
+                    .contentShape(Rectangle())
+                    .gesture(openGesture)
+            }
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .leading)
+        .simultaneousGesture(closeGesture, including: isOpen ? .all : .subviews)
+        .allowsHitTesting(visible || edgeEnabled)
+    }
+
+    private var openGesture: some Gesture {
+        DragGesture(minimumDistance: 6, coordinateSpace: .global)
+            .onChanged { value in
+                drag = max(0, min(width, value.translation.width))
+            }
+            .onEnded { value in
+                let open: Bool = value.translation.width > 90 || value.predictedEndTranslation.width > width * 0.5
+                finish { if open { onOpen() } }
+            }
+    }
+
+    /// Cerrar: arrastre sobre todo horizontal (en coordenadas de pantalla: el panel se mueve con el
+    /// dedo y en las suyas propias la medida bailaba).
+    private var closeGesture: some Gesture {
+        DragGesture(minimumDistance: 12, coordinateSpace: .global)
+            .onChanged { value in
+                if !dragging {
+                    guard abs(value.translation.width) > abs(value.translation.height) else { return }
+                    dragging = true
+                }
+                drag = min(width * 0.2, value.translation.width)
+            }
+            .onEnded { value in
+                guard dragging else { return }
+                dragging = false
+                let close: Bool = value.translation.width < -width * 0.3 || value.predictedEndTranslation.width < -width * 0.5
+                finish { if close { onClose() } }
+            }
+    }
+
+    /// El cambio de estado y la vuelta del arrastre a 0 van en la misma animación: sin salto.
+    private func finish(_ change: () -> Void) {
+        withAnimation(.spring(response: 0.32, dampingFraction: 0.88)) {
+            change()
+            drag = 0
+        }
+    }
+}
+
+
+/// Lo arrastrado a Importar (llega desde varios hilos a la vez).
+private final class DroppedFiles: @unchecked Sendable {
+    private let lock = NSLock()
+    private var urls: [URL] = []
+
+    func add(_ url: URL) {
+        lock.lock()
+        urls.append(url)
+        lock.unlock()
+    }
+
+    var all: [URL] {
+        lock.lock()
+        defer { lock.unlock() }
+        return urls
     }
 }

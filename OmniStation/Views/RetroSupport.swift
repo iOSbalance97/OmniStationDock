@@ -135,6 +135,7 @@ enum RetroSystem: String, CaseIterable, Identifiable {
                     RetroCore(id: "gpsp", name: "gpSP", framework: "gpsp_omni.libretro.framework", jit: false),
                     RetroCore(id: "vbam", name: "VBA-M", framework: "vbam_omni.libretro.framework", jit: false)]
         case .nds:
+            // melonDS DS con JIT o, sin él, con su intérprete (el mismo núcleo). DeSmuME, si se elige.
             return [RetroCore(id: "melondsds_omni", name: "melonDS DS", framework: "melondsds_omni.libretro.framework", jit: true, execMem: true),
                     RetroCore(id: "desmume", name: "DeSmuME", framework: "desmume_omni.libretro.framework", jit: false)]
         case .ps1:
@@ -461,6 +462,24 @@ enum RetroConfig {
     /// memoria a OmniStation) con el JIT permanente ya preparado.
     static func jitAvailable(for core: RetroCore) -> Bool {
         OSLibretroEngine.jitActive || (core.execMem && OSLibretroEngine.persistentJITReady)
+    }
+
+    /// Memoria de JIT (MB) que suele pedir cada núcleo al bloque permanente (a la baja: solo sirve
+    /// para no arrancar con JIT cuando otro motor ya se quedó casi todo el bloque).
+    static func jitNeedMB(_ core: RetroCore) -> Int {
+        switch core.id {
+        case "dolphin_omni": return 160
+        case "azahar_omni": return 128
+        case "ppsspp_omni", "mupen64plus_next_omni", "melondsds_omni": return 40
+        case "flycast_omni": return 24
+        default: return 16
+        }
+    }
+
+    /// ¿Cabe la memoria de JIT de este núcleo en lo que queda libre del bloque permanente?
+    static func jitPoolFits(_ core: RetroCore) -> Bool {
+        guard core.execMem, OSLibretroEngine.persistentJITReady else { return true }
+        return OSPermanentJITLargestFree() >= jitNeedMB(core) * 1024 * 1024
     }
 
     /// ¿Quiere este juego usar el JIT? (Ajuste «Usar JIT»; por defecto sí.)
