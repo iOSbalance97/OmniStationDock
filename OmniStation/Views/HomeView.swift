@@ -255,6 +255,10 @@ struct HomeView: View {
     /// Barra inferior: dedo encima (la burbuja lo sigue) y la pestaña bajo el dedo.
     @State private var tabBarTouchX: CGFloat?
     @State private var tabBarHover: Int?
+    @State private var tabBarTouchGroup: Int?
+    /// Prueba de la barra inferior: apagado = Mandos | Búsqueda Inicio Favoritos | Ajustes;
+    /// encendido = Mandos | Búsqueda Inicio Favoritos Ajustes.
+    @AppStorage("tabBarSettingsJoined") private var tabBarSettingsJoined = false
     @AppStorage("volumeBack") private var volumeBack = 0.7
     @AppStorage("volumeToggle") private var volumeToggle = 0.7
 
@@ -5151,6 +5155,7 @@ struct HomeView: View {
         items.append(toggleSetting("closeAfterLaunch", tr("Cerrar al abrir un juego"), tr("Solo con juegos de otras apps (enlaces y LiveContainer): OmniStation se cierra detrás"), "xmark.app.fill", SettingTint.sky, $closeAfterLaunch))
         items.append(toggleSetting("haptics", tr("Vibración"), tr("Al tocar y en el mando táctil de ARMSX2"), "iphone.radiowaves.left.and.right", SettingTint.sky, $hapticsEnabled))
         items.append(toggleSetting("sound", tr("Sonido al pulsar"), tr("Sonidos de navegación y selección"), "speaker.wave.2.fill", SettingTint.periwinkle, $clickSound))
+        items.append(toggleSetting("tabBarJoined", tr("Ajustes junto a las pestañas"), tr("Barra de abajo: Ajustes en su propio botón (apagado) o en el grupo de pestañas (encendido)"), "dock.rectangle", SettingTint.aqua, $tabBarSettingsJoined))
         items.append(SettingItem(id: "about", title: tr("Acerca de"), subtitle: tr("Versión %@", appVersion), symbol: "info.circle.fill", tint: Color.cyan, control: .symbol("chevron.right"), action: {
             showAbout = true
         }))
@@ -6253,59 +6258,92 @@ extension HomeView {
         }
     }
 
-    /// Barra flotante de cristal (como la de iOS 26): una burbuja marca la pestaña y se desliza
-    /// entre ellas; con el dedo encima la barra crece un poco y la burbuja sigue al dedo.
+    /// Grupos de la barra (posiciones en `tabBarItems`): Mandos aparte y el resto en uno o dos grupos.
+    private var tabBarGroups: [[Int]] {
+        tabBarSettingsJoined ? [[0], [1, 2, 3, 4]] : [[0], [1, 2, 3], [4]]
+    }
+
+    /// Barra flotante de cristal (como la de iOS 26), partida en grupos: en cada grupo una burbuja
+    /// marca la pestaña y se desliza; con el dedo encima el grupo crece un poco y la burbuja lo sigue.
     private var portraitTabBar: some View {
-        GeometryReader { geometry in
-            let width: CGFloat = geometry.size.width
-            let count: Int = tabBarItems.count
-            let slot: CGFloat = (width - 12) / CGFloat(count)
-            let touching: Bool = tabBarTouchX != nil
-            let baseX: CGFloat = 6 + slot * (CGFloat(tabBarSelectedIndex) + 0.5)
-            let pillX: CGFloat = tabBarTouchX.map { min(max($0, 6 + slot / 2), width - 6 - slot / 2) } ?? baseX
-            let capsule = Capsule(style: .continuous)
-            ZStack(alignment: .leading) {
-                // Burbuja de la pestaña elegida.
-                capsule
-                    .fill(LinearGradient(colors: [Color.white.opacity(0.20), Color.cyan.opacity(0.14)],
-                                         startPoint: .top, endPoint: .bottom))
-                    .overlay(capsule.strokeBorder(LinearGradient(colors: [Color.white.opacity(0.45), Color.cyan.opacity(0.25)],
-                                                                 startPoint: .top, endPoint: .bottom), lineWidth: 0.8))
-                    .shadow(color: Color.cyan.opacity(touching ? 0.45 : 0.25), radius: touching ? 12 : 7)
-                    .frame(width: slot + (touching ? 14 : 4), height: touching ? 60 : 50)
-                    .position(x: pillX, y: geometry.size.height / 2)
-                HStack(spacing: 0) {
-                    ForEach(Array(tabBarItems.enumerated()), id: \.offset) { index, item in
-                        tabBarIcon(item, selected: (tabBarHover ?? tabBarSelectedIndex) == index)
-                            .frame(width: slot, height: geometry.size.height)
-                    }
+        HStack(spacing: 10) {
+            ForEach(Array(tabBarGroups.enumerated()), id: \.offset) { _, group in
+                if group.count == 1 {
+                    tabBarGroup(group)
+                        .frame(width: 62)
+                } else {
+                    tabBarGroup(group)
+                        .frame(maxWidth: .infinity)
                 }
-                .padding(.horizontal, 6)
             }
-            .frame(width: width, height: geometry.size.height)
-            .contentShape(capsule)
-            .gesture(tabBarGesture(slot: slot, count: count))
         }
         .frame(height: 62)
-        .background {
-            let capsule = Capsule(style: .continuous)
-            ZStack {
-                capsule.fill(Color(red: 0.02, green: 0.05, blue: 0.14).opacity(0.35))
-                // Neón azul muy suave en el borde (nuestro toque).
-                capsule.strokeBorder(LinearGradient(colors: [Color.cyan.opacity(0.55), Color(red: 0.2, green: 0.5, blue: 1.0).opacity(0.25),
-                                                             Color.cyan.opacity(0.45)],
-                                                    startPoint: .topLeading, endPoint: .bottomTrailing), lineWidth: 1)
-            }
-            .liquidGlass(in: capsule, tint: Color(red: 0.12, green: 0.4, blue: 1.0).opacity(0.45), interactive: false)
-            .shadow(color: Color(red: 0.1, green: 0.45, blue: 1.0).opacity(0.30), radius: 14, y: 4)
-            .shadow(color: Color.black.opacity(0.45), radius: 10, y: 6)
-        }
-        .scaleEffect(tabBarTouchX != nil ? 1.035 : 1.0)
-        .animation(.spring(response: 0.32, dampingFraction: 0.68), value: tabBarTouchX != nil)
-        .animation(.spring(response: 0.38, dampingFraction: 0.72), value: tabBarSelectedIndex)
-        .padding(.horizontal, 18)
+        .padding(.horizontal, 16)
         .padding(.bottom, 6)
+        .animation(.spring(response: 0.38, dampingFraction: 0.72), value: tabBarSelectedIndex)
+        .animation(.spring(response: 0.4, dampingFraction: 0.8), value: tabBarSettingsJoined)
         .accessibilityElement(children: .contain)
+    }
+
+    private func tabBarGroup(_ group: [Int]) -> some View {
+        let touching: Bool = tabBarTouchX != nil && tabBarTouchGroup == group.first
+        let capsule = Capsule(style: .continuous)
+        return GeometryReader { geometry in
+            let width: CGFloat = geometry.size.width
+            let height: CGFloat = geometry.size.height
+            let inset: CGFloat = group.count == 1 ? 0 : 6
+            let slot: CGFloat = (width - inset * 2) / CGFloat(group.count)
+            let selectedSlot: Int? = group.firstIndex(of: tabBarSelectedIndex)
+            let baseX: CGFloat = inset + slot * (CGFloat(selectedSlot ?? 0) + 0.5)
+            let touchX: CGFloat? = touching ? tabBarTouchX : nil
+            let pillX: CGFloat = touchX.map { min(max($0, inset + slot / 2), width - inset - slot / 2) } ?? baseX
+            let showPill: Bool = selectedSlot != nil || touchX != nil
+            ZStack(alignment: .leading) {
+                if showPill {
+                    tabBarPill(touching: touching)
+                        .frame(width: group.count == 1 ? width - 8 : slot + (touching ? 14 : 4),
+                               height: group.count == 1 ? height - 8 : (touching ? 60 : 50))
+                        .position(x: pillX, y: height / 2)
+                        .transition(.scale(scale: 0.6).combined(with: .opacity))
+                }
+                HStack(spacing: 0) {
+                    ForEach(group, id: \.self) { index in
+                        tabBarIcon(tabBarItems[index], selected: (tabBarHover ?? tabBarSelectedIndex) == index)
+                            .frame(width: slot, height: height)
+                    }
+                }
+                .padding(.horizontal, inset)
+            }
+            .frame(width: width, height: height)
+            .contentShape(capsule)
+            .gesture(tabBarGesture(group: group, slot: slot, inset: inset))
+        }
+        .background { tabBarGlass(capsule) }
+        .scaleEffect(touching ? 1.04 : 1.0)
+        .animation(.spring(response: 0.32, dampingFraction: 0.68), value: touching)
+    }
+
+    /// Cristal de cada grupo, teñido con el cian de los interruptores (suave: la interfaz es oscura).
+    private func tabBarGlass(_ capsule: Capsule) -> some View {
+        let rim: [Color] = [Color.cyan.opacity(0.55), Color.cyan.opacity(0.14), Color.cyan.opacity(0.40)]
+        return ZStack {
+            capsule.fill(Color(red: 0.01, green: 0.06, blue: 0.10).opacity(0.38))
+            capsule.fill(LinearGradient(colors: [Color.cyan.opacity(0.10), Color.cyan.opacity(0.03)], startPoint: .top, endPoint: .bottom))
+            capsule.strokeBorder(LinearGradient(colors: rim, startPoint: .topLeading, endPoint: .bottomTrailing), lineWidth: 1)
+        }
+        .liquidGlass(in: capsule, tint: Color.cyan.opacity(0.30), interactive: false)
+        .shadow(color: Color.cyan.opacity(0.22), radius: 12, y: 3)
+        .shadow(color: Color.black.opacity(0.45), radius: 10, y: 6)
+    }
+
+    private func tabBarPill(touching: Bool) -> some View {
+        let capsule = Capsule(style: .continuous)
+        let fill: [Color] = [Color.cyan.opacity(0.30), Color.cyan.opacity(0.14)]
+        let rim: [Color] = [Color.white.opacity(0.45), Color.cyan.opacity(0.35)]
+        return capsule
+            .fill(LinearGradient(colors: fill, startPoint: .top, endPoint: .bottom))
+            .overlay(capsule.strokeBorder(LinearGradient(colors: rim, startPoint: .top, endPoint: .bottom), lineWidth: 0.8))
+            .shadow(color: Color.cyan.opacity(touching ? 0.5 : 0.28), radius: touching ? 12 : 7)
     }
 
     private func tabBarIcon(_ item: DockSection?, selected: Bool) -> some View {
@@ -6330,13 +6368,16 @@ extension HomeView {
             .accessibilityAddTraits(.isButton)
     }
 
-    /// Tocar o arrastrar por la barra: la burbuja sigue al dedo y al soltar se elige esa pestaña.
-    private func tabBarGesture(slot: CGFloat, count: Int) -> some Gesture {
+    /// Tocar o arrastrar por un grupo: la burbuja sigue al dedo y al soltar se elige esa pestaña.
+    private func tabBarGesture(group: [Int], slot: CGFloat, inset: CGFloat) -> some Gesture {
         DragGesture(minimumDistance: 0, coordinateSpace: .local)
             .onChanged { value in
-                let index: Int = min(count - 1, max(0, Int((value.location.x - 6) / slot)))
-                if tabBarTouchX == nil {
-                    withAnimation(.spring(response: 0.3, dampingFraction: 0.7)) { tabBarTouchX = value.location.x }
+                let index: Int = group[min(group.count - 1, max(0, Int((value.location.x - inset) / slot)))]
+                if tabBarTouchX == nil || tabBarTouchGroup != group.first {
+                    withAnimation(.spring(response: 0.3, dampingFraction: 0.7)) {
+                        tabBarTouchGroup = group.first
+                        tabBarTouchX = value.location.x
+                    }
                 } else {
                     tabBarTouchX = value.location.x
                 }
@@ -6346,13 +6387,16 @@ extension HomeView {
                 }
             }
             .onEnded { value in
-                let index: Int = min(count - 1, max(0, Int((value.location.x - 6) / slot)))
+                let index: Int = group[min(group.count - 1, max(0, Int((value.location.x - inset) / slot)))]
                 withAnimation(.spring(response: 0.38, dampingFraction: 0.72)) {
                     tabBarTouchX = nil
+                    tabBarTouchGroup = nil
                     tabBarHover = nil
                 }
                 if let section = tabBarItems[index] {
                     selectSection(section)
+                } else if controllersDrawerOpen {
+                    closeControllersDrawer()
                 } else {
                     openControllersDrawer()
                 }
