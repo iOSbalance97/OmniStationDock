@@ -119,6 +119,54 @@ static NSString *const kOSTVOutputKey = @"tvGameOutput";
     [self note:[NSString stringWithFormat:@"tele conectada %.0fx%.0f", scene.coordinateSpace.bounds.size.width, scene.coordinateSpace.bounds.size.height]];
     _scene = scene;
     [NSNotificationCenter.defaultCenter postNotificationName:OSExternalDisplayDidChangeNotification object:self];
+    [self showConnectProbe];
+}
+
+/// Prueba al conectar la tele: 6 s con la ventana propia (rótulo en el centro). Si se ve, iOS
+/// enseña nuestras ventanas en la tele; luego se quita y la tele vuelve a duplicar el iPhone.
+- (void)showConnectProbe {
+    UIWindowScene *scene = _scene;
+    if (scene == nil || !OSExternalDisplay.enabled || _hostedView != nil) return;
+    UIWindow *window = [self windowForScene:scene];
+    UIView *root = window.rootViewController.view;
+    UILabel *label = [UILabel new];
+    label.text = @"OmniStation Dock\nTele conectada";
+    label.numberOfLines = 2;
+    label.font = [UIFont systemFontOfSize:56 weight:UIFontWeightBold];
+    label.textColor = UIColor.cyanColor;
+    label.textAlignment = NSTextAlignmentCenter;
+    label.frame = root.bounds;
+    label.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
+    label.tag = 4711;
+    [root addSubview:label];
+    [window layoutIfNeeded];
+    [self note:@"prueba: rótulo en la tele (6 s)"];
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(6 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+        [label removeFromSuperview];
+        if (self->_hostedView == nil && self->_window != nil) {
+            self->_window.hidden = YES;
+            self->_window = nil;
+        }
+    });
+}
+
+/// La ventana de la tele (se crea si hace falta) y se la da también al delegado de la escena.
+- (UIWindow *)windowForScene:(UIWindowScene *)scene {
+    if (_window == nil || _window.windowScene != scene) {
+        _window.hidden = YES;
+        UIWindow *window = [[UIWindow alloc] initWithWindowScene:scene];
+        window.backgroundColor = UIColor.blackColor;
+        window.rootViewController = [OSExternalRootController new];
+        _window = window;
+        if ([scene.delegate isKindOfClass:OSExternalDisplaySceneDelegate.class]) {
+            ((OSExternalDisplaySceneDelegate *)scene.delegate).window = window;
+        }
+    }
+    _window.frame = scene.coordinateSpace.bounds;
+    _window.hidden = NO;
+    UIView *root = _window.rootViewController.view;
+    root.frame = _window.bounds;
+    return _window;
 }
 
 - (void)sceneDisconnected:(UIWindowScene *)scene {
@@ -135,17 +183,9 @@ static NSString *const kOSTVOutputKey = @"tvGameOutput";
 - (BOOL)hostView:(UIView *)view {
     UIWindowScene *scene = _scene;
     if (scene == nil || !OSExternalDisplay.enabled) return NO;
-    if (_window == nil || _window.windowScene != scene) {
-        _window.hidden = YES;
-        UIWindow *window = [[UIWindow alloc] initWithWindowScene:scene];
-        window.backgroundColor = UIColor.blackColor;
-        window.rootViewController = [OSExternalRootController new];
-        _window = window;
-    }
-    _window.frame = scene.coordinateSpace.bounds;
-    _window.hidden = NO;
+    [[_window.rootViewController.view viewWithTag:4711] removeFromSuperview];
+    [self windowForScene:scene];
     UIView *root = _window.rootViewController.view;
-    root.frame = _window.bounds;
     view.frame = root.bounds;
     view.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
     [root addSubview:view];
