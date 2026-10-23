@@ -1,0 +1,377 @@
+name: Build and Release OmniStation Dock
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: macos-26
+    env:
+      # Versiones fijas de lo que se descarga. Al cambiarlas se invalida su caché y se vuelve a bajar.
+      STIKJIT_COMMIT: 32287268fa5824f9edce4cb359f5833ce0cf7b00
+      # Vulkan sobre Metal para los núcleos de 3DS y GameCube/Wii (antes venía con ManicEMU).
+      MOLTENVK_TAG: v1.3.0
+      XCODEGEN_VERSION: "2.42.0"
+      VULKAN_HEADERS_TAG: v1.3.296
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      # Lo que se descarga de fuera se guarda en la caché de Actions (no gasta minutos): en las builds
+      # siguientes se reutiliza y solo se vuelve a bajar si cambia su versión.
+      - name: Cache tools
+        uses: actions/cache@v4
+        with:
+          path: .ci-tools
+          key: tools-xcodegen-${{ env.XCODEGEN_VERSION }}-ldid-v1
+
+      - name: Install XcodeGen and ldid
+        run: |
+          set -uo pipefail
+          mkdir -p .ci-tools
+          if [ ! -x .ci-tools/xcodegen/bin/xcodegen ]; then
+            if curl -fsSL --retry 3 -o "$RUNNER_TEMP/xcodegen.zip" "https://github.com/yonaskolb/XcodeGen/releases/download/${XCODEGEN_VERSION}/xcodegen.zip"; then
+              rm -rf .ci-tools/xcodegen
+              unzip -q "$RUNNER_TEMP/xcodegen.zip" -d .ci-tools
+            fi
+          fi
+          if [ -x .ci-tools/xcodegen/bin/xcodegen ]; then
+            echo "$PWD/.ci-tools/xcodegen/bin" >> "$GITHUB_PATH"
+          else
+            HOMEBREW_NO_AUTO_UPDATE=1 brew install xcodegen
+          fi
+          if [ ! -x .ci-tools/ldid ]; then
+            if curl -fsSL --retry 3 -o .ci-tools/ldid "https://github.com/ProcursusTeam/ldid/releases/download/v2.1.5-procursus7/ldid_macosx_arm64"; then
+              chmod +x .ci-tools/ldid
+            else
+              rm -f .ci-tools/ldid
+            fi
+          fi
+          if [ -x .ci-tools/ldid ] && file .ci-tools/ldid | grep -q Mach-O; then
+            echo "$PWD/.ci-tools" >> "$GITHUB_PATH"
+          else
+            rm -f .ci-tools/ldid
+          fi
+
+      - name: Cache idevice
+        id: idevice-cache
+        uses: actions/cache@v4
+        with:
+          path: Vendor/idevice
+          key: idevice-${{ env.STIKJIT_COMMIT }}
+
+      # JIT integrado: la librería idevice de StikJIT (fijada a un commit concreto y comprobada).
+      - name: Fetch idevice (StikJIT)
+        if: steps.idevice-cache.outputs.cache-hit != 'true'
+        run: |
+          set -e
+          git init -q "$RUNNER_TEMP/stikjit"
+          git -C "$RUNNER_TEMP/stikjit" remote add origin https://github.com/StikDebug/StikJIT.git
+          git -C "$RUNNER_TEMP/stikjit" fetch -q --depth 1 origin "$STIKJIT_COMMIT"
+          git -C "$RUNNER_TEMP/stikjit" checkout -q FETCH_HEAD
+          mkdir -p Vendor/idevice
+          cp "$RUNNER_TEMP/stikjit/idevice/idevice.h" "$RUNNER_TEMP/stikjit/idevice/module.modulemap" "$RUNNER_TEMP/stikjit/idevice/libidevice_ffi.a" Vendor/idevice/
+          cd Vendor/idevice
+          echo "696286794e8cf1c18a91d4dab5046cef4d9bae352f5e7a1ad33fbc0ba30d7ab4  idevice.h" > SHA256SUMS
+          echo "4db23fe1d342927b9480bb9a8577f219994365621dc28aa0018e23ea1990ecc8  libidevice_ffi.a" >> SHA256SUMS
+          echo "d98e25796e1135d892d81e6922a61e78e82b3d6c33322112e9eca1e089c7a300  module.modulemap" >> SHA256SUMS
+          shasum -a 256 -c SHA256SUMS
+          rm SHA256SUMS
+
+      # Núcleo de ARMSX2 (el único): el compilado por OmniStation (workflow «Build ARMSX2 core»). Si
+      # aún no se ha publicado la release «armsx2-core», la app va sin ARMSX2 integrado.
+      - name: Fetch ARMSX2 core (OmniStation build, optional)
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          rm -rf Vendor/ARMSX2CoreOmni.framework Vendor/ARMSX2CoreOmni.json "$RUNNER_TEMP/omnicore"
+          mkdir -p "$RUNNER_TEMP/omnicore" Vendor
+          if ! gh release download armsx2-core --repo "$GITHUB_REPOSITORY" --pattern ARMSX2Core-OmniStation.zip --pattern identity.json --dir "$RUNNER_TEMP/omnicore" 2>/dev/null; then
+            echo "::warning::No hay núcleo de ARMSX2 (release armsx2-core): la app va sin ARMSX2 integrado."
+            exit 0
+          fi
+          ditto -x -k "$RUNNER_TEMP/omnicore/ARMSX2Core-OmniStation.zip" "$RUNNER_TEMP/omnicore/x"
+          FW="$RUNNER_TEMP/omnicore/x/ARMSX2Core.framework"
+          if [ ! -f "$FW/ARMSX2Core" ] || [ ! -f "$FW/Info.plist" ] || ! nm -gU "$FW/ARMSX2Core" | grep ' _NeoARMSX2_GetAPI$' >/dev/null; then
+            echo "::warning::La release armsx2-core no trae un ARMSX2Core.framework válido. Se ignora."
+            exit 0
+          fi
+          cp -R "$FW" Vendor/ARMSX2CoreOmni.framework
+          cp "$RUNNER_TEMP/omnicore/identity.json" Vendor/ARMSX2CoreOmni.json
+          echo "Núcleo propio listo:"; cat Vendor/ARMSX2CoreOmni.json
+
+      # Clave de la caché de MeloNX: su versión publicada y la fecha de tu IPA «melonx-runtime» (si la
+      # subes). Mientras no cambien, no se vuelve a bajar ni a extraer.
+      - name: MeloNX runtime version
+        id: melonx-version
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -uo pipefail
+          LOCAL=$(gh release view melonx-runtime --repo "$GITHUB_REPOSITORY" --json assets --jq '[.assets[] | select(.name | endswith(".ipa")) | .updatedAt] | first // ""' 2>/dev/null || true)
+          UPSTREAM=$(python3 -I tools/fetch_melonx_runtime.py --latest-tag 2>/dev/null || true)
+          KEY="melonx-runtime-${UPSTREAM:-unknown}-${LOCAL:-none}-${{ hashFiles('tools/fetch_melonx_runtime.py') }}"
+          KEY="${KEY//[^A-Za-z0-9._-]/_}"
+          echo "key=$KEY" >> "$GITHUB_OUTPUT"
+          echo "Clave de la caché de MeloNX: $KEY"
+
+      - name: Cache MeloNX runtime
+        id: melonx-cache
+        uses: actions/cache@v4
+        with:
+          path: Vendor/MeloNX
+          key: ${{ steps.melonx-version.outputs.key }}
+
+      # Runtime de MeloNX (núcleo Ryujinx compilado y sus librerías) sacado de la IPA oficial.
+      # Opcional: si no se consigue, la app se compila sin MeloNX integrado. Si subes tu propia
+      # IPA como release «melonx-runtime» de este repo, se usa esa.
+      - name: Fetch MeloNX runtime (optional)
+        if: steps.melonx-cache.outputs.cache-hit != 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          MELONX_TAG: ""
+        run: |
+          set -uo pipefail
+          rm -rf Vendor/MeloNX "$RUNNER_TEMP/melonx-ipa"
+          mkdir -p "$RUNNER_TEMP/melonx-ipa" Vendor
+          LOCAL=""
+          if gh release download melonx-runtime --repo "$GITHUB_REPOSITORY" --pattern '*.ipa' --dir "$RUNNER_TEMP/melonx-ipa" 2>/dev/null; then
+            LOCAL="$(ls "$RUNNER_TEMP"/melonx-ipa/*.ipa | head -1)"
+          fi
+          python3 -I tools/fetch_melonx_runtime.py Vendor/MeloNX "$LOCAL"
+
+      # Cabeceras de Vulkan (Khronos, Apache-2.0/MIT) para compilar la imagen por Vulkan de los
+      # núcleos de 3DS y GameCube/Wii. Solo cabeceras: Vulkan lo pone MoltenVK al jugar.
+      - name: Cache Vulkan headers
+        id: vulkan-cache
+        uses: actions/cache@v4
+        with:
+          path: Vendor/Vulkan-Headers
+          key: vulkan-headers-${{ env.VULKAN_HEADERS_TAG }}
+
+      - name: Fetch Vulkan headers
+        if: steps.vulkan-cache.outputs.cache-hit != 'true'
+        run: |
+          set -e
+          rm -rf Vendor/Vulkan-Headers "$RUNNER_TEMP/vkh"
+          for attempt in 1 2 3; do
+            if git clone -q --depth 1 --branch "$VULKAN_HEADERS_TAG" https://github.com/KhronosGroup/Vulkan-Headers.git "$RUNNER_TEMP/vkh"; then break; fi
+            rm -rf "$RUNNER_TEMP/vkh"; sleep 5
+          done
+          mkdir -p Vendor/Vulkan-Headers
+          cp -R "$RUNNER_TEMP/vkh/include" Vendor/Vulkan-Headers/include
+          test -f Vendor/Vulkan-Headers/include/vulkan/vulkan.h
+          test -f Vendor/Vulkan-Headers/include/vulkan/vulkan_metal.h
+
+      # MoltenVK (Apache-2.0, KhronosGroup): el Vulkan de los núcleos de 3DS y GameCube/Wii. Su
+      # framework dinámico de iOS, de la release oficial. Opcional: sin él, esos núcleos usan el de
+      # MeloNX (si va en la app). En caché por versión.
+      - name: Cache MoltenVK
+        id: moltenvk-cache
+        uses: actions/cache@v4
+        with:
+          path: Vendor/MoltenVK
+          key: moltenvk-${{ env.MOLTENVK_TAG }}-v1
+
+      - name: Fetch MoltenVK (optional)
+        if: steps.moltenvk-cache.outputs.cache-hit != 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -uo pipefail
+          rm -rf Vendor/MoltenVK "$RUNNER_TEMP/mvk"
+          mkdir -p "$RUNNER_TEMP/mvk"
+          got=""
+          for pattern in 'MoltenVK-ios.tar*' 'MoltenVK-all.tar*'; do
+            if gh release download "$MOLTENVK_TAG" --repo KhronosGroup/MoltenVK --pattern "$pattern" --dir "$RUNNER_TEMP/mvk" 2>/dev/null; then
+              got="yes"; break
+            fi
+          done
+          if [ -z "$got" ]; then
+            echo "::warning::No se pudo bajar MoltenVK $MOLTENVK_TAG: 3DS y GameCube/Wii usarán el de MeloNX (si está)."
+            exit 0
+          fi
+          for archive in "$RUNNER_TEMP"/mvk/*.tar*; do tar -xf "$archive" -C "$RUNNER_TEMP/mvk"; done
+          FW="$(find "$RUNNER_TEMP/mvk" -type d -path '*dynamic*' -path '*ios-arm64/MoltenVK.framework' -print -quit)"
+          if [ -z "$FW" ] || [ ! -f "$FW/MoltenVK" ] || ! nm -gU "$FW/MoltenVK" | grep -q ' _vkGetInstanceProcAddr$'; then
+            echo "::warning::La descarga de MoltenVK no trae el framework dinámico de iOS: 3DS y GameCube/Wii usarán el de MeloNX (si está)."
+            exit 0
+          fi
+          mkdir -p Vendor/MoltenVK
+          cp -R "$FW" Vendor/MoltenVK/MoltenVK.framework
+          lipo -info Vendor/MoltenVK/MoltenVK.framework/MoltenVK
+          rm -rf "$RUNNER_TEMP/mvk"
+
+      # Núcleos libretro compilados por OmniStation desde su código (workflow «Build libretro cores»):
+      # todos los de la app (los de JIT permanente y los sin JIT). Sin la release «libretro-cores»,
+      # la app va sin núcleos integrados.
+      - name: Fetch OmniStation libretro cores (optional)
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          rm -rf Vendor/OmniCores "$RUNNER_TEMP/omnicores"
+          mkdir -p "$RUNNER_TEMP/omnicores" Vendor
+          if ! gh release download libretro-cores --repo "$GITHUB_REPOSITORY" --dir "$RUNNER_TEMP/omnicores" 2>/dev/null; then
+            echo "::notice::Aún no hay núcleos libretro propios (release libretro-cores)."
+            exit 0
+          fi
+          mkdir -p Vendor/OmniCores
+          for zip in "$RUNNER_TEMP"/omnicores/*.libretro.framework.zip; do
+            [ -f "$zip" ] || continue
+            ditto -x -k "$zip" Vendor/OmniCores
+          done
+          for fw in Vendor/OmniCores/*.libretro.framework; do
+            [ -d "$fw" ] || continue
+            name="$(basename "$fw" .framework)"
+            if [ ! -f "$fw/$name" ] || [ ! -f "$fw/Info.plist" ] || ! nm -gU "$fw/$name" | grep ' _retro_run$' >/dev/null; then
+              echo "::warning::$(basename "$fw") no es un núcleo libretro válido. Se ignora."
+              rm -rf "$fw"
+            fi
+          done
+          if [ -f "$RUNNER_TEMP/omnicores/dolphin-sys.zip" ]; then
+            ditto -x -k "$RUNNER_TEMP/omnicores/dolphin-sys.zip" Vendor/OmniCores/dolphin-sys
+          fi
+          ls -l Vendor/OmniCores
+
+      # Archivos de sistema de los núcleos: los de PPSSPP (sus assets, con las tablas VFPU) y la
+      # carpeta Sys de Dolphin (de su mismo código, por si la release no la trae). Opcionales y en caché.
+      - name: Cache core system files
+        id: ppsspp-cache
+        uses: actions/cache@v4
+        with:
+          path: Vendor/LibretroSystem
+          key: libretro-system-v3-${{ hashFiles('Cores/Libretro/sources.json') }}
+
+      - name: Fetch core system files (optional)
+        if: steps.ppsspp-cache.outputs.cache-hit != 'true'
+        run: |
+          set -uo pipefail
+          rm -rf Vendor/LibretroSystem "$RUNNER_TEMP/ppsspp" "$RUNNER_TEMP/dolphin-src"
+          read -r PPSSPP_REV DOLPHIN_REV < <(python3 -c 'import json; d=json.load(open("Cores/Libretro/sources.json")); print(d["ppsspp"]["revision"], d["dolphin"]["revision"])')
+          if git clone -q --filter=blob:none --no-checkout https://github.com/hrydgard/ppsspp.git "$RUNNER_TEMP/ppsspp" \
+             && git -C "$RUNNER_TEMP/ppsspp" sparse-checkout set assets \
+             && git -C "$RUNNER_TEMP/ppsspp" checkout -q "$PPSSPP_REV"; then
+            mkdir -p Vendor/LibretroSystem
+            cp -R "$RUNNER_TEMP/ppsspp/assets" Vendor/LibretroSystem/PPSSPP
+            rm -rf Vendor/LibretroSystem/PPSSPP/debugger Vendor/LibretroSystem/PPSSPP/upload \
+              Vendor/LibretroSystem/PPSSPP/themes Vendor/LibretroSystem/PPSSPP/ui_images
+            if [ ! -f Vendor/LibretroSystem/PPSSPP/ppge_atlas.zim ]; then
+              echo "::warning::Los archivos de PPSSPP no están completos: la PSP irá sin ellos."
+              rm -rf Vendor/LibretroSystem/PPSSPP
+            fi
+            ls Vendor/LibretroSystem/PPSSPP/vfpu 2>/dev/null | head -3 || echo "::warning::PPSSPP sin tablas VFPU."
+          else
+            echo "::warning::No se pudieron descargar los archivos de PPSSPP: la PSP irá sin ellos."
+          fi
+          if git clone -q --filter=blob:none --no-checkout https://github.com/libretro/dolphin.git "$RUNNER_TEMP/dolphin-src" \
+             && git -C "$RUNNER_TEMP/dolphin-src" sparse-checkout set Data/Sys \
+             && git -C "$RUNNER_TEMP/dolphin-src" checkout -q "$DOLPHIN_REV" \
+             && [ -d "$RUNNER_TEMP/dolphin-src/Data/Sys" ]; then
+            mkdir -p Vendor/LibretroSystem/dolphin-emu
+            cp -R "$RUNNER_TEMP/dolphin-src/Data/Sys" Vendor/LibretroSystem/dolphin-emu/Sys
+          else
+            echo "::warning::No se pudo bajar la carpeta Sys de Dolphin (se usa la de la release, si está)."
+          fi
+          rm -rf "$RUNNER_TEMP/ppsspp" "$RUNNER_TEMP/dolphin-src"
+          du -sh Vendor/LibretroSystem 2>/dev/null || true
+
+      - name: Generate Xcode project
+        run: xcodegen generate
+
+      - name: Build iOS app
+        run: |
+          xcodebuild \
+            -project OmniStationDock.xcodeproj \
+            -scheme OmniStationDock \
+            -sdk iphoneos \
+            -configuration Release \
+            -derivedDataPath build \
+            CODE_SIGNING_ALLOWED=NO \
+            build
+
+      - name: Package IPA
+        run: |
+          set -e
+          APP_PATH="build/Build/Products/Release-iphoneos/OmniStationDock.app"
+          test -d "$APP_PATH"
+          mkdir -p Payload
+          cp -R "$APP_PATH" Payload/
+          # Los núcleos van en Frameworks/ (OmniStation los busca ahí y los carga con dlopen).
+          # Se copian sin enlazar: SideStore/AltStore los firman junto con la app.
+          mkdir -p Payload/OmniStationDock.app/Frameworks
+          test -d Payload/OmniStationDock.app/PlugIns/OmniStationJITHelper.appex
+          test -d Payload/OmniStationDock.app/PlugIns/OmniStationRamDonor.appex || echo "::warning::Falta la extensión de memoria (OmniStationRamDonor)."
+          # Núcleo de ARMSX2 (el de OmniStation, si se descargó).
+          if [ -d Vendor/ARMSX2CoreOmni.framework ]; then
+            cp -R Vendor/ARMSX2CoreOmni.framework Payload/OmniStationDock.app/Frameworks/ARMSX2CoreOmni.framework
+            cp Vendor/ARMSX2CoreOmni.json Payload/OmniStationDock.app/ARMSX2CoreOmni.json
+          fi
+          # Runtime de MeloNX (si se descargó): todo a Frameworks/, sin pisar nada de OmniStation.
+          if [ -f Vendor/MeloNX/MeloNXRuntime.json ]; then
+            for item in Vendor/MeloNX/Frameworks/*; do
+              name="$(basename "$item")"
+              if [ -e "Payload/OmniStationDock.app/Frameworks/$name" ]; then
+                echo "::warning::$name ya existe en la app; no se copia el de MeloNX."
+                continue
+              fi
+              cp -R "$item" "Payload/OmniStationDock.app/Frameworks/$name"
+            done
+            cp Vendor/MeloNX/MeloNXRuntime.json Payload/OmniStationDock.app/MeloNXRuntime.json
+          fi
+          # MoltenVK (Vulkan de 3DS y GameCube/Wii), si se bajó y MeloNX no trae ya el suyo.
+          if [ -d Vendor/MoltenVK/MoltenVK.framework ] && [ ! -e Payload/OmniStationDock.app/Frameworks/MoltenVK.framework ]; then
+            cp -R Vendor/MoltenVK/MoltenVK.framework Payload/OmniStationDock.app/Frameworks/MoltenVK.framework
+          fi
+          # Archivos de sistema de los núcleos (PPSSPP y Dolphin); la app los copia a su BIOS al jugar.
+          for item in PPSSPP dolphin-emu; do
+            if [ -d "Vendor/LibretroSystem/$item" ]; then
+              mkdir -p Payload/OmniStationDock.app/RetroSystem
+              cp -R "Vendor/LibretroSystem/$item" "Payload/OmniStationDock.app/RetroSystem/$item"
+            fi
+          done
+          # Núcleos libretro propios (si se descargaron) y, con el Dolphin propio, su carpeta Sys
+          # (la de su mismo código, de la release).
+          if [ -d Vendor/OmniCores ]; then
+            for fw in Vendor/OmniCores/*.libretro.framework; do
+              [ -d "$fw" ] || continue
+              rm -rf "Payload/OmniStationDock.app/Frameworks/$(basename "$fw")"
+              cp -R "$fw" "Payload/OmniStationDock.app/Frameworks/"
+              echo "Núcleo propio: $(basename "$fw")"
+            done
+            if [ -d Vendor/OmniCores/dolphin-sys/Sys ] && [ -d Vendor/OmniCores/dolphin_omni.libretro.framework ]; then
+              mkdir -p Payload/OmniStationDock.app/RetroSystem/dolphin-emu
+              rm -rf Payload/OmniStationDock.app/RetroSystem/dolphin-emu/Sys
+              cp -R Vendor/OmniCores/dolphin-sys/Sys Payload/OmniStationDock.app/RetroSystem/dolphin-emu/Sys
+            fi
+          fi
+          # Permisos de la app (get-task-allow y más memoria). SideStore los conserva al firmar
+          # si el perfil los permite; «Increased Memory Limit» se añade al App ID con GetMoreRam.
+          if command -v ldid >/dev/null 2>&1 || HOMEBREW_NO_AUTO_UPDATE=1 brew install ldid >/dev/null 2>&1; then
+            if ldid -SConfig/OmniStation.entitlements Payload/OmniStationDock.app/OmniStationDock; then
+              ldid -e Payload/OmniStationDock.app/OmniStationDock || true
+            else
+              echo "::warning::ldid no pudo añadir los permisos; la IPA va sin el permiso de más memoria."
+            fi
+          else
+            echo "::warning::No se pudo instalar ldid: la IPA va sin el permiso de más memoria."
+          fi
+          du -sh Payload/OmniStationDock.app
+          /usr/bin/zip -qry OmniStationDock.ipa Payload
+          test -s OmniStationDock.ipa
+          unzip -t OmniStationDock.ipa
+
+      - name: Publish GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          VERSION="build-${GITHUB_RUN_NUMBER}"
+          gh release create "$VERSION" OmniStationDock.ipa \
+            --title "OmniStation Dock ${VERSION}" \
+            --notes "Compilación automática de OmniStation Dock." \
+            --prerelease
