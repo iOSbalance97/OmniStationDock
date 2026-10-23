@@ -2356,16 +2356,58 @@ static void OSLRApplyPanelBackground(UIView *view, CGFloat cornerRadius) {
     }
 }
 
-/// Las capas de brillo siguen el tamaño del panel.
+/// Las capas de brillo (y el cristal) siguen el tamaño del panel.
 static void OSLRLayoutPanelBackground(UIView *view) {
     for (CALayer *layer in view.layer.sublayers) {
         if ([layer.name isEqualToString:@"omni.glow"]) layer.frame = view.bounds;
     }
+    UIView *glass = [view viewWithTag:920001];
+    if (glass) glass.frame = view.bounds;
+}
+
+/// Toque líquido de la app en los paneles del juego: cristal de iOS 26 teñido de azul detrás
+/// (en versiones anteriores se queda el azul noche de siempre).
+static void OSLRApplyLiquidGlass(UIView *view, CGFloat cornerRadius) {
+#if defined(__IPHONE_26_0) && __IPHONE_OS_VERSION_MAX_ALLOWED >= __IPHONE_26_0
+    if (@available(iOS 26.0, *)) {
+        if ([view viewWithTag:920001] != nil) return;
+        UIGlassEffect *effect = [UIGlassEffect effectWithStyle:UIGlassEffectStyleRegular];
+        effect.tintColor = [UIColor colorWithRed:0.05 green:0.38 blue:1.0 alpha:0.18];
+        UIVisualEffectView *glass = [[UIVisualEffectView alloc] initWithEffect:effect];
+        glass.tag = 920001;
+        glass.userInteractionEnabled = NO;
+        glass.layer.cornerRadius = cornerRadius;
+        glass.clipsToBounds = YES;
+        glass.frame = view.bounds;
+        [view insertSubview:glass atIndex:0];
+        // El color de fondo baja para que se note el cristal (el texto se sigue leyendo).
+        view.backgroundColor = [UIColor colorWithRed:0.02 green:0.035 blue:0.08 alpha:0.62];
+    }
+#else
+    (void)view; (void)cornerRadius;
+#endif
+}
+
+/// Pulsar una fila: se aplasta un poco y rebota al soltar (como los botones de la app).
+static void OSLRPressBounce(UIView *view, BOOL pressed) {
+    [UIView animateWithDuration:pressed ? 0.18 : 0.45 delay:0
+         usingSpringWithDamping:pressed ? 0.8 : 0.55 initialSpringVelocity:0.6
+                        options:UIViewAnimationOptionBeginFromCurrentState | UIViewAnimationOptionAllowUserInteraction
+                     animations:^{
+        view.transform = pressed ? CGAffineTransformMakeScale(0.96, 0.93) : CGAffineTransformIdentity;
+    } completion:nil];
 }
 
 /// Fila como las tarjetas de la app: cristal oscuro con borde de luz; la marcada, iluminada.
 static void OSLRStyleRow(UIView *row, BOOL selected) {
     row.layer.cornerRadius = 14;
+    if (selected && [row.superview viewWithTag:930001] != nil) {
+        // En las listas con burbuja, la marca la pone la burbuja (que se desliza).
+        row.layer.borderWidth = 0;
+        row.backgroundColor = UIColor.clearColor;
+        row.layer.shadowOpacity = 0;
+        return;
+    }
     row.layer.borderWidth = selected ? 2.0 : 0.8;
     row.layer.borderColor = selected ? OSLRCyan(1).CGColor : OSLRCyan(0.22).CGColor;
     row.backgroundColor = selected ? OSLRCyan(0.20) : [UIColor colorWithWhite:1 alpha:0.07];
@@ -2410,6 +2452,7 @@ static void OSLRStyleRow(UIView *row, BOOL selected) {
     NSArray<NSDictionary<NSString *, id> *> *_rows;
     NSInteger _columns;
     NSInteger _perColumn;
+    UIView *_bubble;
 }
 
 - (instancetype)initWithFrame:(CGRect)frame {
@@ -2418,6 +2461,7 @@ static void OSLRStyleRow(UIView *row, BOOL selected) {
         OSLRApplyPanelBackground(self, 24);
         // Más opaco que la imagen del juego: el texto se lee siempre.
         self.backgroundColor = [UIColor colorWithRed:0.02 green:0.035 blue:0.08 alpha:0.97];
+        OSLRApplyLiquidGlass(self, 24);
         _titleLabel = [UILabel new];
         _titleLabel.textColor = UIColor.whiteColor;
         _titleLabel.font = OSLRAppFont(19, UIFontWeightBold);
@@ -2447,6 +2491,20 @@ static void OSLRStyleRow(UIView *row, BOOL selected) {
         _scroll.indicatorStyle = UIScrollViewIndicatorStyleWhite;
         _scroll.alwaysBounceVertical = NO;
         [self addSubview:_scroll];
+        // Burbuja de la fila marcada (la de la barra de abajo): se desliza con rebote.
+        _bubble = [UIView new];
+        _bubble.tag = 930001;
+        _bubble.userInteractionEnabled = NO;
+        _bubble.hidden = YES;
+        _bubble.layer.cornerRadius = 14;
+        _bubble.backgroundColor = [UIColor colorWithRed:0.05 green:0.45 blue:1.0 alpha:0.38];
+        _bubble.layer.borderWidth = 1;
+        _bubble.layer.borderColor = OSLRCyan(0.75).CGColor;
+        _bubble.layer.shadowColor = OSLRCyan(1).CGColor;
+        _bubble.layer.shadowOpacity = 0.45;
+        _bubble.layer.shadowRadius = 9;
+        _bubble.layer.shadowOffset = CGSizeZero;
+        [_scroll addSubview:_bubble];
         _rowButtons = [NSMutableArray new];
         _rows = @[];
         _columns = 1;
@@ -2511,6 +2569,8 @@ static void OSLRStyleRow(UIView *row, BOOL selected) {
         value.userInteractionEnabled = NO;
         [button addSubview:value];
         [button addTarget:self action:@selector(rowTapped:) forControlEvents:UIControlEventTouchUpInside];
+        [button addTarget:self action:@selector(rowDown:) forControlEvents:UIControlEventTouchDown | UIControlEventTouchDragEnter];
+        [button addTarget:self action:@selector(rowUp:) forControlEvents:UIControlEventTouchUpInside | UIControlEventTouchUpOutside | UIControlEventTouchCancel | UIControlEventTouchDragExit];
         UILongPressGestureRecognizer *hold = [[UILongPressGestureRecognizer alloc] initWithTarget:self action:@selector(rowHeld:)];
         [button addGestureRecognizer:hold];
         [_scroll addSubview:button];
@@ -2541,6 +2601,9 @@ static void OSLRStyleRow(UIView *row, BOOL selected) {
     [self refreshSelection];
 }
 
+- (void)rowDown:(UIButton *)sender { OSLRPressBounce(sender, YES); }
+- (void)rowUp:(UIButton *)sender { OSLRPressBounce(sender, NO); }
+
 - (void)rowTapped:(UIButton *)sender {
     self.selectedIndex = sender.tag;
     [self refreshSelection];
@@ -2559,6 +2622,28 @@ static void OSLRStyleRow(UIView *row, BOOL selected) {
 - (void)refreshSelection {
     for (UIButton *button in _rowButtons) {
         OSLRStyleRow(button, button.tag == self.selectedIndex && self.highlightSelection);
+    }
+    BOOL show = self.highlightSelection && self.selectedIndex >= 0 && self.selectedIndex < (NSInteger)_rowButtons.count;
+    if (show) {
+        CGRect target = _rowButtons[(NSUInteger)self.selectedIndex].frame;
+        if (_bubble.hidden || CGRectIsEmpty(_bubble.frame)) {
+            // Aparece con un pequeño rebote.
+            _bubble.hidden = NO;
+            _bubble.frame = target;
+            _bubble.transform = CGAffineTransformMakeScale(0.9, 0.9);
+            _bubble.alpha = 0;
+            [UIView animateWithDuration:0.4 delay:0 usingSpringWithDamping:0.62 initialSpringVelocity:0.5
+                                options:UIViewAnimationOptionBeginFromCurrentState | UIViewAnimationOptionAllowUserInteraction
+                             animations:^{ self->_bubble.transform = CGAffineTransformIdentity; self->_bubble.alpha = 1; } completion:nil];
+        } else if (!CGRectEqualToRect(_bubble.frame, target)) {
+            // Se desliza a la nueva fila, con rebote.
+            [UIView animateWithDuration:0.42 delay:0 usingSpringWithDamping:0.68 initialSpringVelocity:0.4
+                                options:UIViewAnimationOptionBeginFromCurrentState | UIViewAnimationOptionAllowUserInteraction
+                             animations:^{ self->_bubble.frame = target; } completion:nil];
+        }
+        [_scroll sendSubviewToBack:_bubble];
+    } else {
+        _bubble.hidden = YES;
     }
     if (self.highlightSelection && self.selectedIndex >= 0 && self.selectedIndex < (NSInteger)_rowButtons.count) {
         [_scroll scrollRectToVisible:CGRectInset(_rowButtons[(NSUInteger)self.selectedIndex].frame, 0, -20) animated:YES];
@@ -2583,7 +2668,10 @@ static void OSLRStyleRow(UIView *row, BOOL selected) {
     CGFloat w = MIN(availableW, _columns == 2 ? 760 : 460);
     CGFloat rowsH = _perColumn * (rowH + gap) - gap;
     CGFloat h = MIN(availableH, header + rowsH + 16);
-    self.frame = CGRectMake(floor(safe.left + 12 + (availableW - w) * 0.5), floor(safe.top + 10 + (availableH - h) * 0.5), w, h);
+    // Con bounds y center (no frame): el panel puede estar escalado mientras entra con rebote.
+    CGRect panelFrame = CGRectMake(floor(safe.left + 12 + (availableW - w) * 0.5), floor(safe.top + 10 + (availableH - h) * 0.5), w, h);
+    self.bounds = CGRectMake(0, 0, w, h);
+    self.center = CGPointMake(CGRectGetMidX(panelFrame), CGRectGetMidY(panelFrame));
     OSLRLayoutPanelBackground(self);
     CGFloat left = self.showsBack ? 54 : 18;
     _backButton.hidden = !self.showsBack;
@@ -3502,6 +3590,7 @@ typedef NS_ENUM(NSInteger, OSLRMenuAction) {
     _optionsView = [[UIView alloc] initWithFrame:CGRectZero];
     OSLRApplyPanelBackground(_optionsView, 22);
     _optionsView.backgroundColor = [UIColor colorWithRed:0.02 green:0.035 blue:0.08 alpha:0.97];
+    OSLRApplyLiquidGlass(_optionsView, 22);
     _optionsView.hidden = YES;
     _optionsTitle = [UILabel new];
     _optionsTitle.text = [self t:@"Opciones del núcleo" en:@"Core options"];
@@ -4110,6 +4199,13 @@ typedef NS_ENUM(NSInteger, OSLRMenuAction) {
     [_skinView releaseAll];
     _menuView.hidden = NO;
     [self placeMenuView:_menuView];
+    // Entrada con el toque líquido: el panel crece desde un poco más pequeño, con rebote.
+    UIView *panel = _activePage ?: _menuPage;
+    panel.transform = CGAffineTransformMakeScale(0.9, 0.9);
+    _menuView.alpha = 0;
+    [UIView animateWithDuration:0.45 delay:0 usingSpringWithDamping:0.7 initialSpringVelocity:0.5
+                        options:UIViewAnimationOptionBeginFromCurrentState | UIViewAnimationOptionAllowUserInteraction
+                     animations:^{ panel.transform = CGAffineTransformIdentity; self->_menuView.alpha = 1; } completion:nil];
     atomic_store(&gTouchBits, 0);
     if (self.menuChanged) self.menuChanged(YES);
 }
@@ -5069,7 +5165,10 @@ typedef NS_ENUM(NSInteger, OSLRMenuAction) {
     if ([hostOptions[@"jitOption"] isEqualToString:@"true"]) {
         controller.jitOn = gJITCapable;
         if (gJITCapable) {
-            controller.jitText = OSLRText(language, @"Con JIT", @"Running with JIT");
+            // Mismos nombres en toda la app: «JIT permanente» (se prepara una vez al abrir OmniStation)
+            // o «JIT al abrir el juego» (se pide en cada partida).
+            controller.jitText = gJITPoolCore ? OSLRText(language, @"Con JIT permanente", @"Running with permanent JIT")
+                                              : OSLRText(language, @"Con JIT (activado al abrir el juego)", @"Running with JIT (enabled when the game opened)");
         } else if (![hostOptions[@"jit"] isEqualToString:@"true"]) {
             controller.jitText = OSLRText(language, @"Sin JIT: desactivado en sus ajustes", @"No JIT: turned off in its settings");
         } else if (OSLRUsesJITScript() && OSLRIsDebugged() && !OSLRIsTraced()) {

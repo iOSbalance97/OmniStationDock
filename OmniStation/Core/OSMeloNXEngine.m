@@ -2353,8 +2353,8 @@ static BOOL OSNXNeedsExtendedVirtualAddressing(void) {
             controller.title = title;
             // Si llega aquí, StikJIT dejó el JIT activo (sin él MeloNX no arranca).
             controller.jitText = self->_dualMapped
-                ? OSNXText(language, @"Con JIT (memoria doble)", @"Running with JIT (dual-mapped)")
-                : OSNXText(language, @"Con JIT", @"Running with JIT");
+                ? OSNXText(language, @"Con JIT (activado al abrir el juego, memoria doble)", @"Running with JIT (enabled when the game opened, dual-mapped)")
+                : OSNXText(language, @"Con JIT (activado al abrir el juego)", @"Running with JIT (enabled when the game opened)");
             controller.touchAlways = [NSUserDefaults.standardUserDefaults boolForKey:@"melonxCoreTouchAlways"];
             controller.touchScreenDisabled = OSNXFlag(settings, @"disableTouch", NO);
             controller.hudPosition = settings[@"hudPosition"] ?: @"topRight";

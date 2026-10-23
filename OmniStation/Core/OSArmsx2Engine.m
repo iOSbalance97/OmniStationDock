@@ -1620,7 +1620,7 @@ static const size_t kOSArmsx2CodeSize = (size_t)305 * 1024 * 1024;
             controller.language = language;
             // ARMSX2 solo arranca si validate_jit dice que el JIT quedó activo.
             controller.jitText = pooled ? OSText(language, @"Con JIT permanente", @"Running with permanent JIT")
-                                        : OSText(language, @"Con JIT", @"Running with JIT");
+                                        : OSText(language, @"Con JIT (activado al abrir el juego)", @"Running with JIT (enabled when the game opened)");
             controller.touchAlways = touchControlsAlways;
             controller.touchHaptics = [hostOptions[@"touchHaptics"] boolValue];
             NSString *aspect = hostOptions[@"aspectRatio"];
