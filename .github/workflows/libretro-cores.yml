@@ -122,7 +122,7 @@ jobs:
           if-no-files-found: ignore
           retention-days: 7
 
-  # Todos los sin JIT seguidos (ninguno tiene submódulos que hagan falta). Si uno falla, sigue con
+  # Todos los sin JIT seguidos (con sus submódulos si los necesitan). Si uno falla, sigue con
   # los demás y publica los que salieron; al final el paso falla y dice cuáles no.
   sin_jit:
     if: inputs.core == 'sin_jit_todos'
@@ -153,14 +153,15 @@ jobs:
           built=""
           for CORE in $CORES; do
             echo "::group::$CORE"
-            read -r REPO REV < <(python3 - "$CORE" <<'PY'
+            read -r REPO REV SUBS < <(python3 - "$CORE" <<'PY'
           import json, sys
           info = json.load(open('Cores/Libretro/sources.json'))[sys.argv[1]]
-          print(info['repository'].removeprefix('https://github.com/').removesuffix('.git'), info['revision'])
+          print(info['repository'].removeprefix('https://github.com/').removesuffix('.git'), info['revision'],
+                'recursive' if info.get('submodules', True) else 'none')
           PY
           )
             DEST=".native-sources/$CORE"
-            if bash Cores/Libretro/fetch_source.sh "$REPO" "$REV" "$DEST" \
+            if bash Cores/Libretro/fetch_source.sh "$REPO" "$REV" "$DEST" "$SUBS" \
                && bash Cores/Libretro/build_core.sh "$CORE" "$DEST" \
                && bash Cores/Libretro/package_core.sh "$CORE" "$REPO" "$REV"; then
               built="$built $CORE"
