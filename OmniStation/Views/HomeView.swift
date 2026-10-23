@@ -257,6 +257,8 @@ struct HomeView: View {
     @State private var tabBarTouchX: CGFloat?
     @State private var tabBarHover: Int?
     @State private var tabBarTouchGroup: Int?
+    /// Para que iconos y cristal de la barra de abajo viajen al plegarse detrás de Inicio.
+    @Namespace private var tabBarNamespace
     /// Prueba de la barra inferior: apagado = Mandos | Búsqueda Inicio Favoritos | Ajustes;
     /// encendido = Mandos | Búsqueda Inicio Favoritos Ajustes.
     @AppStorage("tabBarSettingsJoined") private var tabBarSettingsJoined = false
@@ -6267,17 +6269,11 @@ extension HomeView {
 
     /// Barra flotante de cristal (como la de iOS 26), partida en grupos: en cada grupo una burbuja
     /// marca la pestaña y se desliza; con el dedo encima el grupo crece un poco y la burbuja lo sigue.
+    /// Mientras la pantalla se desplaza, los iconos se esconden detrás de Inicio (efecto líquido con
+    /// rebote) y vuelven al pararse.
     private var portraitTabBar: some View {
-        HStack(spacing: 8) {
-            ForEach(Array(tabBarGroups.enumerated()), id: \.offset) { _, group in
-                if group.count == 1 {
-                    tabBarGroup(group)
-                        .frame(width: Self.tabBarHeight)
-                } else {
-                    tabBarGroup(group)
-                        .frame(maxWidth: .infinity)
-                }
-            }
+        TabBarCollapse(progress: scrollProgress, enabled: tabBarTouchX == nil && !controllersDrawerOpen) { collapsed in
+            tabBarLayout(collapsed: collapsed)
         }
         .frame(height: Self.tabBarHeight)
         .padding(.horizontal, 26)
@@ -6285,6 +6281,66 @@ extension HomeView {
         .animation(.spring(response: 0.38, dampingFraction: 0.72), value: tabBarSelectedIndex)
         .animation(.spring(response: 0.4, dampingFraction: 0.8), value: tabBarSettingsJoined)
         .accessibilityElement(children: .contain)
+    }
+
+    private func tabBarLayout(collapsed: Bool) -> some View {
+        MorphGlassContainer(spacing: 16) {
+            HStack(spacing: 8) {
+                if collapsed {
+                    tabBarCollapsedHome
+                } else {
+                    ForEach(Array(tabBarGroups.enumerated()), id: \.offset) { _, group in
+                        if group.count == 1 {
+                            tabBarGroup(group)
+                                .frame(width: Self.tabBarHeight)
+                        } else {
+                            tabBarGroup(group)
+                                .frame(maxWidth: .infinity)
+                        }
+                    }
+                }
+            }
+            .frame(maxWidth: .infinity)
+        }
+        // Rebote al plegarse y al volver.
+        .animation(.spring(response: 0.46, dampingFraction: 0.6), value: collapsed)
+    }
+
+    /// Grupo del que forma parte Inicio (su cristal es el que queda al plegarse).
+    private var tabBarHomeGroupID: String {
+        let group: [Int] = tabBarGroups.first(where: { $0.contains(2) }) ?? [2]
+        return "glass\(group.first ?? 2)"
+    }
+
+    /// Plegada: solo el círculo de Inicio; los demás iconos están detrás, pequeños e invisibles,
+    /// para que viajen hasta aquí y desde aquí.
+    private var tabBarCollapsedHome: some View {
+        let circle = Capsule(style: .continuous)
+        let side: CGFloat = Self.tabBarHeight
+        let homeSelected: Bool = tabBarSelectedIndex == 2
+        return ZStack {
+            if homeSelected {
+                tabBarPill(touching: false)
+                    .frame(width: side - 8, height: side - 8)
+                    .transition(.scale(scale: 0.6).combined(with: .opacity))
+            }
+            ForEach(Array(tabBarItems.indices), id: \.self) { index in
+                if index != 2 {
+                    tabBarIcon(tabBarItems[index], selected: false)
+                        .frame(width: side, height: side)
+                        .matchedGeometryEffect(id: "icon\(index)", in: tabBarNamespace)
+                        .scaleEffect(0.25)
+                        .opacity(0)
+                }
+            }
+            tabBarIcon(tabBarItems[2], selected: homeSelected)
+                .frame(width: side, height: side)
+                .matchedGeometryEffect(id: "icon2", in: tabBarNamespace)
+        }
+        .frame(width: side, height: side)
+        .background { tabBarGlass(circle, id: tabBarHomeGroupID) }
+        .contentShape(circle)
+        .onTapGesture { selectSection(.inicio) }
     }
 
     private func tabBarGroup(_ group: [Int]) -> some View {
@@ -6312,6 +6368,7 @@ extension HomeView {
                     ForEach(group, id: \.self) { index in
                         tabBarIcon(tabBarItems[index], selected: (tabBarHover ?? tabBarSelectedIndex) == index)
                             .frame(width: slot, height: height)
+                            .matchedGeometryEffect(id: "icon\(index)", in: tabBarNamespace)
                     }
                 }
                 .padding(.horizontal, inset)
@@ -6320,24 +6377,27 @@ extension HomeView {
             .contentShape(capsule)
             .gesture(tabBarGesture(group: group, slot: slot, inset: inset))
         }
-        .background { tabBarGlass(capsule) }
+        .background { tabBarGlass(capsule, id: "glass\(group.first ?? 0)") }
         .scaleEffect(touching ? 1.05 : 1.0)
         .animation(.spring(response: 0.32, dampingFraction: 0.68), value: touching)
     }
 
-    /// Cristal de cada grupo: el mismo que los filtros de plataformas sin elegir.
-    private func tabBarGlass(_ capsule: Capsule) -> some View {
+    /// Cristal de cada grupo: el mismo que los filtros de plataformas sin elegir. Lleva un nombre
+    /// para que, al plegarse, los grupos se fundan como gotas en el de Inicio.
+    private func tabBarGlass(_ capsule: Capsule, id: String) -> some View {
         Color.clear
-            .liquidGlass(in: capsule, tint: nil, interactive: false)
+            .morphGlass(id: id, in: tabBarNamespace, shape: capsule)
             .shadow(color: Color.black.opacity(0.25), radius: 8, y: 4)
     }
 
-    /// Burbuja de la pestaña elegida: como el filtro de plataforma elegido (cristal azul,
-    /// borde cian y brillo cian).
+    /// Burbuja de la pestaña elegida: como el filtro de plataforma elegido (azul, borde cian y
+    /// brillo cian). No es cristal, para que no se funda con el del grupo.
     private func tabBarPill(touching: Bool) -> some View {
         let capsule = Capsule(style: .continuous)
-        return Color.clear
-            .liquidGlass(in: capsule, tint: Color(red: 0.05, green: 0.45, blue: 1.0), interactive: false)
+        let blue: Color = Color(red: 0.05, green: 0.45, blue: 1.0)
+        return capsule
+            .fill(LinearGradient(colors: [blue.opacity(0.62), blue.opacity(0.40)], startPoint: .topLeading, endPoint: .bottomTrailing))
+            .overlay(capsule.fill(LinearGradient(colors: [Color.white.opacity(0.18), Color.white.opacity(0)], startPoint: .top, endPoint: .center)))
             .overlay(capsule.strokeBorder(Color.cyan.opacity(0.7), lineWidth: 1))
             .background(capsule.fill(Color.cyan.opacity(touching ? 0.35 : 0.25)).blur(radius: 8))
     }
@@ -6676,5 +6736,17 @@ private struct HeaderFade<Content: View>: View {
             .opacity(1 - hidden)
             .offset(y: -10 * hidden)
             .allowsHitTesting(hidden < 0.5)
+    }
+}
+
+
+/// Pliega la barra de abajo mientras la pantalla se desplaza (solo esta vista se repinta).
+private struct TabBarCollapse<Content: View>: View {
+    @ObservedObject var progress: ScrollProgress
+    var enabled: Bool
+    var content: (Bool) -> Content
+
+    var body: some View {
+        content(enabled && progress.moving)
     }
 }

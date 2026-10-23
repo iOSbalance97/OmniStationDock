@@ -661,9 +661,15 @@ enum OrientationController {
     /// Fija la orientación permitida y pide a iOS que gire ahora.
     static func apply(landscape: Bool) {
         AppDelegate.orientationMask = landscape ? .landscape : .allButUpsideDown
-        let scenes = UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }
+        // Solo la escena del iPhone: con la tele conectada también está la suya (que no gira) y,
+        // si se cogía esa, el iPhone no se ponía en horizontal.
+        let scenes = UIApplication.shared.connectedScenes
+            .compactMap { $0 as? UIWindowScene }
+            .filter { $0.session.role == .windowApplication }
         guard let scene = scenes.first(where: { $0.activationState == .foregroundActive }) ?? scenes.first else { return }
-        scene.windows.first?.rootViewController?.setNeedsUpdateOfSupportedInterfaceOrientations()
+        for window in scene.windows {
+            window.rootViewController?.setNeedsUpdateOfSupportedInterfaceOrientations()
+        }
         scene.requestGeometryUpdate(.iOS(interfaceOrientations: landscape ? .landscape : .allButUpsideDown)) { _ in }
     }
 }
@@ -1077,10 +1083,30 @@ final class ScrollProgress: ObservableObject {
     /// pantalla (la transición) y no debe poder esconder el título de la nueva.
     private(set) var owner: String = "Inicio"
 
+    /// ¿Se está desplazando la pantalla? (con un pequeño margen al parar, para que no parpadee).
+    @Published private(set) var moving = false
+    private var settle: DispatchWorkItem?
+
     /// Pasa el control a otra pantalla, que empieza arriba del todo.
     func activate(_ newOwner: String) {
         owner = newOwner
         if offset != 0 { offset = 0 }
+        settle?.cancel()
+        if moving { moving = false }
+    }
+
+    func setMoving(_ value: Bool, from source: String) {
+        guard source == owner else { return }
+        settle?.cancel()
+        if value {
+            if !moving { moving = true }
+            return
+        }
+        let item = DispatchWorkItem { [weak self] in
+            if self?.moving == true { self?.moving = false }
+        }
+        settle = item
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.3, execute: item)
     }
 
     /// Desplazamiento que informa una pantalla concreta (se ignora si no es la activa).
@@ -1145,6 +1171,9 @@ struct ScrollOffsetReader: ViewModifier {
                 geometry.contentOffset.y + geometry.contentInsets.top
             } action: { _, newValue in
                 progress.set(newValue, from: owner)
+            }
+            .onScrollPhaseChange { _, phase in
+                progress.setMoving(phase != .idle, from: owner)
             }
         } else {
             content
@@ -1316,6 +1345,46 @@ private struct ClearGlassFallback<S: InsettableShape>: ViewModifier {
         content
             .background { shape.fill(.ultraThinMaterial).opacity(0.55) }
             .modifier(LiquidGlassRim(shape: shape))
+    }
+}
+
+extension View {
+    /// Cristal que se funde con los de alrededor al aparecer o desaparecer (iOS 26: glassEffectID
+    /// dentro de MorphGlassContainer; antes, la imitación que viaja con matchedGeometryEffect).
+    @ViewBuilder
+    func morphGlass<S: InsettableShape>(id: String, in namespace: Namespace.ID, shape: S) -> some View {
+        #if compiler(>=6.2)
+        if #available(iOS 26.0, *) {
+            glassEffect(Glass.regular, in: shape)
+                .glassEffectID(id, in: namespace)
+        } else {
+            modifier(LiquidGlassFallback(shape: shape, tint: nil))
+                .matchedGeometryEffect(id: id, in: namespace)
+        }
+        #else
+        modifier(LiquidGlassFallback(shape: shape, tint: nil))
+            .matchedGeometryEffect(id: id, in: namespace)
+        #endif
+    }
+}
+
+/// Contenedor de los cristales que se funden entre sí (en iOS 26, GlassEffectContainer).
+struct MorphGlassContainer<Content: View>: View {
+    var spacing: CGFloat
+    @ViewBuilder var content: () -> Content
+
+    var body: some View {
+        #if compiler(>=6.2)
+        if #available(iOS 26.0, *) {
+            GlassEffectContainer(spacing: spacing) {
+                content()
+            }
+        } else {
+            content()
+        }
+        #else
+        content()
+        #endif
     }
 }
 
