@@ -22,6 +22,10 @@ extern NSNotificationName const OSExternalDisplayDidChangeNotification;
 /// ¿Hay una tele conectada (AirPlay o HDMI) con su escena lista?
 @property (nonatomic, readonly) BOOL connected;
 
+/// ¿Se puede poner el juego en la tele? (hay tele, el ajuste está encendido y no va por AirPlay,
+/// donde iOS solo duplica la pantalla).
+@property (nonatomic, readonly) BOOL hostingAvailable;
+
 /// Pone `view` a pantalla completa en la tele. NO si no hay tele o el ajuste está apagado.
 - (BOOL)hostView:(UIView *)view;
 

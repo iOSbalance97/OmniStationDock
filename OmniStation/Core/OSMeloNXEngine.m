@@ -1141,7 +1141,7 @@ static void OSNXSetTouchVisible(UIViewController *controller, BOOL visible) {
 
 - (void)updateExternalDisplay {
     OSExternalDisplay *display = OSExternalDisplay.shared;
-    BOOL wantTV = display.connected && OSExternalDisplay.enabled && !self.closing;
+    BOOL wantTV = display.hostingAvailable && !self.closing;
     if (wantTV && !_onTV) {
         if (_tvContainer == nil) {
             _tvContainer = [[OSNXGameContainer alloc] initWithFrame:CGRectMake(0, 0, 1920, 1080)];

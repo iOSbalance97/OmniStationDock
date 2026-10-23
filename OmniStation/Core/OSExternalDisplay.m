@@ -1,6 +1,7 @@
 // Pantalla externa (AirPlay o HDMI) para los núcleos integrados.
 // SPDX-License-Identifier: GPL-3.0-or-later
 #import "OSExternalDisplay.h"
+#import <AVFoundation/AVFoundation.h>
 
 NSNotificationName const OSExternalDisplayDidChangeNotification = @"OSExternalDisplayDidChangeNotification";
 
@@ -74,7 +75,8 @@ static NSString *const kOSTVOutputKey = @"tvGameOutput";
     #pragma clang diagnostic ignored "-Wdeprecated-declarations"
     NSUInteger screens = UIScreen.screens.count;
     #pragma clang diagnostic pop
-    return [NSString stringWithFormat:@"varias escenas %@, pantallas %lu, escenas [%@], eventos [%@]",
+    return [NSString stringWithFormat:@"%@, varias escenas %@, pantallas %lu, escenas [%@], eventos [%@]",
+            [self viaAirPlay] ? @"AirPlay" : @"cable (HDMI)",
             UIApplication.sharedApplication.supportsMultipleScenes ? @"sí" : @"NO",
             (unsigned long)screens, [roles componentsJoinedByString:@"; "],
             [(_events ?: @[]) componentsJoinedByString:@"; "]];
@@ -119,35 +121,6 @@ static NSString *const kOSTVOutputKey = @"tvGameOutput";
     [self note:[NSString stringWithFormat:@"tele conectada %.0fx%.0f", scene.coordinateSpace.bounds.size.width, scene.coordinateSpace.bounds.size.height]];
     _scene = scene;
     [NSNotificationCenter.defaultCenter postNotificationName:OSExternalDisplayDidChangeNotification object:self];
-    [self showConnectProbe];
-}
-
-/// Prueba al conectar la tele: 6 s con la ventana propia (rótulo en el centro). Si se ve, iOS
-/// enseña nuestras ventanas en la tele; luego se quita y la tele vuelve a duplicar el iPhone.
-- (void)showConnectProbe {
-    UIWindowScene *scene = _scene;
-    if (scene == nil || !OSExternalDisplay.enabled || _hostedView != nil) return;
-    UIWindow *window = [self windowForScene:scene];
-    UIView *root = window.rootViewController.view;
-    UILabel *label = [UILabel new];
-    label.text = @"OmniStation Dock\nTele conectada";
-    label.numberOfLines = 2;
-    label.font = [UIFont systemFontOfSize:56 weight:UIFontWeightBold];
-    label.textColor = UIColor.cyanColor;
-    label.textAlignment = NSTextAlignmentCenter;
-    label.frame = root.bounds;
-    label.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
-    label.tag = 4711;
-    [root addSubview:label];
-    [window layoutIfNeeded];
-    [self note:@"prueba: rótulo en la tele (6 s)"];
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(6 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-        [label removeFromSuperview];
-        if (self->_hostedView == nil && self->_window != nil) {
-            self->_window.hidden = YES;
-            self->_window = nil;
-        }
-    });
 }
 
 /// La ventana de la tele (se crea si hace falta) y se la da también al delegado de la escena.
@@ -180,10 +153,27 @@ static NSString *const kOSTVOutputKey = @"tvGameOutput";
     _hostedView = nil;
 }
 
+/// ¿La tele va por AirPlay? (iOS no lo dice en la escena; se mira la salida de sonido).
+- (BOOL)viaAirPlay {
+    for (AVAudioSessionPortDescription *port in AVAudioSession.sharedInstance.currentRoute.outputs) {
+        if ([port.portType isEqualToString:AVAudioSessionPortAirPlay]) return YES;
+    }
+    return NO;
+}
+
+- (BOOL)hostingAvailable {
+    return self.connected && OSExternalDisplay.enabled && ![self viaAirPlay];
+}
+
 - (BOOL)hostView:(UIView *)view {
     UIWindowScene *scene = _scene;
     if (scene == nil || !OSExternalDisplay.enabled) return NO;
-    [[_window.rootViewController.view viewWithTag:4711] removeFromSuperview];
+    // Por AirPlay, iOS no enseña en la tele las ventanas propias de la app (sale en negro):
+    // se deja la duplicación de pantalla, así el juego se ve en la tele igual que en el iPhone.
+    if ([self viaAirPlay]) {
+        [self note:@"AirPlay: se deja duplicar la pantalla"];
+        return NO;
+    }
     [self windowForScene:scene];
     UIView *root = _window.rootViewController.view;
     view.frame = root.bounds;

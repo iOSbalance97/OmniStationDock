@@ -4164,7 +4164,8 @@ typedef NS_ENUM(NSInteger, OSLRMenuAction) {
 }
 
 - (void)updateExternalDisplay {
-    BOOL wantTV = OSExternalDisplay.enabled && OSExternalDisplay.shared.connected;
+    // Por AirPlay no: iOS no enseña ahí la ventana de la app y la tele sigue duplicando el iPhone.
+    BOOL wantTV = OSExternalDisplay.shared.hostingAvailable;
     // En el registro, para saber si iOS le dio a la app la pantalla de la tele (AirPlay/HDMI).
     int state = (OSExternalDisplay.shared.connected ? 1 : 0) | (OSExternalDisplay.enabled ? 2 : 0) | 4;
     if (state != _tvLogged) {
@@ -5004,7 +5005,7 @@ typedef NS_ENUM(NSInteger, OSLRMenuAction) {
     atomic_store(&gVariablesChanged, false);
     if (gOrientKey != nil) {
         CGSize screen = UIScreen.mainScreen.bounds.size;
-        BOOL portrait = screen.height > screen.width && !(OSExternalDisplay.enabled && OSExternalDisplay.shared.connected);
+        BOOL portrait = screen.height > screen.width && !OSExternalDisplay.shared.hostingAvailable;
         NSString *value = portrait ? gOrientPortrait : gOrientLandscape;
         if (value.length > 0) {
             NSMutableDictionary<NSString *, NSString *> *options = [gUserOptions mutableCopy];

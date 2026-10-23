@@ -785,7 +785,7 @@ static NSString *OSString(const char *text, NSString *fallback) {
     UIView *coreView = self.coreView;
     if (coreView == nil || !self.isViewLoaded) return;
     OSExternalDisplay *display = OSExternalDisplay.shared;
-    BOOL wantTV = display.connected && OSExternalDisplay.enabled && !self.closing;
+    BOOL wantTV = display.hostingAvailable && !self.closing;
     if (wantTV && !_onTV) {
         if (_tvHost == nil) {
             _tvHost = [[UIView alloc] initWithFrame:CGRectMake(0, 0, 1920, 1080)];
