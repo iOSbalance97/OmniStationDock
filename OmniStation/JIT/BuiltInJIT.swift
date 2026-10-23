@@ -45,7 +45,8 @@ enum JITScriptChoice: String, CaseIterable {
         case .legacy: return .legacy
         case .noScript: return nil
         case .automatic:
-            guard let appName, let known = Self.knownApps[appName] else { return nil }
+            // Las que no están en la tabla, con Universal: es el que vale para casi todas.
+            guard let appName, let known = Self.knownApps[appName] else { return .universal }
             return known == .legacy ? .legacy : .universal
         }
     }
