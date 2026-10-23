@@ -17,11 +17,17 @@ targets:
     platform: iOS
     sources:
       - path: OmniStation
+        excludes:
+          - "Resources/RomPatcher/**"
+      # Parcheador (RomPatcher.js, MIT): carpeta tal cual (sus rutas relativas tienen que seguir valiendo).
+      - path: OmniStation/Resources/RomPatcher
+        type: folder
+        buildPhase: resources
     settings:
       base:
         
-        MARKETING_VERSION: "0.9.0"
-        CURRENT_PROJECT_VERSION: "90"
+        MARKETING_VERSION: "0.9.1"
+        CURRENT_PROJECT_VERSION: "91"
         PRODUCT_BUNDLE_IDENTIFIER: com.omnistation.dock
         PRODUCT_NAME: OmniStationDock
         SWIFT_VERSION: "5.0"
@@ -61,6 +67,8 @@ targets:
       - sdk: OpenGLES.framework
       - sdk: Metal.framework
       - sdk: JavaScriptCore.framework
+      # Parcheador (RomPatcher.js en una vista web).
+      - sdk: WebKit.framework
       - sdk: Network.framework
       - sdk: Security.framework
       - sdk: CFNetwork.framework
@@ -76,8 +84,8 @@ targets:
       - path: OmniStation/JIT/StikJIT
     settings:
       base:
-        MARKETING_VERSION: "0.9.0"
-        CURRENT_PROJECT_VERSION: "90"
+        MARKETING_VERSION: "0.9.1"
+        CURRENT_PROJECT_VERSION: "91"
         PRODUCT_BUNDLE_IDENTIFIER: com.omnistation.dock.jithelper
         PRODUCT_NAME: OmniStationJITHelper
         SWIFT_VERSION: "5.0"
@@ -107,8 +115,8 @@ targets:
       - path: RamDonor
     settings:
       base:
-        MARKETING_VERSION: "0.9.0"
-        CURRENT_PROJECT_VERSION: "90"
+        MARKETING_VERSION: "0.9.1"
+        CURRENT_PROJECT_VERSION: "91"
         PRODUCT_BUNDLE_IDENTIFIER: com.omnistation.dock.ramdonor
         PRODUCT_NAME: OmniStationRamDonor
         TARGETED_DEVICE_FAMILY: "1"
