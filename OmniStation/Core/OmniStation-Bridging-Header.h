@@ -3,3 +3,5 @@
 #import "OSMeloNXEngine.h"
 #import "OSExternalDisplay.h"
 #import "OSLibretroEngine.h"
+#import "OSDeltaSkin.h"
+#import "OSZipArchive.h"

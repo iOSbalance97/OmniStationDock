@@ -2101,6 +2101,17 @@ static int OSLRRetroButtonForMapID(NSString *name) {
     return value ? value.intValue : -1;
 }
 
+/// Cola de los mandos durante la partida: los cambios llegan aunque el hilo principal vaya
+/// cargado (con algunos núcleos el menú solo se abría manteniendo SELECT+START).
+static dispatch_queue_t OSLRPadQueue(void) {
+    static dispatch_queue_t queue;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        queue = dispatch_queue_create("omnistation.libretro.pad", dispatch_queue_attr_make_with_qos_class(DISPATCH_QUEUE_SERIAL, QOS_CLASS_USER_INTERACTIVE, 0));
+    });
+    return queue;
+}
+
 /// Botones físicos de un mando → bits de libretro (posicional, como RetroArch).
 static uint32_t OSLRPadBits(GCExtendedGamepad *pad) {
     uint32_t physical = 0;
@@ -2795,6 +2806,13 @@ typedef NS_ENUM(NSInteger, OSLRMenuAction) {
     OSLRListPage *_menuPage;
     OSLRListPage *_cheatsPage;
     OSLRListPage *_skinsPage;
+    /// Ventana para elegir un valor (avance rápido, sonido, opciones del núcleo…).
+    OSLRListPage *_choicePage;
+    void (^_choicePick)(NSInteger index);
+    /// La ventana de valores se abrió desde las opciones del núcleo (al cerrar se vuelve allí).
+    BOOL _choiceFromOptions;
+    /// Combinación del menú vista en el manejador del mando (para no repetirla).
+    BOOL _comboLatch, _homeLatch;
     OSLRListPage *_activePage;
     NSArray<NSNumber *> *_menuActions;
     NSAttributedString *_jitBadge;
@@ -3209,6 +3227,13 @@ typedef NS_ENUM(NSInteger, OSLRMenuAction) {
     _skinsPage.back = ^{ [weakSelf showPage:nil]; };
     _skinsPage.hidden = YES;
     [_menuView addSubview:_skinsPage];
+    _choicePage = [OSLRListPage new];
+    _choicePage.showsBack = YES;
+    _choicePage.hint = [self t:@"Toca o A para elegir · B para volver" en:@"Tap or A to choose · B to go back"];
+    _choicePage.activate = ^(NSInteger index) { [weakSelf choicePicked:index]; };
+    _choicePage.back = ^{ [weakSelf closeChoices]; };
+    _choicePage.hidden = YES;
+    [_menuView addSubview:_choicePage];
     _activePage = _menuPage;
     [self updateJITLabel];
     [self updateVisibleRows];
@@ -3237,9 +3262,9 @@ typedef NS_ENUM(NSInteger, OSLRMenuAction) {
     add(OSLRMenuActionSaveState, [self t:@"Guardar estado" en:@"Save state"], @"square.and.arrow.down.fill", nil, NO, nil);
     add(OSLRMenuActionLoadState, [self t:@"Cargar estado" en:@"Load state"], @"square.and.arrow.up.fill", nil, NO, nil);
     add(OSLRMenuActionFastForward, [self t:@"Avance rápido" en:@"Fast forward"], @"forward.fill",
-        speed > 1 ? [NSString stringWithFormat:@"×%d", speed] : [self t:@"No" en:@"Off"], YES, nil);
+        speed > 1 ? [NSString stringWithFormat:@"×%d", speed] : [self t:@"No" en:@"Off"], NO, nil);
     add(OSLRMenuActionSound, [self t:@"Sonido" en:@"Sound"], muted ? @"speaker.slash.fill" : @"speaker.wave.2.fill",
-        muted ? [self t:@"Silenciado" en:@"Muted"] : [self t:@"Activado" en:@"On"], YES, nil);
+        muted ? [self t:@"Silenciado" en:@"Muted"] : [self t:@"Activado" en:@"On"], NO, nil);
     if (self.cheatsAllowed) {
         NSUInteger on = 0;
         os_unfair_lock_lock(&gCheatLock);
@@ -3260,11 +3285,72 @@ typedef NS_ENUM(NSInteger, OSLRMenuAction) {
 - (void)menuPageActivated:(NSInteger)index {
     if (index < 0 || index >= (NSInteger)_menuActions.count) return;
     OSLRMenuAction action = (OSLRMenuAction)_menuActions[(NSUInteger)index].integerValue;
-    if (action == OSLRMenuActionFastForward || action == OSLRMenuActionSound) {
-        [self menuPageAdjusted:index by:1];
+    __weak OSLRGameViewController *weakSelf = self;
+    if (action == OSLRMenuActionFastForward) {
+        int speed = atomic_load(&gFastSpeed);
+        [self showChoices:[self t:@"Avance rápido" en:@"Fast forward"]
+                   values:@[[self t:@"No" en:@"Off"], @"×2", @"×3", @"×4"]
+                 selected:MAX(0, speed - 1) fromOptions:NO pick:^(NSInteger choice) {
+            [weakSelf setFastSpeed:(int)choice + 1 announce:NO];
+        }];
+        return;
+    }
+    if (action == OSLRMenuActionSound) {
+        BOOL muted = atomic_load(&gVolume) == 0.0f;
+        [self showChoices:[self t:@"Sonido" en:@"Sound"]
+                   values:@[[self t:@"Activado" en:@"On"], [self t:@"Silenciado" en:@"Muted"]]
+                 selected:muted ? 1 : 0 fromOptions:NO pick:^(NSInteger choice) {
+            atomic_store(&gVolume, choice == 1 ? 0.0f : 1.0f);
+            [NSUserDefaults.standardUserDefaults setBool:choice == 1 forKey:@"retroMuted"];
+        }];
         return;
     }
     [self activateRow:action];
+}
+
+// MARK: Ventana de valores
+
+/// Abre la ventana para elegir uno de `values` (marcado el `selected`). Con el mando: ↑↓, A elige,
+/// B vuelve. Sustituye a ir pasando valores con ←→ o tocando (daba saltos raros).
+- (void)showChoices:(NSString *)title values:(NSArray<NSString *> *)values selected:(NSInteger)selected
+        fromOptions:(BOOL)fromOptions pick:(void (^)(NSInteger index))pick {
+    if (values.count == 0) return;
+    NSMutableArray<NSDictionary<NSString *, id> *> *rows = [NSMutableArray new];
+    for (NSUInteger i = 0; i < values.count; i++) {
+        [rows addObject:@{@"title": values[i], @"icon": (NSInteger)i == selected ? @"checkmark.circle.fill" : @"circle", @"selected": @((NSInteger)i == selected)}];
+    }
+    _choicePick = [pick copy];
+    _choiceFromOptions = fromOptions;
+    _choicePage.title = title;
+    [_choicePage setRows:rows];
+    _choicePage.selectedIndex = MAX(0, MIN(selected, (NSInteger)values.count - 1));
+    if (fromOptions) {
+        _optionsView.hidden = YES;
+        _menuView.hidden = NO;
+        [self placeMenuView:_menuView];
+    }
+    [self showPage:_choicePage];
+    _prevA = YES;
+}
+
+- (void)choicePicked:(NSInteger)index {
+    void (^pick)(NSInteger) = _choicePick;
+    [self closeChoices];
+    if (pick) pick(index);
+    if (!_choiceFromOptions) [self updateVisibleRows];
+}
+
+- (void)closeChoices {
+    _choicePick = nil;
+    if (_choiceFromOptions && _optionsVisible) {
+        _menuView.hidden = YES;
+        _optionsView.hidden = NO;
+        [self placeMenuView:_optionsView];
+        [self showPage:nil];
+        [self refreshOptionsPage];
+    } else {
+        [self showPage:nil];
+    }
 }
 
 - (void)menuPageAdjusted:(NSInteger)index by:(NSInteger)delta {
@@ -3311,8 +3397,8 @@ typedef NS_ENUM(NSInteger, OSLRMenuAction) {
 - (void)showPage:(nullable OSLRListPage *)page {
     OSLRListPage *target = page ?: _menuPage;
     if (target == _menuPage) [self updateVisibleRows];
-    for (OSLRListPage *candidate in @[_menuPage, _cheatsPage, _skinsPage]) candidate.hidden = candidate != target;
-    target.selectedIndex = target == _menuPage ? target.selectedIndex : 0;
+    for (OSLRListPage *candidate in @[_menuPage, _cheatsPage, _skinsPage, _choicePage]) candidate.hidden = candidate != target;
+    if (target != _menuPage && target != _choicePage) target.selectedIndex = 0;
     _activePage = target;
     target.highlightSelection = _controller != nil;
     [self.view setNeedsLayout];
@@ -3682,7 +3768,7 @@ typedef NS_ENUM(NSInteger, OSLRMenuAction) {
 - (void)updateOptionRow:(UIButton *)row {
     if (row.tag < 0 || row.tag >= (NSInteger)self.coreOptions.count) return;
     UILabel *value = [row viewWithTag:900002];
-    value.text = [NSString stringWithFormat:@"‹ %@ ›", [self labelForOption:self.coreOptions[(NSUInteger)row.tag]]];
+    value.text = [NSString stringWithFormat:@"%@  ›", [self labelForOption:self.coreOptions[(NSUInteger)row.tag]]];
 }
 
 - (void)layoutOptionsPage {
@@ -3751,8 +3837,29 @@ typedef NS_ENUM(NSInteger, OSLRMenuAction) {
 
 - (void)optionRowTapped:(UIButton *)sender {
     _optionIndex = sender.tag;
-    [self stepOption:sender.tag by:1];
     [self refreshOptionsPage];
+    [self chooseOption:sender.tag];
+}
+
+/// Opción del núcleo: ventana con todos sus valores.
+- (void)chooseOption:(NSInteger)index {
+    if (index < 0 || index >= (NSInteger)self.coreOptions.count) return;
+    NSDictionary<NSString *, id> *option = self.coreOptions[(NSUInteger)index];
+    NSArray<NSArray<NSString *> *> *values = option[@"values"];
+    if (values.count < 2) return;
+    NSMutableArray<NSString *> *labels = [NSMutableArray new];
+    NSInteger current = 0;
+    for (NSUInteger i = 0; i < values.count; i++) {
+        NSArray<NSString *> *pair = values[i];
+        [labels addObject:pair.count > 1 ? pair[1] : (pair.firstObject ?: @"")];
+        if ([pair.firstObject isEqualToString:option[@"value"]]) current = (NSInteger)i;
+    }
+    NSString *title = [option[@"title"] isKindOfClass:NSString.class] ? option[@"title"] : (option[@"key"] ?: @"");
+    __weak OSLRGameViewController *weakSelf = self;
+    [self showChoices:title values:labels selected:current fromOptions:YES pick:^(NSInteger choice) {
+        [weakSelf stepOption:index by:choice - current];
+        [weakSelf refreshOptionsPage];
+    }];
 }
 
 /// Siguiente (o anterior) valor de una opción: se apunta, se le pasa al núcleo y se guarda.
@@ -4022,8 +4129,10 @@ typedef NS_ENUM(NSInteger, OSLRMenuAction) {
     if (pad == nil) return;
     if (slot < 0) {
         pad.valueChangedHandler = nil;
+        controller.handlerQueue = dispatch_get_main_queue();
         return;
     }
+    controller.handlerQueue = OSLRPadQueue();
     controller.playerIndex = (GCControllerPlayerIndex)(GCControllerPlayerIndex2 + slot);
     if (pad.buttonHome != nil) pad.buttonHome.preferredSystemGestureState = GCSystemGestureStateDisabled;
     __weak OSLRGameViewController *weakSelf = self;
@@ -4036,6 +4145,7 @@ typedef NS_ENUM(NSInteger, OSLRMenuAction) {
 - (void)readExtraGamepad:(GCExtendedGamepad *)pad slot:(int)slot {
     if (pad == nil || slot < 0 || slot >= OSLR_EXTRA_PLAYERS) return;
     uint32_t physical = OSLRPadBits(pad);
+    [self noteMenuButtons:pad bits:physical];
     atomic_store(&gExtraPadBits[slot], [self mappedBits:physical]);
     atomic_store(&gExtraAxis[slot][0], (int32_t)(pad.leftThumbstick.xAxis.value * 32767.0f));
     atomic_store(&gExtraAxis[slot][1], (int32_t)(-pad.leftThumbstick.yAxis.value * 32767.0f));
@@ -4060,6 +4170,7 @@ typedef NS_ENUM(NSInteger, OSLRMenuAction) {
 - (void)wireController:(GCController *)controller enabled:(BOOL)enabled {
     GCExtendedGamepad *pad = controller.extendedGamepad;
     if (pad == nil) return;
+    controller.handlerQueue = enabled ? OSLRPadQueue() : dispatch_get_main_queue();
     if (!enabled) {
         pad.valueChangedHandler = nil;
         atomic_store(&gPadBits, 0);
@@ -4074,10 +4185,31 @@ typedef NS_ENUM(NSInteger, OSLRMenuAction) {
     [self readGamepad:pad];
 }
 
+/// SELECT+START (o Home) en cuanto se pulsan: el menú se abre al toque, sin esperar al siguiente
+/// repaso del hilo principal.
+- (void)noteMenuButtons:(GCExtendedGamepad *)pad bits:(uint32_t)physical {
+    BOOL combo = (physical & (1u << RETRO_DEVICE_ID_JOYPAD_START)) && (physical & (1u << RETRO_DEVICE_ID_JOYPAD_SELECT));
+    BOOL home = pad.buttonHome != nil && pad.buttonHome.isPressed;
+    BOOL fire = (combo && !_comboLatch) || (home && !_homeLatch);
+    _comboLatch = combo;
+    _homeLatch = home;
+    if (!fire) return;
+    __weak OSLRGameViewController *weakSelf = self;
+    dispatch_async(dispatch_get_main_queue(), ^{
+        OSLRGameViewController *strongSelf = weakSelf;
+        if (strongSelf == nil || strongSelf->_menuVisible || strongSelf.closing || strongSelf.presentedViewController != nil) return;
+        // Que el repaso del menú no lo tome como otra pulsación (y lo cierre).
+        strongSelf->_prevHome = YES;
+        strongSelf->_prevCombo = YES;
+        [strongSelf openMenu];
+    });
+}
+
 - (void)readGamepad:(GCExtendedGamepad *)pad {
     if (pad == nil) return;
     uint32_t physical = OSLRPadBits(pad);
     _physicalBits = physical;
+    [self noteMenuButtons:pad bits:physical];
     atomic_store(&gPadBits, [self mappedBits:physical]);
     float lx = pad.leftThumbstick.xAxis.value, ly = pad.leftThumbstick.yAxis.value;
     atomic_store(&gAxis[0], (int32_t)(lx * 32767.0f));
@@ -4138,13 +4270,13 @@ typedef NS_ENUM(NSInteger, OSLRMenuAction) {
         _prevLeft = left; _prevRight = right; _prevY = yButton;
         return;
     }
-    if (_menuVisible && _optionsVisible && !self.closing) {
+    if (_menuVisible && _optionsVisible && _activePage != _choicePage && !self.closing) {
         NSInteger count = (NSInteger)_optionRows.count;
         if (count > 0) {
             if (up && !_prevUp) { _optionIndex = (_optionIndex + count - 1) % count; [self refreshOptionsPage]; }
             if (down && !_prevDown) { _optionIndex = (_optionIndex + 1) % count; [self refreshOptionsPage]; }
-            if (left && !_prevLeft) [self stepOption:_optionIndex by:-1];
-            if ((right && !_prevRight) || (a && !_prevA)) [self stepOption:_optionIndex by:1];
+            // A abre la ventana con sus valores (←→ ya no los van pasando).
+            if (a && !_prevA) [self chooseOption:_optionIndex];
         }
         if (b && !_prevB) [self closeOptionsPage];
         if (home && !_prevHome) { [self closeOptionsPage]; [self closeMenu]; }
@@ -4165,6 +4297,7 @@ typedef NS_ENUM(NSInteger, OSLRMenuAction) {
         if (yButton && !_prevY) [page pressY];
         if (b && !_prevB) {
             if (page == _menuPage) [self closeMenu];
+            else if (page == _choicePage) [self closeChoices];
             else [self showPage:nil];
         }
         if (home && !_prevHome) [self closeMenu];

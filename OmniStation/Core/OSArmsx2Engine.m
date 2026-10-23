@@ -1587,7 +1587,10 @@ static const size_t kOSArmsx2CodeSize = (size_t)305 * 1024 * 1024;
             report(OSText(language, @"Activando el JIT…", @"Enabling JIT…"));
             if (![self prepareJITWithPairing:pairingData progress:report error:&error]) {
                 self.busy = NO;
-                [self finishLaunch:NO message:error completion:completion];
+                // ARMSX2 no tiene intérprete jugable: PCSX2 sin recompiladores va a 1-3 FPS en un iPhone.
+                NSString *why = OSText(language, @"ARMSX2 no puede ir sin JIT (sin recompilador la PS2 va a 1-3 FPS). Abre OmniStation con el JIT de StikDebug o de SideStore una vez y queda el JIT permanente.",
+                                       @"ARMSX2 cannot run without JIT (without its recompiler PS2 runs at 1-3 FPS). Open OmniStation once with StikDebug's or SideStore's JIT and the permanent JIT stays ready.");
+                [self finishLaunch:NO message:error.length > 0 ? [NSString stringWithFormat:@"%@\n\n%@", error, why] : why completion:completion];
                 return;
             }
             // iOS 26: el depurador debe responder de verdad antes de cargar (o reutilizar) el núcleo.
