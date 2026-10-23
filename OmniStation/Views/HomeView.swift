@@ -2,10 +2,11 @@ import SwiftUI
 import PhotosUI
 import UniformTypeIdentifiers
 
+/// El orden de los casos es el de los botones (y el de L2/R2): Búsqueda, Inicio, Favoritos, Ajustes.
 private enum DockSection: String, CaseIterable {
+    case busqueda = "Búsqueda"
     case inicio = "Inicio"
     case favoritos = "Favoritos"
-    case busqueda = "Búsqueda"
     case ajustes = "Ajustes"
 
     var symbol: String {
@@ -4403,7 +4404,7 @@ struct HomeView: View {
                 .reportFrame("scroll")
                 .edgeFade(clear: metrics.fadeClear, fade: metrics.headerHeight,
                           bottom: isLandscapeNow ? Self.bottomFadeHeight : 76,
-                          bottomClear: isLandscapeNow ? 0 : Self.tabBarReserve - 14)
+                          bottomClear: isLandscapeNow ? 0 : Self.tabBarReserve - 26)
         }
     }
 
@@ -6198,7 +6199,7 @@ private struct SettingCardLabel: View, Equatable {
 
 extension HomeView {
     /// Lo que ocupa abajo la barra de botones en vertical (el contenido se desvanece antes).
-    static let tabBarReserve: CGFloat = 96
+    static let tabBarReserve: CGFloat = 84
 
     /// Vertical: el nombre en el centro con un haz de neón a cada lado y el punto del JIT debajo.
     fileprivate func portraitHeader() -> some View {
@@ -6211,8 +6212,11 @@ extension HomeView {
             }
             .frame(height: 34)
             .padding(.horizontal, 6)
-            JITIndicatorDot(active: jitIndicatorOn)
-                .onTapGesture { explainJITIndicator() }
+            // Se desvanece junto al título al deslizar.
+            HeaderFade(progress: scrollProgress) {
+                JITIndicatorDot(active: jitIndicatorOn)
+                    .onTapGesture { explainJITIndicator() }
+            }
         }
         .padding(.top, 6)
         .reportFrame("header")
@@ -6228,33 +6232,49 @@ extension HomeView {
         }
     }
 
+    /// Barra pegada abajo, de lado a lado, con un saliente en el centro para Inicio.
+    /// Cristal oscuro (como las tarjetas y las plataformas), estrellas tenues y el borde de neón azul.
     private var portraitTabBar: some View {
-        let shape = RoundedRectangle(cornerRadius: 28, style: .continuous)
-        let neonColors: [Color] = [Color.cyan.opacity(0.95), Color(red: 0.12, green: 0.45, blue: 1.0).opacity(0.95), Color.cyan.opacity(0.95)]
-        let neon: LinearGradient = LinearGradient(colors: neonColors, startPoint: .leading, endPoint: .trailing)
-        return HStack(spacing: 0) {
+        let shape = DockBarShape(bump: 26)
+        return HStack(alignment: .bottom, spacing: 0) {
             bottomControllersButton
             bottomSectionButton(.busqueda)
-            bottomSectionButton(.inicio)
+            bottomHomeButton
             bottomSectionButton(.favoritos)
             bottomSectionButton(.ajustes)
         }
-        .padding(.horizontal, 8)
-        .frame(height: 66)
-        .background {
-            ZStack {
-                // Barra sólida (no deja ver lo de detrás) con un brillo arriba.
-                shape.fill(LinearGradient(colors: [Color(red: 0.05, green: 0.08, blue: 0.17), Color(red: 0.01, green: 0.02, blue: 0.07)],
-                                          startPoint: .top, endPoint: .bottom))
-                shape.fill(LinearGradient(colors: [Color.cyan.opacity(0.10), Color.clear], startPoint: .top, endPoint: .center))
-                // Neón azul alrededor.
-                shape.stroke(neon, lineWidth: 2.2).blur(radius: 7).opacity(0.75)
-                shape.strokeBorder(neon, lineWidth: 1.3)
-            }
-            .shadow(color: Color(red: 0.1, green: 0.5, blue: 1.0).opacity(0.45), radius: 14, y: 2)
-        }
-        .padding(.horizontal, 14)
+        .padding(.horizontal, 10)
+        .padding(.top, 8)
         .padding(.bottom, 4)
+        .frame(height: DockBarShape.barHeight)
+        .frame(maxWidth: .infinity)
+        .background(alignment: .top) {
+            ZStack {
+                shape.fill(.ultraThinMaterial)
+                shape.fill(LinearGradient(colors: [Color(red: 0.04, green: 0.07, blue: 0.17).opacity(0.86),
+                                                   Color(red: 0.01, green: 0.02, blue: 0.07).opacity(0.94)],
+                                          startPoint: .top, endPoint: .bottom))
+                DockBarStars().clipShape(shape)
+                shape.fill(LinearGradient(colors: [Color.white.opacity(0.10), Color.white.opacity(0)],
+                                          startPoint: .top, endPoint: UnitPoint(x: 0.5, y: 0.35)))
+                DockBarEdge(bump: 26)
+                    .stroke(neonGradient, style: StrokeStyle(lineWidth: 3, lineCap: .round))
+                    .blur(radius: 6)
+                    .opacity(0.8)
+                DockBarEdge(bump: 26)
+                    .stroke(neonGradient, style: StrokeStyle(lineWidth: 1.3, lineCap: .round))
+            }
+            .padding(.top, -26)
+            .ignoresSafeArea(edges: .bottom)
+            .shadow(color: Color(red: 0.1, green: 0.45, blue: 1.0).opacity(0.35), radius: 16, y: -2)
+            .allowsHitTesting(false)
+        }
+    }
+
+    private var neonGradient: LinearGradient {
+        let colors: [Color] = [Color.cyan.opacity(0.0), Color.cyan.opacity(0.85), Color(red: 0.25, green: 0.6, blue: 1.0),
+                               Color.cyan.opacity(0.85), Color.cyan.opacity(0.0)]
+        return LinearGradient(colors: colors, startPoint: .leading, endPoint: .trailing)
     }
 
     private func bottomLabel(_ text: String, selected: Bool) -> some View {
@@ -6262,7 +6282,25 @@ extension HomeView {
             .font(AppFont.text(9, .semibold))
             .lineLimit(1)
             .minimumScaleFactor(0.7)
-            .foregroundStyle(selected ? Color.cyan : Color.white.opacity(0.55))
+            .foregroundStyle(selected ? Color.cyan : Color.white.opacity(0.6))
+            .shadow(color: selected ? Color.cyan.opacity(0.7) : Color.clear, radius: 4)
+    }
+
+    /// Icono en su cuadradito de cristal (como los primeros botones de las pestañas).
+    private func glassTile(symbol: String, selected: Bool) -> some View {
+        let shape = RoundedRectangle(cornerRadius: 12, style: .continuous)
+        let tint: Color? = selected ? Color.cyan : nil
+        return Image(systemName: symbol)
+            .font(.system(size: 16, weight: .semibold))
+            .foregroundStyle(selected ? Color.white : Color.white.opacity(0.78))
+            .frame(width: 38, height: 34)
+            .liquidGlass(in: shape, tint: tint, interactive: false)
+            .overlay {
+                if selected { shape.strokeBorder(Color.cyan.opacity(0.9), lineWidth: 1.1) }
+            }
+            .background {
+                if selected { shape.fill(Color.cyan.opacity(0.4)).blur(radius: 10) }
+            }
     }
 
     private var bottomControllersButton: some View {
@@ -6271,11 +6309,8 @@ extension HomeView {
         return Button {
             openControllersDrawer()
         } label: {
-            VStack(spacing: 3) {
-                Image(systemName: count > 0 ? "gamecontroller.fill" : "hand.tap.fill")
-                    .font(.system(size: 18, weight: .semibold))
-                    .foregroundStyle(selected ? Color.cyan : Color.white.opacity(0.78))
-                    .frame(width: 44, height: 30)
+            VStack(spacing: 4) {
+                glassTile(symbol: count > 0 ? "gamecontroller.fill" : "hand.tap.fill", selected: selected)
                     .overlay(alignment: .topTrailing) {
                         if count > 0 {
                             Text("\(count)")
@@ -6284,7 +6319,7 @@ extension HomeView {
                                 .frame(minWidth: 15, minHeight: 15)
                                 .background(Circle().fill(Color.green))
                                 .shadow(color: Color.green.opacity(0.7), radius: 4)
-                                .offset(x: 2, y: -3)
+                                .offset(x: 5, y: -5)
                         }
                     }
                 bottomLabel(count > 0 ? tr("Mandos") : tr("Táctil"), selected: selected)
@@ -6296,47 +6331,19 @@ extension HomeView {
         .accessibilityLabel(tr("Mandos"))
     }
 
-    private func homeColors(_ selected: Bool) -> [Color] {
-        if selected { return [Color.cyan, Color(red: 0.1, green: 0.42, blue: 1.0)] }
-        return [Color(red: 0.08, green: 0.14, blue: 0.28), Color(red: 0.03, green: 0.05, blue: 0.12)]
+    private func selectSection(_ section: DockSection) {
+        feedback()
+        if controllersDrawerOpen { closeControllersDrawer(sound: false) }
+        withAnimation(.easeInOut(duration: 0.2)) { selectedSection = section }
     }
 
     private func bottomSectionButton(_ section: DockSection) -> some View {
         let selected: Bool = selectedSection == section && !controllersDrawerOpen
-        let home: Bool = section == .inicio
         return Button {
-            feedback()
-            if controllersDrawerOpen { closeControllersDrawer(sound: false) }
-            withAnimation(.easeInOut(duration: 0.2)) { selectedSection = section }
+            selectSection(section)
         } label: {
-            VStack(spacing: 3) {
-                if home {
-                    // Inicio, más grande y un poco por encima de la barra.
-                    ZStack {
-                        Circle()
-                            .fill(LinearGradient(colors: homeColors(selected), startPoint: .topLeading, endPoint: .bottomTrailing))
-                        Circle().strokeBorder(Color.cyan.opacity(selected ? 0.0 : 0.85), lineWidth: 1.4)
-                        Image(systemName: section.symbol)
-                            .font(.system(size: 23, weight: .bold))
-                            .foregroundStyle(selected ? Color.black.opacity(0.85) : Color.cyan)
-                    }
-                    .frame(width: 58, height: 58)
-                    .shadow(color: Color.cyan.opacity(selected ? 0.75 : 0.35), radius: selected ? 12 : 6)
-                    .offset(y: -14)
-                    .padding(.bottom, -14)
-                } else {
-                    Image(systemName: section.symbol)
-                        .font(.system(size: 18, weight: .semibold))
-                        .foregroundStyle(selected ? Color.cyan : Color.white.opacity(0.78))
-                        .frame(width: 44, height: 30)
-                        .background {
-                            if selected {
-                                Capsule().fill(Color.cyan.opacity(0.16))
-                                    .overlay(Capsule().strokeBorder(Color.cyan.opacity(0.7), lineWidth: 1))
-                                    .shadow(color: Color.cyan.opacity(0.5), radius: 6)
-                            }
-                        }
-                }
+            VStack(spacing: 4) {
+                glassTile(symbol: section.symbol, selected: selected)
                 bottomLabel(tr(section.rawValue), selected: selected)
             }
             .frame(maxWidth: .infinity)
@@ -6344,6 +6351,43 @@ extension HomeView {
         }
         .buttonStyle(ControllerFocusableButtonStyle())
         .accessibilityLabel(tr(section.rawValue))
+    }
+
+    private func homeColors(_ selected: Bool) -> [Color] {
+        if selected { return [Color(red: 0.45, green: 0.95, blue: 1.0), Color(red: 0.1, green: 0.5, blue: 1.0)] }
+        return [Color(red: 0.08, green: 0.16, blue: 0.32), Color(red: 0.02, green: 0.05, blue: 0.13)]
+    }
+
+    /// Inicio: el círculo grande que ocupa el saliente de la barra, con su halo.
+    private var bottomHomeButton: some View {
+        let selected: Bool = selectedSection == .inicio && !controllersDrawerOpen
+        return Button {
+            selectSection(.inicio)
+        } label: {
+            VStack(spacing: 3) {
+                ZStack {
+                    Circle()
+                        .fill(Color.cyan.opacity(selected ? 0.16 : 0.06))
+                        .overlay(Circle().strokeBorder(Color.cyan.opacity(selected ? 0.35 : 0.18), lineWidth: 1))
+                        .frame(width: 62, height: 62)
+                    Circle()
+                        .fill(LinearGradient(colors: homeColors(selected), startPoint: .topLeading, endPoint: .bottomTrailing))
+                        .frame(width: 50, height: 50)
+                        .glassRim(in: Circle())
+                    Image(systemName: DockSection.inicio.symbol)
+                        .font(.system(size: 21, weight: .bold))
+                        .foregroundStyle(selected ? Color(red: 0.02, green: 0.1, blue: 0.2) : Color.cyan)
+                }
+                .shadow(color: Color.cyan.opacity(selected ? 0.7 : 0.3), radius: selected ? 14 : 6)
+                bottomLabel(tr(DockSection.inicio.rawValue), selected: selected)
+            }
+            // Mide como los demás botones: el círculo sobresale hacia arriba, dentro del saliente.
+            .frame(height: 49, alignment: .bottom)
+            .frame(maxWidth: .infinity)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(ControllerFocusableButtonStyle())
+        .accessibilityLabel(tr(DockSection.inicio.rawValue))
     }
 
     // MARK: Pantalla de mandos
@@ -6603,5 +6647,103 @@ private struct HeaderBeam: View {
         } else {
             withAnimation(.easeInOut(duration: 1.9).repeatForever(autoreverses: true)) { lit = true }
         }
+    }
+}
+
+
+/// Se desvanece y sube un poco al deslizar, igual que el título.
+private struct HeaderFade<Content: View>: View {
+    @ObservedObject var progress: ScrollProgress
+    @ViewBuilder var content: () -> Content
+
+    var body: some View {
+        let hidden: CGFloat = min(1, progress.offset / 36)
+        return content()
+            .opacity(1 - hidden)
+            .offset(y: -10 * hidden)
+            .allowsHitTesting(hidden < 0.5)
+    }
+}
+
+/// Forma de la barra inferior: esquinas de arriba redondeadas y un saliente suave en el centro.
+/// El rectángulo que recibe empieza `bump` puntos por encima de la barra (el saliente cabe dentro).
+private struct DockBarShape: InsettableShape {
+    static let barHeight: CGFloat = 64
+    var bump: CGFloat
+    var inset: CGFloat = 0
+
+    func path(in rect: CGRect) -> Path {
+        let r = rect.insetBy(dx: inset, dy: inset)
+        var path = DockBarEdge.topPath(in: r, bump: bump)
+        path.addLine(to: CGPoint(x: r.maxX, y: r.maxY))
+        path.addLine(to: CGPoint(x: r.minX, y: r.maxY))
+        path.closeSubpath()
+        return path
+    }
+
+    func inset(by amount: CGFloat) -> DockBarShape {
+        var copy = self
+        copy.inset += amount
+        return copy
+    }
+}
+
+/// Solo el borde de arriba de la barra (para el neón).
+private struct DockBarEdge: Shape {
+    var bump: CGFloat
+
+    static func topPath(in r: CGRect, bump: CGFloat) -> Path {
+        let corner: CGFloat = 26
+        let top: CGFloat = r.minY + bump
+        let mid: CGFloat = r.midX
+        let half: CGFloat = 62      // medio ancho del saliente
+        let shoulder: CGFloat = 26  // curva de subida
+        var path = Path()
+        path.move(to: CGPoint(x: r.minX, y: top + corner))
+        path.addQuadCurve(to: CGPoint(x: r.minX + corner, y: top), control: CGPoint(x: r.minX, y: top))
+        path.addLine(to: CGPoint(x: mid - half - shoulder, y: top))
+        path.addCurve(to: CGPoint(x: mid, y: r.minY),
+                      control1: CGPoint(x: mid - half + 4, y: top),
+                      control2: CGPoint(x: mid - half * 0.55, y: r.minY))
+        path.addCurve(to: CGPoint(x: mid + half + shoulder, y: top),
+                      control1: CGPoint(x: mid + half * 0.55, y: r.minY),
+                      control2: CGPoint(x: mid + half - 4, y: top))
+        path.addLine(to: CGPoint(x: r.maxX - corner, y: top))
+        path.addQuadCurve(to: CGPoint(x: r.maxX, y: top + corner), control: CGPoint(x: r.maxX, y: top))
+        return path
+    }
+
+    func path(in rect: CGRect) -> Path {
+        Self.topPath(in: rect, bump: bump)
+    }
+}
+
+/// Estrellas muy tenues dentro de la barra (fijas: no se repintan).
+private struct DockBarStars: View {
+    var body: some View {
+        Canvas { context, size in
+            var generator = SeededRandom(seed: 97)
+            for _ in 0..<46 {
+                let x: CGFloat = CGFloat(generator.next()) * size.width
+                let y: CGFloat = CGFloat(generator.next()) * size.height
+                let radius: CGFloat = 0.4 + CGFloat(generator.next()) * 0.9
+                let alpha: Double = 0.12 + generator.next() * 0.35
+                let rect = CGRect(x: x - radius, y: y - radius, width: radius * 2, height: radius * 2)
+                context.fill(Path(ellipseIn: rect), with: .color(Color(red: 0.7, green: 0.88, blue: 1.0).opacity(alpha)))
+            }
+        }
+        .allowsHitTesting(false)
+    }
+}
+
+/// Números pseudoaleatorios repetibles (las estrellas quedan siempre en el mismo sitio).
+private struct SeededRandom {
+    private var state: UInt64
+
+    init(seed: UInt64) { state = seed &* 0x9E3779B97F4A7C15 }
+
+    mutating func next() -> Double {
+        state = state &* 6364136223846793005 &+ 1442695040888963407
+        return Double(state >> 11) / Double(1 << 53)
     }
 }
