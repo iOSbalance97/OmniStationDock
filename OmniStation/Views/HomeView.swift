@@ -256,10 +256,6 @@ struct HomeView: View {
     /// Barra inferior: dedo encima (la burbuja lo sigue) y la pestaña bajo el dedo.
     @State private var tabBarTouchX: CGFloat?
     @State private var tabBarHover: Int?
-    @State private var tabBarTouchGroup: Int?
-    /// Prueba de la barra inferior: apagado = Mandos | Búsqueda Inicio Favoritos | Ajustes;
-    /// encendido = Mandos | Búsqueda Inicio Favoritos Ajustes.
-    @AppStorage("tabBarSettingsJoined") private var tabBarSettingsJoined = false
     @AppStorage("volumeBack") private var volumeBack = 0.7
     @AppStorage("volumeToggle") private var volumeToggle = 0.7
 
@@ -4411,8 +4407,8 @@ struct HomeView: View {
                 // a él (en reposo, lo de arriba del todo ya se ve entero).
                 .edgeFade(clear: isLandscapeNow ? metrics.fadeClear : metrics.fadeClear + metrics.headerHeight - 14,
                           fade: isLandscapeNow ? metrics.headerHeight : 20,
-                          bottom: isLandscapeNow ? Self.bottomFadeHeight : 76,
-                          bottomClear: isLandscapeNow ? 0 : Self.tabBarHeight + 4)
+                          bottom: isLandscapeNow ? Self.bottomFadeHeight : 34,
+                          bottomClear: 0)
         }
     }
 
@@ -4595,7 +4591,10 @@ struct HomeView: View {
         let showFeatured: Bool = selectedPlatform == "Todos"
         return screen(topGap: 5) {
             VStack(alignment: .leading, spacing: landscape ? 15 : 20) {
-                platformFilters(compact: landscape)
+                // En vertical la barra de plataformas va fija arriba, con el título.
+                if landscape {
+                    platformFilters(compact: landscape)
+                }
 
                 if landscape {
                     HStack(alignment: .top, spacing: 16) {
@@ -5156,7 +5155,6 @@ struct HomeView: View {
         items.append(toggleSetting("closeAfterLaunch", tr("Cerrar al abrir un juego"), tr("Solo con juegos de otras apps (enlaces y LiveContainer): OmniStation se cierra detrás"), "xmark.app.fill", SettingTint.sky, $closeAfterLaunch))
         items.append(toggleSetting("haptics", tr("Vibración"), tr("Al tocar y en el mando táctil de ARMSX2"), "iphone.radiowaves.left.and.right", SettingTint.sky, $hapticsEnabled))
         items.append(toggleSetting("sound", tr("Sonido al pulsar"), tr("Sonidos de navegación y selección"), "speaker.wave.2.fill", SettingTint.periwinkle, $clickSound))
-        items.append(toggleSetting("tabBarJoined", tr("Ajustes junto a las pestañas"), tr("Barra de abajo: Ajustes en su propio botón (apagado) o en el grupo de pestañas (encendido)"), "dock.rectangle", SettingTint.aqua, $tabBarSettingsJoined))
         items.append(SettingItem(id: "about", title: tr("Acerca de"), subtitle: tr("Versión %@", appVersion), symbol: "info.circle.fill", tint: Color.cyan, control: .symbol("chevron.right"), action: {
             showAbout = true
         }))
@@ -6231,6 +6229,11 @@ extension HomeView {
             // Fijo junto al título (lo que se desvanece es la pantalla de debajo).
             JITIndicatorDot(active: jitIndicatorOn)
                 .onTapGesture { explainJITIndicator() }
+            if selectedSection == .inicio {
+                platformFilters(compact: false)
+                    .padding(.horizontal, 8)
+                    .transition(.opacity)
+            }
         }
         .padding(.top, 6)
         .reportFrame("header")
@@ -6264,15 +6267,10 @@ extension HomeView {
         }
     }
 
-    /// Grupos de la barra (posiciones en `tabBarItems`): Mandos aparte y el resto en uno o dos grupos.
-    private var tabBarGroups: [[Int]] {
-        tabBarSettingsJoined ? [[0], [1, 2, 3, 4]] : [[0], [1, 2, 3], [4]]
-    }
-
-    /// Barra flotante de cristal partida en grupos unidos por «cuellos» (como gotas): una burbuja
-    /// marca la pestaña y se desliza; con el dedo encima la burbuja lo sigue. Mientras la pantalla
-    /// se desplaza, los iconos se esconden detrás de Inicio (la barra se encoge como un líquido,
-    /// con rebote) y vuelven al pararse.
+    /// Barra flotante de abajo (vertical): tres globos de cristal independientes — Mandos, el
+    /// central (Búsqueda, Inicio, Favoritos) y Ajustes. En el central, una burbuja marca la pestaña
+    /// y sigue al dedo. Mientras la pantalla se desplaza, los iconos se esconden detrás de Inicio
+    /// (con rebote) y vuelven al pararse.
     private var portraitTabBar: some View {
         TabBarCollapse(progress: scrollProgress, enabled: tabBarTouchX == nil && !controllersDrawerOpen) { collapsed in
             tabBarBody(collapsed: collapsed)
@@ -6283,96 +6281,111 @@ extension HomeView {
         .accessibilityElement(children: .contain)
     }
 
-    /// Posición de cada grupo (de izquierda a derecha) dentro de la barra.
-    private func tabBarSegments(width: CGFloat, height: CGFloat) -> [ClosedRange<CGFloat>] {
-        let groups: [[Int]] = tabBarGroups
-        let gap: CGFloat = 8
-        let singles: Int = groups.filter { $0.count == 1 }.count
-        let multis: Int = max(1, groups.count - singles)
-        let free: CGFloat = width - CGFloat(singles) * height - gap * CGFloat(groups.count - 1)
-        let multiWidth: CGFloat = max(height, free / CGFloat(multis))
-        var x: CGFloat = 0
-        var result: [ClosedRange<CGFloat>] = []
-        for group in groups {
-            let w: CGFloat = group.count == 1 ? height : multiWidth
-            result.append(x...(x + w))
-            x += w + gap
-        }
-        return result
-    }
-
-    /// Centro (x) de cada pestaña con la barra abierta, y el grupo al que pertenece.
-    private func tabBarSlots(_ segments: [ClosedRange<CGFloat>]) -> [(x: CGFloat, width: CGFloat, group: Int)] {
-        var slots: [(x: CGFloat, width: CGFloat, group: Int)] = Array(repeating: (x: 0, width: 0, group: 0), count: tabBarItems.count)
-        for (g, group) in tabBarGroups.enumerated() where g < segments.count {
-            let seg: ClosedRange<CGFloat> = segments[g]
-            let inset: CGFloat = group.count == 1 ? 0 : 4
-            let slot: CGFloat = (seg.upperBound - seg.lowerBound - inset * 2) / CGFloat(group.count)
-            for (k, index) in group.enumerated() {
-                slots[index] = (x: seg.lowerBound + inset + slot * (CGFloat(k) + 0.5), width: slot, group: g)
-            }
-        }
-        return slots
-    }
+    /// Hueco entre los globos.
+    private static let tabBarGap: CGFloat = 10
+    /// Pestañas del globo central (posiciones en `tabBarItems`).
+    private static let tabBarCenterItems: [Int] = [1, 2, 3]
 
     private func tabBarBody(collapsed: Bool) -> some View {
         GeometryReader { geometry in
             let width: CGFloat = geometry.size.width
             let height: CGFloat = geometry.size.height
-            let segments: [ClosedRange<CGFloat>] = tabBarSegments(width: width, height: height)
-            let slots = tabBarSlots(segments)
-            let shape = GooeyBarShape(segments: segments.map { [$0.lowerBound, $0.upperBound] }, collapse: collapsed ? 1 : 0)
-            let selected: Int = tabBarSelectedIndex
-            let touching: Bool = tabBarTouchX != nil
-            let center: CGFloat = width / 2
+            let centerWidth: CGFloat = collapsed ? height : max(height, width - 2 * height - 2 * Self.tabBarGap)
             ZStack(alignment: .topLeading) {
-                // Cristal de toda la barra (una sola forma: grupos y cuellos).
-                Color.clear
-                    .liquidGlass(in: shape, tint: nil, interactive: false)
-                    .shadow(color: Color.black.opacity(0.25), radius: 8, y: 4)
-                // Burbuja de la pestaña elegida.
-                tabBarPill(touching: touching)
-                    .frame(width: tabBarPillWidth(slots[selected], touching: touching, height: height, collapsed: collapsed),
-                           height: touching ? height + 6 : height - 8)
-                    .position(x: tabBarPillX(slots: slots, segments: segments, selected: selected, collapsed: collapsed, center: center),
-                              y: height / 2)
-                    .opacity(collapsed && selected != 2 ? 0 : 1)
-                // Iconos (con la barra plegada viajan detrás de Inicio).
-                ForEach(Array(tabBarItems.indices), id: \.self) { index in
-                    let hidden: Bool = collapsed && index != 2
-                    tabBarIcon(tabBarItems[index], selected: (tabBarHover ?? selected) == index)
-                        .frame(width: max(slots[index].width, 1), height: height)
-                        .scaleEffect(hidden ? 0.3 : 1)
-                        .opacity(hidden ? 0 : 1)
-                        .position(x: collapsed ? center : slots[index].x, y: height / 2)
-                        .zIndex(index == 2 ? 1 : 0)
-                }
+                tabBarSideBubble(0, collapsed: collapsed)
+                    .frame(width: height, height: height)
+                    .scaleEffect(collapsed ? 0.3 : 1)
+                    .opacity(collapsed ? 0 : 1)
+                    .position(x: collapsed ? width / 2 : height / 2, y: height / 2)
+                tabBarSideBubble(4, collapsed: collapsed)
+                    .frame(width: height, height: height)
+                    .scaleEffect(collapsed ? 0.3 : 1)
+                    .opacity(collapsed ? 0 : 1)
+                    .position(x: collapsed ? width / 2 : width - height / 2, y: height / 2)
+                tabBarCenterBubble(width: centerWidth, height: height, collapsed: collapsed)
+                    .frame(width: centerWidth, height: height)
+                    .position(x: width / 2, y: height / 2)
+                    .zIndex(1)
             }
             .frame(width: width, height: height)
-            .contentShape(shape)
-            .gesture(tabBarGesture(slots: slots, collapsed: collapsed))
-            .animation(.spring(response: 0.46, dampingFraction: 0.6), value: collapsed)
-            .animation(.spring(response: 0.38, dampingFraction: 0.72), value: selected)
-            .animation(.spring(response: 0.4, dampingFraction: 0.8), value: tabBarSettingsJoined)
-            .animation(.spring(response: 0.3, dampingFraction: 0.7), value: touching)
         }
-        .scaleEffect(tabBarTouchX != nil ? 1.03 : 1.0)
+        .animation(.spring(response: 0.46, dampingFraction: 0.6), value: collapsed)
+        .animation(.spring(response: 0.38, dampingFraction: 0.72), value: tabBarSelectedIndex)
     }
 
-    private func tabBarPillWidth(_ slot: (x: CGFloat, width: CGFloat, group: Int), touching: Bool, height: CGFloat, collapsed: Bool) -> CGFloat {
-        if collapsed { return height - 8 }
-        let single: Bool = (tabBarGroups[min(slot.group, tabBarGroups.count - 1)].count == 1)
-        if single { return height - 8 }
-        return slot.width + (touching ? 10 : 2)
+    /// Cristal de cada globo (un poco más transparente que el de las plataformas, para que se vean
+    /// pasar las tarjetas por detrás).
+    private func tabBarGlass(_ capsule: Capsule) -> some View {
+        Color.clear
+            .liquidGlass(in: capsule, tint: nil, interactive: false)
+            .opacity(0.82)
+            .shadow(color: Color.black.opacity(0.22), radius: 8, y: 4)
     }
 
-    private func tabBarPillX(slots: [(x: CGFloat, width: CGFloat, group: Int)], segments: [ClosedRange<CGFloat>],
-                             selected: Int, collapsed: Bool, center: CGFloat) -> CGFloat {
-        if collapsed { return center }
-        guard let touch = tabBarTouchX, let group = tabBarTouchGroup, group < segments.count else { return slots[selected].x }
-        let seg: ClosedRange<CGFloat> = segments[group]
-        let half: CGFloat = slots[selected].width / 2
-        return min(max(touch, seg.lowerBound + 4 + half), seg.upperBound - 4 - half)
+    /// Mandos (0) o Ajustes (4): un globo redondo con su icono; elegido, lleva la burbuja dentro.
+    private func tabBarSideBubble(_ index: Int, collapsed: Bool) -> some View {
+        let capsule = Capsule(style: .continuous)
+        let selected: Bool = tabBarSelectedIndex == index
+        return Button {
+            tabBarActivate(index)
+        } label: {
+            ZStack {
+                tabBarGlass(capsule)
+                if selected {
+                    tabBarPill(touching: false)
+                        .padding(4)
+                        .transition(.scale(scale: 0.6).combined(with: .opacity))
+                }
+                tabBarIcon(tabBarItems[index], selected: selected)
+            }
+            .contentShape(capsule)
+        }
+        .buttonStyle(ControllerFocusableButtonStyle())
+        .disabled(collapsed)
+    }
+
+    /// Globo central: Búsqueda, Inicio y Favoritos. Plegado queda solo Inicio (los otros dos
+    /// viajan detrás de él).
+    private func tabBarCenterBubble(width: CGFloat, height: CGFloat, collapsed: Bool) -> some View {
+        let capsule = Capsule(style: .continuous)
+        let items: [Int] = Self.tabBarCenterItems
+        let inset: CGFloat = 4
+        let slot: CGFloat = collapsed ? height : (width - inset * 2) / CGFloat(items.count)
+        let selected: Int = tabBarSelectedIndex
+        let selectedSlot: Int? = items.firstIndex(of: selected)
+        let touching: Bool = tabBarTouchX != nil
+        let center: CGFloat = width / 2
+        let pillX: CGFloat = {
+            if collapsed { return center }
+            if let touch = tabBarTouchX { return min(max(touch, inset + slot / 2), width - inset - slot / 2) }
+            return inset + slot * (CGFloat(selectedSlot ?? 1) + 0.5)
+        }()
+        let showPill: Bool = collapsed ? selected == 2 : (selectedSlot != nil || touching)
+        return ZStack(alignment: .topLeading) {
+            tabBarGlass(capsule)
+            if showPill {
+                tabBarPill(touching: touching)
+                    .frame(width: collapsed ? height - 8 : slot + (touching ? 10 : 2),
+                           height: touching ? height + 6 : height - 8)
+                    .position(x: pillX, y: height / 2)
+                    .transition(.scale(scale: 0.6).combined(with: .opacity))
+            }
+            ForEach(Array(items.enumerated()), id: \.element) { position, index in
+                let hidden: Bool = collapsed && index != 2
+                let x: CGFloat = collapsed ? center : inset + slot * (CGFloat(position) + 0.5)
+                tabBarIcon(tabBarItems[index], selected: (tabBarHover ?? selected) == index)
+                    .frame(width: slot, height: height)
+                    .scaleEffect(hidden ? 0.3 : 1)
+                    .opacity(hidden ? 0 : 1)
+                    .position(x: x, y: height / 2)
+                    .zIndex(index == 2 ? 1 : 0)
+            }
+        }
+        .frame(width: width, height: height)
+        .contentShape(capsule)
+        .gesture(tabBarGesture(items: items, slot: slot, inset: inset, collapsed: collapsed))
+        .scaleEffect(touching ? 1.04 : 1.0)
+        .animation(.spring(response: 0.3, dampingFraction: 0.7), value: touching)
     }
 
     /// Burbuja de la pestaña elegida: como el filtro de plataforma elegido (cristal azul,
@@ -6383,6 +6396,17 @@ extension HomeView {
             .liquidGlass(in: capsule, tint: Color(red: 0.05, green: 0.45, blue: 1.0), interactive: false)
             .overlay(capsule.strokeBorder(Color.cyan.opacity(0.7), lineWidth: 1))
             .background(capsule.fill(Color.cyan.opacity(touching ? 0.35 : 0.25)).blur(radius: 8))
+    }
+
+    /// Mandos abre (o cierra) su pantalla; el resto, su pestaña.
+    private func tabBarActivate(_ index: Int) {
+        if let section = tabBarItems[index] {
+            selectSection(section)
+        } else if controllersDrawerOpen {
+            closeControllersDrawer()
+        } else {
+            openControllersDrawer()
+        }
     }
 
     private func tabBarIcon(_ item: DockSection?, selected: Bool) -> some View {
@@ -6406,42 +6430,33 @@ extension HomeView {
             .accessibilityAddTraits(.isButton)
     }
 
-    /// Tocar o arrastrar por la barra: la burbuja sigue al dedo y al soltar se elige esa pestaña.
-    /// Plegada, tocarla lleva a Inicio.
-    private func tabBarGesture(slots: [(x: CGFloat, width: CGFloat, group: Int)], collapsed: Bool) -> some Gesture {
-        func nearest(_ x: CGFloat) -> Int {
-            var best: Int = 0
-            for index in slots.indices where abs(slots[index].x - x) < abs(slots[best].x - x) { best = index }
-            return best
+    /// Tocar o arrastrar por el globo central: la burbuja sigue al dedo y al soltar se elige esa
+    /// pestaña. Plegado, tocarlo lleva a Inicio.
+    private func tabBarGesture(items: [Int], slot: CGFloat, inset: CGFloat, collapsed: Bool) -> some Gesture {
+        func item(at x: CGFloat) -> Int {
+            items[min(items.count - 1, max(0, Int((x - inset) / max(slot, 1))))]
         }
         return DragGesture(minimumDistance: 0, coordinateSpace: .local)
             .onChanged { value in
                 guard !collapsed else { return }
-                let index: Int = nearest(value.location.x)
-                let group: Int = slots[index].group
-                if tabBarTouchX == nil || tabBarTouchGroup != group {
-                    tabBarTouchGroup = group
+                let index: Int = item(at: value.location.x)
+                if tabBarTouchX == nil {
+                    withAnimation(.spring(response: 0.3, dampingFraction: 0.7)) { tabBarTouchX = value.location.x }
+                } else {
+                    tabBarTouchX = value.location.x
                 }
-                tabBarTouchX = value.location.x
                 if index != tabBarHover {
                     if tabBarHover != nil { feedback(.navigate) }
                     tabBarHover = index
                 }
             }
             .onEnded { value in
-                let index: Int = collapsed ? 2 : nearest(value.location.x)
+                let index: Int = collapsed ? 2 : item(at: value.location.x)
                 withAnimation(.spring(response: 0.38, dampingFraction: 0.72)) {
                     tabBarTouchX = nil
-                    tabBarTouchGroup = nil
                     tabBarHover = nil
                 }
-                if let section = tabBarItems[index] {
-                    selectSection(section)
-                } else if controllersDrawerOpen {
-                    closeControllersDrawer()
-                } else {
-                    openControllersDrawer()
-                }
+                tabBarActivate(index)
             }
     }
 
@@ -6736,94 +6751,5 @@ private struct TabBarCollapse<Content: View>: View {
 
     var body: some View {
         content(enabled && progress.moving)
-    }
-}
-
-/// Forma de la barra de abajo: los grupos (cápsulas) unidos por cuellos suaves, como gotas.
-/// `collapse` (0…1, animable) los junta todos en el círculo central; al acercarse, los cuellos
-/// se ensanchan hasta fundirse.
-private struct GooeyBarShape: InsettableShape {
-    /// [inicio, fin] de cada grupo con la barra abierta.
-    var segments: [[CGFloat]]
-    var collapse: CGFloat
-    var inset: CGFloat = 0
-
-    var animatableData: CGFloat {
-        get { collapse }
-        set { collapse = newValue }
-    }
-
-    func inset(by amount: CGFloat) -> GooeyBarShape {
-        var copy = self
-        copy.inset += amount
-        return copy
-    }
-
-    func path(in rect: CGRect) -> Path {
-        let height: CGFloat = rect.height - inset * 2
-        let radius: CGFloat = max(1, height / 2)
-        let midX: CGFloat = rect.midX
-        let t: CGFloat = min(max(collapse, 0), 1)
-        // Grupos en su sitio, acercándose al centro al plegarse.
-        var parts: [(CGFloat, CGFloat)] = segments.map { seg in
-            let start: CGFloat = seg[0] + (midX - radius - seg[0]) * t + inset
-            let end: CGFloat = seg[1] + (midX + radius - seg[1]) * t - inset
-            return (start, max(end, start + 2 * radius - 2 * inset))
-        }
-        if parts.isEmpty { parts = [(rect.minX + inset, rect.maxX - inset)] }
-        let top: CGFloat = rect.minY + inset
-        let cy: CGFloat = top + radius
-        let a: CGFloat = 50 * .pi / 180
-        var points: [CGPoint] = []
-        func arc(_ cx: CGFloat, _ from: CGFloat, _ to: CGFloat) {
-            let steps: Int = 10
-            for k in 0...steps {
-                let angle: CGFloat = from + (to - from) * CGFloat(k) / CGFloat(steps)
-                points.append(CGPoint(x: cx + radius * cos(angle), y: cy + radius * sin(angle)))
-            }
-        }
-        // Mitad de arriba, de izquierda a derecha (ángulos de pantalla: 270° = arriba).
-        arc(parts[0].0 + radius, .pi, 1.5 * .pi)
-        var index: Int = 0
-        while index < parts.count {
-            var end: CGFloat = parts[index].1
-            // Los grupos que ya se tocan se tratan como uno.
-            var next: Int = index + 1
-            while next < parts.count && parts[next].0 <= end + 0.5 {
-                end = max(end, parts[next].1)
-                next += 1
-            }
-            let rightCenter: CGFloat = end - radius
-            if next >= parts.count {
-                arc(rightCenter, 1.5 * .pi, 2 * .pi)
-                break
-            }
-            let leftCenter: CGFloat = parts[next].0 + radius
-            let gap: CGFloat = parts[next].0 - end
-            arc(rightCenter, 1.5 * .pi, 1.5 * .pi + a)
-            // Cuello: más fino cuanto más separados (hasta 8 puntos de hueco).
-            let start: CGPoint = points.last ?? CGPoint(x: end, y: top)
-            let finish = CGPoint(x: leftCenter + radius * cos(1.5 * .pi - a), y: cy + radius * sin(1.5 * .pi - a))
-            let depth: CGFloat = min(1, max(0, gap / 8))
-            let control = CGPoint(x: (start.x + finish.x) / 2, y: start.y + (top + height * 0.55 - start.y) * depth)
-            let steps: Int = 12
-            for k in 1...steps {
-                let u: CGFloat = CGFloat(k) / CGFloat(steps)
-                let x: CGFloat = (1 - u) * (1 - u) * start.x + 2 * (1 - u) * u * control.x + u * u * finish.x
-                let y: CGFloat = (1 - u) * (1 - u) * start.y + 2 * (1 - u) * u * control.y + u * u * finish.y
-                points.append(CGPoint(x: x, y: y))
-            }
-            arc(leftCenter, 1.5 * .pi - a, 1.5 * .pi)
-            index = next
-        }
-        // Mitad de abajo: la de arriba reflejada, de derecha a izquierda.
-        let bottom: [CGPoint] = points.reversed().map { CGPoint(x: $0.x, y: 2 * cy - $0.y) }
-        var path = Path()
-        guard let first = points.first else { return path }
-        path.move(to: first)
-        for point in points.dropFirst() { path.addLine(to: point) }
-        for point in bottom { path.addLine(to: point) }
-        path.closeSubpath()
-        return path
     }
 }

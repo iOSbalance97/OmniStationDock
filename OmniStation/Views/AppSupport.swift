@@ -203,8 +203,6 @@ enum L10n {
         "Dock con la tele": "Dock with the TV",
         "Al conectar AirPlay o HDMI: Modo Dock a pantalla completa y en horizontal": "When AirPlay or HDMI connects: full-screen Dock Mode in landscape",
         "Tele conectada: Modo Dock a pantalla completa": "TV connected: full-screen Dock Mode",
-        "Ajustes junto a las pestañas": "Settings next to the tabs",
-        "Barra de abajo: Ajustes en su propio botón (apagado) o en el grupo de pestañas (encendido)": "Bottom bar: Settings as its own button (off) or in the tab group (on)",
         "Gamepad táctil activo": "Touch gamepad active",
         "Ningún mando conectado": "No controller connected",
         "Conecta un mando por Bluetooth o USB: se usa al momento en la app y en los juegos.": "Connect a controller over Bluetooth or USB: it works right away in the app and in games.",
