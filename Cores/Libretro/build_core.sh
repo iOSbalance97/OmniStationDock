@@ -27,6 +27,19 @@ for patch in "$ROOT/Cores/Libretro/patches/$CORE/"*.patch; do
 done
 shopt -u nullglob
 
+JOBS="$(sysctl -n hw.ncpu)"
+
+# Los Makefile de libretro piden iOS 8.0 (o 5.0) como mínimo: con eso el enlazador no pone
+# LC_BUILD_VERSION y además Xcode ya no admite tan poco. Se cambia a iOS 17.0, como la app.
+ios17() {
+  local file
+  for file in "$@"; do
+    [ -f "$file" ] || continue
+    sed -i '' -E 's/-miphoneos-version-min=[0-9.]+/-miphoneos-version-min=17.0/g' "$file"
+  done
+}
+MIN17="-miphoneos-version-min=17.0"
+
 case "$CORE" in
   dolphin)
     # Igual que el workflow de iOS del propio Dolphin de libretro, con iOS 17 como mínimo.
@@ -160,6 +173,78 @@ PY
       LC_ALL=C grep -c -a "OmniStation: JIT with dual-mapped executable memory from the frontend" "$BINARY" >/dev/null || { echo "::error::Flycast sin el parche del JIT permanente." >&2; exit 1; }
     fi
     ;;
+  # --- Núcleos sin JIT (antes venían de ManicEMU): Makefile o CMake de libretro para iOS arm64.
+  nestopia)
+    ios17 "$SRC/libretro/Makefile"
+    make -C "$SRC/libretro" platform=ios-arm64 -j "$JOBS" 2>&1 | tee "$LOGS/build.log"
+    BINARY="$SRC/libretro/nestopia_libretro_ios.dylib"
+    ;;
+  snes9x)
+    ios17 "$SRC/libretro/Makefile"
+    make -C "$SRC/libretro" platform=ios-arm64 MINVERSION="$MIN17" -j "$JOBS" 2>&1 | tee "$LOGS/build.log"
+    BINARY="$SRC/libretro/snes9x_libretro_ios.dylib"
+    ;;
+  gambatte)
+    ios17 "$SRC/Makefile.libretro"
+    make -C "$SRC" platform=ios-arm64 -j "$JOBS" 2>&1 | tee "$LOGS/build.log"
+    BINARY="$SRC/gambatte_libretro_ios.dylib"
+    ;;
+  mgba)
+    # Como el CI de libretro (LIBMGBA_ONLY y BUILD_LIBRETRO), para iOS y sin Homebrew en la búsqueda.
+    cmake -S "$SRC" -B "$SRC/build/ios-arm64" \
+      -DCMAKE_SYSTEM_NAME=iOS \
+      -DCMAKE_OSX_ARCHITECTURES=arm64 \
+      -DCMAKE_OSX_DEPLOYMENT_TARGET=17.0 \
+      -DCMAKE_BUILD_TYPE=Release \
+      -DLIBMGBA_ONLY=ON \
+      -DBUILD_LIBRETRO=ON \
+      -DCMAKE_IGNORE_PREFIX_PATH="/opt/homebrew;/usr/local" \
+      -DCMAKE_POLICY_VERSION_MINIMUM=3.5 2>&1 | tee "$LOGS/configure.log"
+    cmake --build "$SRC/build/ios-arm64" --target mgba_libretro --config Release -j "$JOBS" 2>&1 | tee "$LOGS/build.log"
+    BINARY="$(find "$SRC/build/ios-arm64" -name 'mgba_libretro*.dylib' -print -quit)"
+    ;;
+  gpsp)
+    # En iOS el Makefile de libretro lo deja sin recompilador (intérprete).
+    ios17 "$SRC/Makefile"
+    make -C "$SRC" platform=ios-arm64 MINVERSION="$MIN17" -j "$JOBS" 2>&1 | tee "$LOGS/build.log"
+    BINARY="$SRC/gpsp_libretro_ios.dylib"
+    ;;
+  vbam)
+    ios17 "$SRC/src/libretro/Makefile"
+    make -C "$SRC/src/libretro" platform=ios-arm64 MINVERSION="$MIN17" -j "$JOBS" 2>&1 | tee "$LOGS/build.log"
+    BINARY="$SRC/src/libretro/vbam_libretro_ios.dylib"
+    ;;
+  desmume)
+    # Sin JIT (el de DeSmuME es de ARM de 32 bits): intérprete.
+    ios17 "$SRC/desmume/src/frontend/libretro/Makefile.libretro"
+    make -C "$SRC/desmume/src/frontend/libretro" platform=ios-arm64 DESMUME_JIT=0 DESMUME_JIT_ARM=0 \
+      -j "$JOBS" 2>&1 | tee "$LOGS/build.log"
+    BINARY="$SRC/desmume/src/frontend/libretro/desmume_libretro_ios.dylib"
+    ;;
+  beetle_psx_hw)
+    # Imagen por OpenGL ES (sin Vulkan) y sin lightrec en iOS (intérprete), como su Makefile.
+    ios17 "$SRC/Makefile"
+    make -C "$SRC" platform=ios-arm64 HAVE_OPENGL=1 HAVE_VULKAN=0 HAVE_LIGHTREC=0 IPHONEMINVER="$MIN17" \
+      -j "$JOBS" 2>&1 | tee "$LOGS/build.log"
+    BINARY="$SRC/mednafen_psx_hw_libretro_ios.dylib"
+    ;;
+  flycast_jitless)
+    # El mismo Flycast, sin recompilador (TARGET_NO_REC) y sin los parches del JIT: para cuando no
+    # hay JIT.
+    cmake -S "$SRC" -B "$SRC/build/ios-arm64" \
+      -DCMAKE_SYSTEM_NAME=iOS \
+      -DCMAKE_OSX_ARCHITECTURES=arm64 \
+      -DCMAKE_OSX_DEPLOYMENT_TARGET=13.0 \
+      -DCMAKE_BUILD_TYPE=Release \
+      -DLIBRETRO=ON \
+      -DUSE_OPENMP=OFF \
+      -DCMAKE_C_FLAGS="-DIOS -DTARGET_NO_REC" \
+      -DCMAKE_CXX_FLAGS="-DIOS -DTARGET_NO_REC" \
+      -DCMAKE_IGNORE_PREFIX_PATH="/opt/homebrew;/usr/local" \
+      -DCMAKE_POLICY_VERSION_MINIMUM=3.5 2>&1 | tee "$LOGS/configure.log"
+    cmake --build "$SRC/build/ios-arm64" --target flycast_libretro --config Release -j "$JOBS" 2>&1 | tee "$LOGS/build.log"
+    BINARY="$(find "$SRC/build/ios-arm64" -name 'flycast_libretro*.dylib' -print -quit)"
+    ;;
   *)
     echo "Núcleo desconocido: $CORE" >&2
     exit 1
@@ -170,6 +255,11 @@ if [ -z "${BINARY:-}" ] || [ ! -f "$BINARY" ]; then
   echo "::error::No se encontró el núcleo compilado de $CORE." >&2
   exit 1
 fi
+
+# Los que no quitan sus símbolos (los sin JIT): más pequeños.
+case "$CORE" in
+  nestopia|snes9x|gambatte|mgba|gpsp|vbam|desmume|beetle_psx_hw|flycast_jitless) strip -x "$BINARY" ;;
+esac
 
 # Como framework (lo que firma SideStore y carga OmniStation con dlopen).
 FW="$OUT/$FRAMEWORK.libretro.framework"

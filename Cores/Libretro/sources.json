@@ -52,5 +52,77 @@
     "framework": "flycast_omni",
     "bundleID": "com.omnistation.core.flycast",
     "notes": "Flycast v2.7 (GPL-2.0). Con patches/flycast, en iOS sus tres JIT (SH4, ARM7 y DSP) van en la memoria de JIT de OmniStation en doble vista (FEAT_NO_RWX_PAGES, como en Switch). En Apple prepara el emulador una sola vez: sus bloques de JIT se quedan toda la vida de la app (versión 2 de la petición). Solo arranca con JIT permanente; sin él, la app usa Flycast sin JIT."
+  },
+  "nestopia": {
+    "repository": "https://github.com/libretro/nestopia.git",
+    "revision": "06a8949e0b3cf60e3a38a374b1426bf40fccb9a0",
+    "framework": "nestopia_omni",
+    "bundleID": "com.omnistation.core.nestopia",
+    "submodules": false,
+    "notes": "Nestopia UE (GPL-2.0). NES. Sin JIT: Makefile de libretro (libretro/), plataforma ios-arm64."
+  },
+  "snes9x": {
+    "repository": "https://github.com/libretro/snes9x.git",
+    "revision": "fae2fea08f74180759ef540ee94259213f503480",
+    "framework": "snes9x_omni",
+    "bundleID": "com.omnistation.core.snes9x",
+    "submodules": false,
+    "notes": "Snes9x (licencia propia de Snes9x, no comercial). SNES. Sin JIT: Makefile de libretro (libretro/)."
+  },
+  "gambatte": {
+    "repository": "https://github.com/libretro/gambatte-libretro.git",
+    "revision": "7809bb68ee96c3e6c74e9d9c4c8bb09aa7c6801d",
+    "framework": "gambatte_omni",
+    "bundleID": "com.omnistation.core.gambatte",
+    "submodules": false,
+    "notes": "Gambatte (GPL-2.0). Game Boy y Game Boy Color. Sin JIT."
+  },
+  "mgba": {
+    "repository": "https://github.com/libretro/mgba.git",
+    "revision": "7a12d6d4b9acb14c0ae62c9166b6a2f3d08007f6",
+    "framework": "mgba_omni",
+    "bundleID": "com.omnistation.core.mgba",
+    "submodules": false,
+    "notes": "mGBA (MPL-2.0). GBA, Game Boy y Game Boy Color. Sin JIT: CMake con LIBMGBA_ONLY y BUILD_LIBRETRO (como el CI de libretro)."
+  },
+  "gpsp": {
+    "repository": "https://github.com/libretro/gpsp.git",
+    "revision": "5819380c2ffb0900219d700a382ee68c464ebb99",
+    "framework": "gpsp_omni",
+    "bundleID": "com.omnistation.core.gpsp",
+    "submodules": false,
+    "notes": "gpSP (GPL-2.0). GBA. En iOS, el Makefile de libretro lo compila sin su recompilador (intérprete)."
+  },
+  "vbam": {
+    "repository": "https://github.com/libretro/vbam-libretro.git",
+    "revision": "115defb3a318258ab84746d45258a1aec19d0b4b",
+    "framework": "vbam_omni",
+    "bundleID": "com.omnistation.core.vbam",
+    "submodules": false,
+    "notes": "VBA-M (GPL-2.0). GBA, Game Boy y Game Boy Color. Sin JIT: Makefile de src/libretro (sin el submódulo «dependencies», que es de Windows)."
+  },
+  "desmume": {
+    "repository": "https://github.com/libretro/desmume.git",
+    "revision": "95b4d798731caa809125b6c3c11d17cc332ff6ef",
+    "framework": "desmume_omni",
+    "bundleID": "com.omnistation.core.desmume",
+    "submodules": false,
+    "notes": "DeSmuME (GPL-2.0). NDS. Sin JIT (en arm64 solo hay intérprete)."
+  },
+  "beetle_psx_hw": {
+    "repository": "https://github.com/libretro/beetle-psx-libretro.git",
+    "revision": "9bcc75d0a3e8310a273afb8fac1409224ff42c29",
+    "framework": "mednafen_psx_hw_omni",
+    "bundleID": "com.omnistation.core.beetlepsxhw",
+    "submodules": false,
+    "notes": "Beetle PSX HW (GPL-2.0). PS1 con imagen por OpenGL ES. En iOS va sin lightrec (intérprete)."
+  },
+  "flycast_jitless": {
+    "repository": "https://github.com/flyinghead/flycast.git",
+    "revision": "5aa091fde632fb332c8d8c34e280d62dc951954c",
+    "framework": "flycast_jitless_omni",
+    "bundleID": "com.omnistation.core.flycastjitless",
+    "submodules": false,
+    "notes": "Flycast (GPL-2.0) sin recompilador (TARGET_NO_REC), el mismo código que «flycast»: es el que se usa para Dreamcast cuando no hay JIT."
   }
 }
