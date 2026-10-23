@@ -4411,7 +4411,7 @@ struct HomeView: View {
                 .reportFrame("scroll")
                 .edgeFade(clear: metrics.fadeClear, fade: metrics.headerHeight,
                           bottom: isLandscapeNow ? Self.bottomFadeHeight : 76,
-                          bottomClear: isLandscapeNow ? 0 : 18)
+                          bottomClear: isLandscapeNow ? 0 : Self.tabBarHeight + 4)
         }
     }
 
@@ -6207,7 +6207,11 @@ private struct SettingCardLabel: View, Equatable {
 
 extension HomeView {
     /// Lo que ocupa abajo la barra de botones en vertical (el contenido se desvanece antes).
-    static let tabBarReserve: CGFloat = 78
+    static let tabBarReserve: CGFloat = 70
+    /// Alto de la barra de abajo (vertical).
+    static let tabBarHeight: CGFloat = 50
+    /// Colores del botón «Jugar» de la presentación del juego (azul → cian).
+    static let tabBarAccent: [Color] = [Color(red: 0.10, green: 0.42, blue: 1.0), Color(red: 0.0, green: 0.78, blue: 1.0)]
 
     /// Vertical: el nombre en el centro con un haz de neón a cada lado y el punto del JIT debajo.
     fileprivate func portraitHeader() -> some View {
@@ -6266,20 +6270,20 @@ extension HomeView {
     /// Barra flotante de cristal (como la de iOS 26), partida en grupos: en cada grupo una burbuja
     /// marca la pestaña y se desliza; con el dedo encima el grupo crece un poco y la burbuja lo sigue.
     private var portraitTabBar: some View {
-        HStack(spacing: 10) {
+        HStack(spacing: 8) {
             ForEach(Array(tabBarGroups.enumerated()), id: \.offset) { _, group in
                 if group.count == 1 {
                     tabBarGroup(group)
-                        .frame(width: 62)
+                        .frame(width: Self.tabBarHeight)
                 } else {
                     tabBarGroup(group)
                         .frame(maxWidth: .infinity)
                 }
             }
         }
-        .frame(height: 62)
-        .padding(.horizontal, 16)
-        .padding(.bottom, 6)
+        .frame(height: Self.tabBarHeight)
+        .padding(.horizontal, 26)
+        .padding(.bottom, 4)
         .animation(.spring(response: 0.38, dampingFraction: 0.72), value: tabBarSelectedIndex)
         .animation(.spring(response: 0.4, dampingFraction: 0.8), value: tabBarSettingsJoined)
         .accessibilityElement(children: .contain)
@@ -6291,7 +6295,7 @@ extension HomeView {
         return GeometryReader { geometry in
             let width: CGFloat = geometry.size.width
             let height: CGFloat = geometry.size.height
-            let inset: CGFloat = group.count == 1 ? 0 : 6
+            let inset: CGFloat = group.count == 1 ? 0 : 4
             let slot: CGFloat = (width - inset * 2) / CGFloat(group.count)
             let selectedSlot: Int? = group.firstIndex(of: tabBarSelectedIndex)
             let baseX: CGFloat = inset + slot * (CGFloat(selectedSlot ?? 0) + 0.5)
@@ -6301,8 +6305,8 @@ extension HomeView {
             ZStack(alignment: .leading) {
                 if showPill {
                     tabBarPill(touching: touching)
-                        .frame(width: group.count == 1 ? width - 8 : slot + (touching ? 14 : 4),
-                               height: group.count == 1 ? height - 8 : (touching ? 60 : 50))
+                        .frame(width: group.count == 1 ? width - 8 : slot + (touching ? 10 : 2),
+                               height: group.count == 1 ? height - 8 : (touching ? height + 6 : height - 8))
                         .position(x: pillX, y: height / 2)
                         .transition(.scale(scale: 0.6).combined(with: .opacity))
                 }
@@ -6319,40 +6323,40 @@ extension HomeView {
             .gesture(tabBarGesture(group: group, slot: slot, inset: inset))
         }
         .background { tabBarGlass(capsule) }
-        .scaleEffect(touching ? 1.04 : 1.0)
+        .scaleEffect(touching ? 1.05 : 1.0)
         .animation(.spring(response: 0.32, dampingFraction: 0.68), value: touching)
     }
 
-    /// Cristal de cada grupo, teñido con el cian de los interruptores (suave: la interfaz es oscura).
+    /// Cristal de cada grupo: muy translúcido, con el borde claro y un brillo azul-cian como el
+    /// botón «Jugar».
     private func tabBarGlass(_ capsule: Capsule) -> some View {
-        let rim: [Color] = [Color.cyan.opacity(0.55), Color.cyan.opacity(0.14), Color.cyan.opacity(0.40)]
+        let accent: [Color] = Self.tabBarAccent
+        let rim: [Color] = [Color.white.opacity(0.30), accent[1].opacity(0.22), accent[0].opacity(0.30)]
         return ZStack {
-            capsule.fill(Color(red: 0.01, green: 0.06, blue: 0.10).opacity(0.38))
-            capsule.fill(LinearGradient(colors: [Color.cyan.opacity(0.10), Color.cyan.opacity(0.03)], startPoint: .top, endPoint: .bottom))
-            capsule.strokeBorder(LinearGradient(colors: rim, startPoint: .topLeading, endPoint: .bottomTrailing), lineWidth: 1)
+            capsule.fill(LinearGradient(colors: [accent[0].opacity(0.07), accent[1].opacity(0.05)], startPoint: .leading, endPoint: .trailing))
+            capsule.strokeBorder(LinearGradient(colors: rim, startPoint: .topLeading, endPoint: .bottomTrailing), lineWidth: 0.8)
         }
-        .liquidGlass(in: capsule, tint: Color.cyan.opacity(0.30), interactive: false)
-        .shadow(color: Color.cyan.opacity(0.22), radius: 12, y: 3)
-        .shadow(color: Color.black.opacity(0.45), radius: 10, y: 6)
+        .clearGlass(in: capsule, tint: accent[0].opacity(0.10))
+        .shadow(color: accent[0].opacity(0.18), radius: 10, y: 3)
     }
 
+    /// Burbuja de la pestaña elegida: el degradado del botón «Jugar».
     private func tabBarPill(touching: Bool) -> some View {
         let capsule = Capsule(style: .continuous)
-        let fill: [Color] = [Color.cyan.opacity(0.30), Color.cyan.opacity(0.14)]
-        let rim: [Color] = [Color.white.opacity(0.45), Color.cyan.opacity(0.35)]
+        let accent: [Color] = Self.tabBarAccent
         return capsule
-            .fill(LinearGradient(colors: fill, startPoint: .top, endPoint: .bottom))
-            .overlay(capsule.strokeBorder(LinearGradient(colors: rim, startPoint: .top, endPoint: .bottom), lineWidth: 0.8))
-            .shadow(color: Color.cyan.opacity(touching ? 0.5 : 0.28), radius: touching ? 12 : 7)
+            .fill(LinearGradient(colors: [accent[0].opacity(touching ? 0.75 : 0.85), accent[1].opacity(touching ? 0.65 : 0.80)],
+                                 startPoint: .leading, endPoint: .trailing))
+            .overlay(capsule.strokeBorder(Color.white.opacity(0.25), lineWidth: 0.8))
+            .shadow(color: accent[0].opacity(touching ? 0.55 : 0.4), radius: touching ? 12 : 8, y: 2)
     }
 
     private func tabBarIcon(_ item: DockSection?, selected: Bool) -> some View {
         let count: Int = controllers.controllers.count
         return Image(systemName: tabBarSymbol(item, selected: selected))
-            .font(.system(size: 21, weight: selected ? .semibold : .regular))
-            .foregroundStyle(selected ? Color.white : Color.white.opacity(0.82))
-            .shadow(color: selected ? Color.cyan.opacity(0.8) : Color.clear, radius: 6)
-            .scaleEffect(selected ? 1.06 : 1.0)
+            .font(.system(size: 17, weight: selected ? .semibold : .regular))
+            .foregroundStyle(selected ? Color.white : Color.white.opacity(0.8))
+            .scaleEffect(selected ? 1.05 : 1.0)
             .overlay(alignment: .topTrailing) {
                 if item == nil && count > 0 {
                     Text("\(count)")
@@ -6361,7 +6365,7 @@ extension HomeView {
                         .frame(minWidth: 14, minHeight: 14)
                         .background(Circle().fill(Color.green))
                         .shadow(color: Color.green.opacity(0.7), radius: 3)
-                        .offset(x: 9, y: -7)
+                        .offset(x: 8, y: -6)
                 }
             }
             .accessibilityLabel(item.map { tr($0.rawValue) } ?? tr("Mandos"))

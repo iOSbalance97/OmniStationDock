@@ -1230,6 +1230,20 @@ extension View {
         #endif
     }
 
+    /// Cristal transparente (el «clear» de iOS 26): deja ver mucho más lo de detrás.
+    @ViewBuilder
+    func clearGlass<S: InsettableShape>(in shape: S, tint: Color? = nil) -> some View {
+        #if compiler(>=6.2)
+        if #available(iOS 26.0, *) {
+            glassEffect(Glass.clear.tint(tint ?? Color.clear), in: shape)
+        } else {
+            modifier(ClearGlassFallback(shape: shape))
+        }
+        #else
+        modifier(ClearGlassFallback(shape: shape))
+        #endif
+    }
+
     /// Solo el borde de luz y el reflejo superior (sin fondo), para paneles que ya tienen el suyo.
     func glassRim<S: InsettableShape>(in shape: S) -> some View {
         modifier(LiquidGlassRim(shape: shape))
@@ -1283,6 +1297,16 @@ private struct LiquidGlassRim<S: InsettableShape>: ViewModifier {
                 lineWidth: 1
             )
             .allowsHitTesting(false)
+    }
+}
+
+private struct ClearGlassFallback<S: InsettableShape>: ViewModifier {
+    let shape: S
+
+    func body(content: Content) -> some View {
+        content
+            .background { shape.fill(.ultraThinMaterial).opacity(0.55) }
+            .modifier(LiquidGlassRim(shape: shape))
     }
 }
 
