@@ -849,11 +849,12 @@ extension View {
     /// Tarjeta de una sección: cristal oscuro con borde de luz cian (como las tarjetas de la app).
     func appSectionCard(cornerRadius: CGFloat = 14) -> some View {
         let shape = RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
+        // Cristal líquido teñido (el de toda la app) con su borde de color.
         return clipShape(shape)
             .background {
-                shape
-                    .fill(LinearGradient(colors: [Color.white.opacity(0.10), Color.white.opacity(0.045)], startPoint: .top, endPoint: .bottom))
-                    .shadow(color: Color.cyan.opacity(0.14), radius: 12, y: 4)
+                Color.clear
+                    .liquidGlass(in: shape)
+                    .shadow(color: Color.cyan.opacity(0.12), radius: 12, y: 4)
             }
             .overlay(
                 shape.strokeBorder(
