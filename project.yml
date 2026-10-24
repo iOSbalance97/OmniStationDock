@@ -19,7 +19,7 @@ targets:
       - path: OmniStation
         excludes:
           - "Resources/RomPatcher/**"
-      # Parcheador (RomPatcher.js, MIT): carpeta tal cual (sus rutas relativas tienen que seguir valiendo).
+      # Parcheador: el motor de Rom Patcher JS (MIT), sus .js tal cual (los carga JavaScriptCore).
       - path: OmniStation/Resources/RomPatcher
         type: folder
         buildPhase: resources
@@ -67,8 +67,6 @@ targets:
       - sdk: OpenGLES.framework
       - sdk: Metal.framework
       - sdk: JavaScriptCore.framework
-      # Parcheador (RomPatcher.js en una vista web).
-      - sdk: WebKit.framework
       - sdk: Network.framework
       - sdk: Security.framework
       - sdk: CFNetwork.framework
