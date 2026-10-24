@@ -224,6 +224,14 @@ struct HomeView: View {
     @State private var homeTopToken = 0
     // Importar/Exportar: tarjeta marcada con el mando (0 Exportar, 1 Parcheador, 2 Archivos).
     @State private var transferIndex = 2
+    // Gestos de vertical: deslizar entre pestañas y Ajustes desde el borde derecho.
+    @State private var swipe = PageSwipe()
+    @State private var pageForward = true
+    @State private var categoryForward = true
+    // Sorpresa: 4 toques seguidos en el título.
+    @State private var showThanks = false
+    @State private var titleTaps = 0
+    @State private var lastTitleTap = Date.distantPast
     @State private var dropTargeted = false
     @State private var importBusy = false
     /// Juegos que pueden ser de varias consolas: se pregunta uno a uno.
@@ -643,6 +651,20 @@ struct HomeView: View {
 
     @ViewBuilder
     private func screenContent(landscape: Bool, dock: Bool) -> some View {
+        if !landscape && !dock {
+            // Vertical: cada pestaña es una página que entra por su lado y sigue al dedo al deslizar.
+            pageContent(landscape: false, dock: false)
+                .id(selectedSection)
+                .transition(.page(forward: pageForward))
+                .modifier(SwipeShift(swipe: swipe, active: selectedSection != .ajustes))
+                .simultaneousGesture(pageSwipeGesture)
+        } else {
+            pageContent(landscape: landscape, dock: dock)
+        }
+    }
+
+    @ViewBuilder
+    private func pageContent(landscape: Bool, dock: Bool) -> some View {
         if dock && (selectedSection == .inicio || selectedSection == .favoritos) {
             dockHome()
         } else {
@@ -690,8 +712,10 @@ struct HomeView: View {
             .overlay { optionsDismissLayer(dock) }
             .overlay(alignment: .bottom) { dockBottomOverlay(dock) }
             .overlay(alignment: .bottom) { portraitTabBarOverlay }
+            .overlay { settingsEdgeOverlay }
             .overlay { controllersDrawerOverlay }
             .overlay { jitTransitionOverlay }
+            .overlay { thanksOverlay }
             .overlay(alignment: .bottom) { toastOverlay }
             .onPreferenceChange(FramesKey.self) { value in handleFrames(value) }
     }
@@ -719,10 +743,9 @@ struct HomeView: View {
         case .renameGame:
             renameSheet()
         case .patcher:
-            PatcherSheet(lang: appLanguage) { file in
-                showToast(tr("Parcheado: %@ (Archivos → OmniStation Dock → Parcheados)", file.lastPathComponent), seconds: 6, actionTitle: tr("Importar")) {
-                    startImport([file])
-                }
+            PatcherSheet(lang: appLanguage, pad: sheetPad, library: patcherLibrary) { file in
+                // Al cerrarse la ventana: Importar lo coloca en la carpeta de su consola.
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { startImport([file]) }
             }
         case .switchAddons(let gameID):
             SwitchAddonsSheet(
@@ -1593,7 +1616,26 @@ struct HomeView: View {
 
     /// Hay una ventana encima: la interfaz de detrás no debe recibir el mando.
     private var modalActive: Bool {
-        dialog != nil || showAbout || sheet != nil || systemPickerOpen || detailGame != nil
+        dialog != nil || showAbout || sheet != nil || systemPickerOpen || detailGame != nil || showThanks
+    }
+
+    /// Vertical: deslizar desde el borde derecho saca los Ajustes.
+    private var settingsEdgeOverlay: some View {
+        SettingsEdgeReveal(enabled: !isLandscapeNow && selectedSection != .ajustes && !modalActive && !controllersDrawerOpen && !activity.running,
+                           swipe: swipe, title: tr("Ajustes")) {
+            feedback()
+            goToSection(.ajustes)
+        }
+        .zIndex(15)
+    }
+
+    @ViewBuilder
+    private var thanksOverlay: some View {
+        if showThanks {
+            ThanksEasterEgg(lang: appLanguage) { showThanks = false }
+                .transition(.opacity)
+                .zIndex(40)
+        }
     }
 
     private func closePadMenu() {
@@ -2740,12 +2782,12 @@ struct HomeView: View {
     private func cycleSection(_ step: Int) {
         let all = DockSection.tabs(landscape: isLandscapeNow)
         guard let index = all.firstIndex(of: selectedSection) else {
-            withAnimation(.easeInOut(duration: 0.2)) { selectedSection = .inicio }
+            goToSection(.inicio)
             return
         }
         let next = all[(index + step + all.count) % all.count]
         feedback(.navigate)
-        withAnimation(.easeInOut(duration: 0.2)) { selectedSection = next }
+        goToSection(next)
     }
 
     private func cyclePlatform(_ step: Int) {
@@ -2770,6 +2812,7 @@ struct HomeView: View {
         // 1) Ventanas abiertas (la de más arriba primero).
         if showPhotoPicker { showPhotoPicker = false; return }
         if showFolderImporter { showFolderImporter = false; return }
+        if showThanks { showThanks = false; return }
         if showAbout || dialog != nil { closePadMenu(); return }
         if sheet != nil {
             if !sheetPad.send(.cancel) { sheet = nil }
@@ -4809,6 +4852,8 @@ struct HomeView: View {
         HStack(spacing: 0) {
             // El título y el planeta se desvanecen al deslizar; solo ellos se repintan.
             HeaderTitle(progress: scrollProgress, size: 20)
+                .contentShape(Rectangle())
+                .onTapGesture { titleTapped() }
             Spacer(minLength: 6)
             if isLandscapeNow {
                 HeaderPlanet(progress: scrollProgress, size: compact ? 30 : 34)
@@ -5173,6 +5218,7 @@ struct HomeView: View {
             LazyVStack(alignment: .leading, spacing: 18, pinnedViews: [.sectionHeaders]) {
                 if showFeatured {
                     featuredPanel
+                        .reportFrame("featured")
                         .modifier(ScrollShrink())
                 }
                 Section {
@@ -5717,6 +5763,15 @@ struct HomeView: View {
 
     // MARK: - Importar / Exportar
 
+    /// Juegos con archivo en OmniStation, para elegirlos en el Parcheador.
+    private var patcherLibrary: [PatcherROM] {
+        games.compactMap { game -> PatcherROM? in
+            guard let path = detailFilePath(game.id) else { return nil }
+            return PatcherROM(id: game.id, name: game.name, platform: game.platform, url: URL(fileURLWithPath: path))
+        }
+        .sorted { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
+    }
+
     private func transferContent(landscape: Bool) -> some View {
         splitScreen(fixed: {
             screenTitle(tr("Importar/Exportar"), subtitle: tr("Todo lo de tus emuladores, colocado solo."))
@@ -6163,10 +6218,24 @@ struct HomeView: View {
 
     private func selectSettingsCategory(_ category: SettingsCategory) {
         guard category != settingsCategory else { return }
-        settingsCategory = category
-        controllerSelectedSettingIndex = 0
-        controllerSelectedArea = "settings"
-        feedback(.navigate)
+        let all: [SettingsCategory] = SettingsCategory.allCases
+        let forward: Bool = (all.firstIndex(of: category) ?? 0) > (all.firstIndex(of: settingsCategory) ?? 0)
+        let change = {
+            withAnimation(.spring(response: 0.42, dampingFraction: 0.86)) {
+                settingsCategory = category
+                swipe.offset = 0
+            }
+            controllerSelectedSettingIndex = 0
+            controllerSelectedArea = "settings"
+            feedback(.navigate)
+        }
+        // La dirección tiene que estar puesta antes de que salga la parte de antes.
+        if forward != categoryForward {
+            categoryForward = forward
+            DispatchQueue.main.async { change() }
+        } else {
+            change()
+        }
     }
 
     private func cycleSettingsCategory(_ step: Int) {
@@ -6280,12 +6349,6 @@ struct HomeView: View {
         items.append(SettingItem(id: "sounds", title: tr("Sonidos"), subtitle: tr("Volumen e importación"), symbol: "speaker.wave.3.fill", tint: SettingTint.aqua, control: .symbol("chevron.right"), action: {
             sheet = .sounds
         }))
-        items.append(SettingItem(id: "platformOrder", title: tr("Reorganizar plataformas"), subtitle: tr("Orden de los filtros"), symbol: "arrow.up.arrow.down", tint: SettingTint.periwinkle, control: .symbol("chevron.right"), action: {
-            sheet = .platformOrder
-        }))
-        items.append(SettingItem(id: "platforms", title: tr("Añadir plataforma"), subtitle: tr("Crea tus propias plataformas"), symbol: "plus.square.on.square", tint: SettingTint.aqua, control: .symbol("plus"), action: {
-            sheet = .platformManager
-        }))
         items.append(toggleSetting("grid", tr("Cuadrícula completa"), tr("Más juegos por pantalla"), "square.grid.3x3.fill", Color.cyan, $compactGrid))
         items.append(toggleSetting("nativeGlass", tr("Cristal de iOS"), tr("El cristal líquido de iOS 26. Si el iPhone se calienta en la interfaz, apágalo: se usa una imitación que gasta mucho menos."), "drop.fill", SettingTint.sky, $nativeGlass))
         return SettingGroup(id: "appearance", title: tr("Apariencia"), items: items)
@@ -6322,6 +6385,12 @@ struct HomeView: View {
         }))
         items.append(SettingItem(id: "clearFavorites", title: tr("Borrar favoritos"), subtitle: tr("Quita todos los marcados"), symbol: "star.slash.fill", tint: Color.orange, control: .badge("\(favoriteCount)", Color.orange), action: {
             if !favoriteNames.isEmpty { dialog = .clearFavorites }
+        }))
+        items.append(SettingItem(id: "platformOrder", title: tr("Reorganizar plataformas"), subtitle: tr("Orden de los filtros y de los grupos de Inicio"), symbol: "arrow.up.arrow.down", tint: SettingTint.periwinkle, control: .symbol("chevron.right"), action: {
+            sheet = .platformOrder
+        }))
+        items.append(SettingItem(id: "platforms", title: tr("Añadir plataforma"), subtitle: tr("Crea tus propias plataformas"), symbol: "plus.square.on.square", tint: SettingTint.aqua, control: .symbol("plus"), action: {
+            sheet = .platformManager
         }))
         items.append(SettingItem(id: "library", title: tr("Juegos añadidos"), subtitle: tr("Lista por plataformas"), symbol: "list.bullet.rectangle.fill", tint: Color.orange, control: .badge("\(libraryCount)", Color.orange), action: {
             sheet = .libraryList
@@ -6645,9 +6714,15 @@ struct HomeView: View {
             settingsCategoryBar
                 .padding(.bottom, 2)
         }) {
-            ForEach(groups.indices, id: \.self) { groupIndex in
-                settingsSection(groups[groupIndex], start: starts[groupIndex], landscape: landscape)
+            // Cada parte (General, Biblioteca…) entra por su lado; al deslizar sigue al dedo.
+            VStack(alignment: .leading, spacing: 14) {
+                ForEach(groups.indices, id: \.self) { groupIndex in
+                    settingsSection(groups[groupIndex], start: starts[groupIndex], landscape: landscape)
+                }
             }
+            .id(settingsCategory)
+            .transition(landscape ? .opacity : .page(forward: categoryForward))
+            .modifier(SwipeShift(swipe: swipe, active: !landscape && selectedSection == .ajustes))
         }
     }
 
@@ -7362,6 +7437,8 @@ extension HomeView {
                 HeaderBeam(progress: scrollProgress, leading: true, paused: activity.running, fades: false)
                 HeaderTitle(progress: scrollProgress, size: 22, anchor: .center, fades: false)
                     .fixedSize()
+                    .contentShape(Rectangle())
+                    .onTapGesture { titleTapped() }
                 HeaderBeam(progress: scrollProgress, leading: false, paused: activity.running, fades: false)
             }
             .frame(height: 34)
@@ -7607,8 +7684,104 @@ extension HomeView {
     private func selectSection(_ section: DockSection) {
         feedback()
         if controllersDrawerOpen { closeControllersDrawer(sound: false) }
-        withAnimation(.spring(response: 0.38, dampingFraction: 0.72)) { selectedSection = section }
+        goToSection(section)
         if section == .inicio { goHomeTop() }
+    }
+
+    /// Cambia de pestaña con la página entrando por su lado (en vertical).
+    private func goToSection(_ section: DockSection) {
+        guard section != selectedSection else { return }
+        let order: [DockSection] = DockSection.tabs(landscape: isLandscapeNow) + [.favoritos, .transfer]
+        let forward: Bool = (order.firstIndex(of: section) ?? 0) > (order.firstIndex(of: selectedSection) ?? 0)
+        let change = {
+            withAnimation(.spring(response: 0.44, dampingFraction: 0.86)) {
+                selectedSection = section
+                swipe.offset = 0
+            }
+        }
+        if forward != pageForward {
+            pageForward = forward
+            DispatchQueue.main.async { change() }
+        } else {
+            change()
+        }
+    }
+
+    // MARK: Gestos (vertical)
+
+    /// Pestañas que se recorren deslizando.
+    private static let swipePages: [DockSection] = [.busqueda, .inicio, .transfer]
+
+    /// Deslizar a un lado: cambia de pestaña (Búsqueda, Inicio, Importar/Exportar) o, en Ajustes,
+    /// de parte. Solo si el gesto es claramente horizontal y no empieza en los bordes (mandos y
+    /// ajustes) ni en la tarjeta deslizante de Inicio.
+    private var pageSwipeGesture: some Gesture {
+        DragGesture(minimumDistance: 16, coordinateSpace: .global)
+            .onChanged { value in
+                let dx: CGFloat = value.translation.width
+                let dy: CGFloat = value.translation.height
+                if swipe.axis == .undecided {
+                    guard abs(dx) > 12 || abs(dy) > 12 else { return }
+                    swipe.axis = abs(dx) > abs(dy) * 1.7 && swipeAllowed(from: value.startLocation) ? .horizontal : .vertical
+                }
+                guard swipe.axis == .horizontal else { return }
+                // Sin pestaña hacia ese lado: goma.
+                swipe.offset = swipeTarget(dx < 0 ? 1 : -1) ? dx : dx * 0.22
+            }
+            .onEnded { value in
+                defer { swipe.axis = .undecided }
+                guard swipe.axis == .horizontal else { return }
+                let dx: CGFloat = value.translation.width
+                let step: Int = dx < 0 ? 1 : -1
+                let far: Bool = abs(dx) > 80 || abs(value.predictedEndTranslation.width) > 240
+                if far && swipeTarget(step) {
+                    commitSwipe(step)
+                } else {
+                    withAnimation(.spring(response: 0.38, dampingFraction: 0.8)) { swipe.offset = 0 }
+                }
+            }
+    }
+
+    private func swipeAllowed(from point: CGPoint) -> Bool {
+        guard !modalActive, !controllersDrawerOpen else { return false }
+        let width: CGFloat = UIScreen.main.bounds.width
+        guard point.x > 28 && point.x < width - 28 else { return false }
+        if selectedSection == .inicio, let featured = metrics.frames["featured"], featured.contains(point) { return false }
+        return true
+    }
+
+    /// ¿Hay pestaña (o parte de Ajustes) hacia ese lado?
+    private func swipeTarget(_ step: Int) -> Bool {
+        if selectedSection == .ajustes {
+            let all: [SettingsCategory] = SettingsCategory.allCases
+            guard let index = all.firstIndex(of: settingsCategory) else { return false }
+            return all.indices.contains(index + step)
+        }
+        guard let index = Self.swipePages.firstIndex(of: selectedSection) else { return false }
+        return Self.swipePages.indices.contains(index + step)
+    }
+
+    private func commitSwipe(_ step: Int) {
+        if selectedSection == .ajustes {
+            let all: [SettingsCategory] = SettingsCategory.allCases
+            guard let index = all.firstIndex(of: settingsCategory), all.indices.contains(index + step) else { return }
+            selectSettingsCategory(all[index + step])
+            return
+        }
+        guard let index = Self.swipePages.firstIndex(of: selectedSection), Self.swipePages.indices.contains(index + step) else { return }
+        feedback(.navigate)
+        goToSection(Self.swipePages[index + step])
+    }
+
+    /// 4 toques seguidos en el título: la sorpresa.
+    private func titleTapped() {
+        let now: Date = Date()
+        titleTaps = now.timeIntervalSince(lastTitleTap) < 0.7 ? titleTaps + 1 : 1
+        lastTitleTap = now
+        guard titleTaps >= 4 else { return }
+        titleTaps = 0
+        feedback(.select)
+        showThanks = true
     }
 
     // MARK: Pantalla de mandos
