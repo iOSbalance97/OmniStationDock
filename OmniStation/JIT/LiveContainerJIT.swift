@@ -121,6 +121,28 @@ enum LiveContainerJIT {
         return request(folder: folder, container: container, openURL: openURL)
     }
 
+    // MARK: Volver a LiveContainer
+
+    /// Integrada en LiveContainer: vuelve a la pantalla de LiveContainer sin preguntar (con el mando).
+    /// Es lo que hace LiveContainer para abrir su propia pantalla: apuntar «ui» como app elegida y
+    /// reiniciarse. Devuelve false si no se puede (y entonces no se ha cambiado nada).
+    @discardableResult
+    static func returnToLiveContainer() -> Bool {
+        guard DebugSupport.isBuiltIntoLiveContainer, let defaults = userDefaults,
+              let utils: AnyClass = NSClassFromString("LCSharedUtils") else { return false }
+        let selector: Selector = NSSelectorFromString("launchToGuestAppWithClassicMode:")
+        guard let method = class_getClassMethod(utils, selector) else { return false }
+        // Lo de OmniStation se guarda antes: LiveContainer cierra el proceso al reiniciarse.
+        UserDefaults.standard.synchronize()
+        defaults.set("ui", forKey: "selected")
+        defaults.removeObject(forKey: "selectedContainer")
+        defaults.removeObject(forKey: "launchAppUrlScheme")
+        defaults.synchronize()
+        typealias Relaunch = @convention(c) (AnyClass, Selector, UInt) -> Bool
+        let relaunch: Relaunch = unsafeBitCast(method_getImplementation(method), to: Relaunch.self)
+        return relaunch(utils, selector, 0)
+    }
+
     /// Si el activador no llega a abrirse, se deshace lo apuntado para que LiveContainer
     /// no abra la app sola la próxima vez.
     static func cancel() {

@@ -6669,6 +6669,14 @@ struct HomeView: View {
         items.append(SettingItem(id: "lcStatus", title: tr("Estado"), subtitle: statusText, symbol: "shippingbox.fill", tint: SettingTint.aqua, control: statusControl, action: {
             showToast(statusText)
         }))
+        // Integrada en LiveContainer: volver a su pantalla (sin la ventana de confirmación, vale con el mando).
+        if DebugSupport.isBuiltIntoLiveContainer {
+            items.append(SettingItem(id: "lcReturn", title: tr("Volver a LiveContainer"), subtitle: tr("Cierra OmniStation y abre la pantalla de LiveContainer"), symbol: "arrow.uturn.backward.circle.fill", tint: SettingTint.aqua, control: .symbol("arrow.up.forward"), action: {
+                if !LiveContainerJIT.returnToLiveContainer() {
+                    showToast(tr("No se pudo volver a LiveContainer"))
+                }
+            }))
+        }
         return SettingGroup(id: "livecontainer", title: "LiveContainer", isSubsection: true, items: items)
     }
 
