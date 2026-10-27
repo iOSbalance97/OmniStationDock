@@ -166,6 +166,7 @@ enum L10n {
         "No se pudo abrir StikDebug. ¿Está instalado?": "StikDebug couldn't be opened. Is it installed?",
         "Estado": "Status",
         "Dentro de LiveContainer": "Inside LiveContainer",
+        "Integrada en LiveContainer": "Built into LiveContainer",
         "Fuera de LiveContainer": "Outside LiveContainer",
         "SÍ": "YES",
         "NO": "NO",
@@ -1072,6 +1073,19 @@ enum DebugSupport {
     /// LiveContainer define LC_HOME_PATH en las apps que ejecuta dentro.
     static var isInsideLiveContainer: Bool {
         getenv("LC_HOME_PATH") != nil
+    }
+
+    /// OmniStation integrada en LiveContainer (fork LiveContainer-OmniStation): va dentro de
+    /// LiveContainer, pero con sus extensiones (JIT y memoria) en las de LiveContainer, así que
+    /// funciona como instalada con SideStore: StikJIT integrado, MeloNX integrado, emparejamiento.
+    static var isBuiltIntoLiveContainer: Bool {
+        isInsideLiveContainer && Bundle.main.bundleURL.lastPathComponent == "OmniStationApp.framework"
+    }
+
+    /// ¿Tiene OmniStation sus propias extensiones? Fuera de LiveContainer o integrada en él, sí;
+    /// como app instalada dentro de LiveContainer, no.
+    static var hasOwnExtensions: Bool {
+        !isInsideLiveContainer || isBuiltIntoLiveContainer
     }
 
     static var bundleID: String {

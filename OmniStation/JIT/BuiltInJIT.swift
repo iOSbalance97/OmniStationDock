@@ -71,9 +71,9 @@ enum BuiltInJIT {
         return false
     }
 
-    /// Dentro de LiveContainer no se usa (allí el JIT lo pide LiveContainer).
+    /// Como app de LiveContainer no se usa (allí el JIT lo pide LiveContainer); integrada en él, sí.
     static var isAvailable: Bool {
-        isSupportedOS && !DebugSupport.isInsideLiveContainer
+        isSupportedOS && DebugSupport.hasOwnExtensions
     }
 
     static var ddiPaths: DDIPaths {
@@ -95,7 +95,7 @@ enum BuiltInJIT {
     /// Motivo por el que no se puede usar ahora (nil = se puede intentar).
     static func preflightProblem(lang: String) -> String? {
         guard isSupportedOS else { return L10n.tr("El JIT integrado necesita iOS 17.4 o posterior.", lang) }
-        guard !DebugSupport.isInsideLiveContainer else {
+        guard DebugSupport.hasOwnExtensions else {
             return L10n.tr("Dentro de LiveContainer el JIT lo activa LiveContainer.", lang)
         }
         guard PairingFile.exists else { return L10n.tr("Importa tu archivo de emparejamiento en Ajustes → Depuración.", lang) }

@@ -611,7 +611,9 @@ final class PermanentJIT {
             return
         }
         triedAt = Date()
-        if DebugSupport.isInsideLiveContainer {
+        // Integrada en LiveContainer hay extensión de JIT: si no se abrió con JIT, va como con SideStore.
+        if DebugSupport.isInsideLiveContainer
+            && (!DebugSupport.isBuiltIntoLiveContainer || (OSLibretroEngine.jitActive && RetroJIT.fresh)) {
             // Solo con el depurador de StikDebug enganchado al abrir la app (y no el de otra partida).
             guard OSLibretroEngine.jitActive, RetroJIT.fresh else { completion(false); return }
             busy = true

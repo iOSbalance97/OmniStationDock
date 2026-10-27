@@ -1,4 +1,5 @@
-// Copiado sin cambios de MeloNX 2.7 (AGPL-3.0, Stossy11): donación de RAM a procesos de ayuda.
+// Copiado de MeloNX 2.7 (AGPL-3.0, Stossy11): donación de RAM a procesos de ayuda.
+// Cambio de OmniStation: busca la extensión también en LiveContainer (OmniStation integrada).
 //
 //  MLXRamDonor.m
 //  MeloNX
@@ -8,6 +9,7 @@
 
 #import "MLXRamDonor.h"
 #import "MLXRamDonorProtocol.h"
+#import "../OSHostSupport.h"
 
 #import <mach/mach.h>
 
@@ -142,12 +144,20 @@ static MLXRamDonor *sharedDonor;
     static dispatch_once_t once;
 
     dispatch_once(&once, ^{
-        NSURL *plugIns = NSBundle.mainBundle.builtInPlugInsURL;
-        NSArray<NSURL *> *contents =
-            [NSFileManager.defaultManager contentsOfDirectoryAtURL:plugIns
-                                        includingPropertiesForKeys:nil
-                                                           options:0
-                                                             error:nil];
+        // Con SideStore, en su PlugIns; integrada en LiveContainer, en el de LiveContainer.
+        NSMutableArray<NSURL *> *contents = [NSMutableArray array];
+        for (NSURL *plugIns in OSPlugInFolders())
+        {
+            NSArray<NSURL *> *entries =
+                [NSFileManager.defaultManager contentsOfDirectoryAtURL:plugIns
+                                            includingPropertiesForKeys:nil
+                                                               options:0
+                                                                 error:nil];
+            if (entries)
+            {
+                [contents addObjectsFromArray:entries];
+            }
+        }
 
         NSMutableArray<NSString *> *found = [NSMutableArray array];
 

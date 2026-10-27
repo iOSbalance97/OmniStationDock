@@ -16,6 +16,7 @@
 #import "OSExternalDisplay.h"
 #import "OSLibretroEngine.h"
 #import "OSPerfHUD.h"
+#import "OSHostSupport.h"
 
 #import <AVFoundation/AVFoundation.h>
 
@@ -369,18 +370,19 @@ static uint64_t OSDebuggerProbe(uint64_t nonce) { return 0; }
 // MARK: - Lanzar la extensión de JIT
 
 static NSString *OSHelperBundleIdentifier(void) {
-    NSURL *plugins = NSBundle.mainBundle.builtInPlugInsURL;
-    if (plugins == nil) return nil;
-    NSArray<NSURL *> *entries = [NSFileManager.defaultManager contentsOfDirectoryAtURL:plugins
-                                                            includingPropertiesForKeys:nil
-                                                                               options:0
-                                                                                 error:nil];
-    for (NSURL *entry in entries) {
-        if (![entry.pathExtension.lowercaseString isEqualToString:@"appex"]) continue;
-        NSBundle *bundle = [NSBundle bundleWithURL:entry];
-        id marker = [bundle objectForInfoDictionaryKey:@"OmniStationJITHelper"];
-        if ([marker isKindOfClass:NSString.class] && [marker isEqualToString:@"1"] && bundle.bundleIdentifier.length > 0) {
-            return bundle.bundleIdentifier;
+    // Con SideStore, en su PlugIns; integrada en LiveContainer, en el de LiveContainer.
+    for (NSURL *plugins in OSPlugInFolders()) {
+        NSArray<NSURL *> *entries = [NSFileManager.defaultManager contentsOfDirectoryAtURL:plugins
+                                                                includingPropertiesForKeys:nil
+                                                                                   options:0
+                                                                                     error:nil];
+        for (NSURL *entry in entries) {
+            if (![entry.pathExtension.lowercaseString isEqualToString:@"appex"]) continue;
+            NSBundle *bundle = [NSBundle bundleWithURL:entry];
+            id marker = [bundle objectForInfoDictionaryKey:@"OmniStationJITHelper"];
+            if ([marker isKindOfClass:NSString.class] && [marker isEqualToString:@"1"] && bundle.bundleIdentifier.length > 0) {
+                return bundle.bundleIdentifier;
+            }
         }
     }
     return nil;
@@ -1234,8 +1236,8 @@ static NSString *gLoadedFlavor = nil;
 
 + (BOOL)supportedHere {
     if (NSProcessInfo.processInfo.operatingSystemVersion.majorVersion < 18) return NO;
-    // En LiveContainer no hay extensión de JIT: solo con el JIT permanente (StikDebug al abrir la app).
-    if (getenv("LC_HOME_PATH") != NULL) return [OSArmsx2Engine permanentJITUsable];
+    // Como app de LiveContainer no hay extensión de JIT: solo con el JIT permanente (StikDebug al abrir la app).
+    if (OSIsLiveContainerGuestWithoutExtensions()) return [OSArmsx2Engine permanentJITUsable];
     return YES;
 }
 
@@ -1578,7 +1580,7 @@ static const size_t kOSArmsx2CodeSize = (size_t)305 * 1024 * 1024;
         }
         self.usingPermanentJIT = pooled;
         if (!pooled) {
-            if (getenv("LC_HOME_PATH") != NULL) {
+            if (OSIsLiveContainerGuestWithoutExtensions()) {
                 self.busy = NO;
                 [self finishLaunch:NO message:OSText(language, @"En LiveContainer, ARMSX2 integrado necesita el JIT permanente: abre OmniStation con el JIT de StikDebug.",
                                                         @"In LiveContainer, built-in ARMSX2 needs the permanent JIT: open OmniStation with StikDebug's JIT.") completion:completion];

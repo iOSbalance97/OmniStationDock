@@ -10,9 +10,9 @@ enum MeloNXMode: String {
 
     static let storageKey = "melonxEngine"
 
-    /// El integrado solo funciona fuera de LiveContainer (la extensión de JIT no corre dentro).
+    /// El integrado necesita las extensiones de OmniStation: fuera de LiveContainer o integrada en él.
     static var integratedAvailable: Bool {
-        !DebugSupport.isInsideLiveContainer
+        DebugSupport.hasOwnExtensions
     }
 
     static func effective(_ raw: String) -> MeloNXMode {

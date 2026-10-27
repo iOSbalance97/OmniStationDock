@@ -14,6 +14,7 @@
 #import "OSExternalDisplay.h"
 #import "OSPerfHUD.h"
 #import "RamDonor/MLXRamDonor.h"
+#import "OSHostSupport.h"
 
 #import <AVFoundation/AVFoundation.h>
 
@@ -388,18 +389,19 @@ static NSString *OSNXDocuments(void) {
 @end
 
 static NSString *OSNXHelperBundleIdentifier(void) {
-    NSURL *plugins = NSBundle.mainBundle.builtInPlugInsURL;
-    if (plugins == nil) return nil;
-    NSArray<NSURL *> *entries = [NSFileManager.defaultManager contentsOfDirectoryAtURL:plugins
-                                                            includingPropertiesForKeys:nil
-                                                                               options:0
-                                                                                 error:nil];
-    for (NSURL *entry in entries) {
-        if (![entry.pathExtension.lowercaseString isEqualToString:@"appex"]) continue;
-        NSBundle *bundle = [NSBundle bundleWithURL:entry];
-        id marker = [bundle objectForInfoDictionaryKey:@"OmniStationJITHelper"];
-        if ([marker isKindOfClass:NSString.class] && [marker isEqualToString:@"1"] && bundle.bundleIdentifier.length > 0) {
-            return bundle.bundleIdentifier;
+    // Con SideStore, en su PlugIns; integrada en LiveContainer, en el de LiveContainer.
+    for (NSURL *plugins in OSPlugInFolders()) {
+        NSArray<NSURL *> *entries = [NSFileManager.defaultManager contentsOfDirectoryAtURL:plugins
+                                                                includingPropertiesForKeys:nil
+                                                                                   options:0
+                                                                                     error:nil];
+        for (NSURL *entry in entries) {
+            if (![entry.pathExtension.lowercaseString isEqualToString:@"appex"]) continue;
+            NSBundle *bundle = [NSBundle bundleWithURL:entry];
+            id marker = [bundle objectForInfoDictionaryKey:@"OmniStationJITHelper"];
+            if ([marker isKindOfClass:NSString.class] && [marker isEqualToString:@"1"] && bundle.bundleIdentifier.length > 0) {
+                return bundle.bundleIdentifier;
+            }
         }
     }
     return nil;
@@ -1491,7 +1493,8 @@ static void OSNXTeardownDonor(const OSNXCoreAPI *api) {
 }
 
 + (BOOL)supportedHere {
-    if (getenv("LC_HOME_PATH") != NULL) return NO;
+    // Como app de LiveContainer no hay extensiones (JIT ni memoria); integrada en él, sí.
+    if (OSIsLiveContainerGuestWithoutExtensions()) return NO;
     return NSProcessInfo.processInfo.operatingSystemVersion.majorVersion >= 18;
 }
 

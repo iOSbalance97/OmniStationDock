@@ -939,7 +939,7 @@ struct HomeView: View {
     /// Al vincular una app instalada con SideStore (no de LiveContainer): se pregunta ya si necesita
     /// JIT y cuál es (su enlace no lo dice). Así no hay que buscarlo luego en las opciones del juego.
     private func askShortcutJITIfNeeded(_ item: LibraryGame) {
-        guard installMethodRaw == InstallMethod.sideStore.rawValue, let link = item.launchURL,
+        guard sideStoreFeatures, let link = item.launchURL,
               !JITLauncher.isLiveContainerLink(link), JITLauncher.bundleID(fromLink: link) == nil else { return }
         let id: String = item.id
         // Cuando se haya cerrado la ventana del acceso directo.
@@ -1282,7 +1282,7 @@ struct HomeView: View {
         schedulePermanentJIT()
         // Instalada con SideStore: las carpetas de los núcleos existen desde el principio, así la
         // carpeta de OmniStation sale en Archivos → En mi iPhone sin tener que importar nada antes.
-        if !DebugSupport.isInsideLiveContainer {
+        if DebugSupport.hasOwnExtensions {
             DispatchQueue.global(qos: .utility).async {
                 ARMSX2CoreFolders.ensure()
                 MeloNXCoreFolders.ensure()
@@ -2069,7 +2069,7 @@ struct HomeView: View {
             let jitTitle: String = jitOn ? "✓ " + tr("Abrir con JIT") : tr("Abrir con JIT")
             items.append(PadMenuItem(title: jitTitle) {
                 // App de SideStore sin vincular: para darle JIT hay que saber cuál es.
-                if !jitOn && installMethodRaw == InstallMethod.sideStore.rawValue && jitBundleID(game) == nil
+                if !jitOn && sideStoreFeatures && jitBundleID(game) == nil
                     && JITLauncher.liveContainerJITURL(game.launchURL) == nil {
                     menuIndex = 0
                     dialog = .shortcutJIT
@@ -2095,7 +2095,7 @@ struct HomeView: View {
         }
         // App vinculada para el JIT (SideStore, accesos directos que no son de LiveContainer): se pide
         // al crear el acceso directo; aquí solo se cambia.
-        if opensOtherApp && emulatorFor(game) == nil && installMethodRaw == InstallMethod.sideStore.rawValue,
+        if opensOtherApp && emulatorFor(game) == nil && sideStoreFeatures,
            let bundle = gameMeta[id]?.bundleID {
             items.append(PadMenuItem(title: tr("Cambiar app para el JIT (%@)", bundle)) {
                 closePadMenu()
@@ -3085,7 +3085,7 @@ struct HomeView: View {
             return
         }
         guard let url = JITLauncher.stikDebugJITURL(bundleID: bundle) else { return }
-        if installMethodRaw == InstallMethod.sideStore.rawValue && !PairingFile.exists {
+        if sideStoreFeatures && !PairingFile.exists {
             showToast(tr("Recuerda: StikDebug necesita tu archivo de emparejamiento"))
         } else {
             showToast(tr("Abriendo con JIT…"))
@@ -3122,9 +3122,15 @@ struct HomeView: View {
         gameMeta[game.id]?.bundleID ?? JITLauncher.bundleID(fromLink: game.launchURL)
     }
 
-    /// SideStore/AltStore con el activador integrado (StikJIT), si este iPhone lo admite.
+    /// Instalada con SideStore, o integrada en LiveContainer: tiene sus extensiones, el JIT
+    /// integrado (StikJIT) y el archivo de emparejamiento, como la instalada con SideStore.
+    private var sideStoreFeatures: Bool {
+        installMethodRaw == InstallMethod.sideStore.rawValue || DebugSupport.isBuiltIntoLiveContainer
+    }
+
+    /// SideStore/AltStore (o integrada en LiveContainer) con el activador integrado (StikJIT), si este iPhone lo admite.
     private var usesBuiltInJIT: Bool {
-        guard installMethodRaw == InstallMethod.sideStore.rawValue else { return false }
+        guard sideStoreFeatures else { return false }
         let enabler: JITEnabler = JITEnabler(rawValue: jitEnablerRaw) ?? .builtIn
         return enabler == .builtIn && BuiltInJIT.isAvailable
     }
@@ -3492,7 +3498,7 @@ struct HomeView: View {
         if item.source == ARMSX2CoreFolders.source && armsx2Integrated {
             return installMethodRaw == InstallMethod.sideStore.rawValue || DebugSupport.isInsideLiveContainer ? .armsx2 : nil
         }
-        guard installMethodRaw == InstallMethod.sideStore.rawValue else { return nil }
+        guard sideStoreFeatures else { return nil }
         if item.source == MeloNXCoreFolders.source && melonxIntegrated { return .melonx }
         return nil
     }
@@ -3508,7 +3514,7 @@ struct HomeView: View {
         })
         items.append(PadMenuItem(title: checked(tr("Núcleo integrado en OmniStation"), integrated)) {
             closePadMenu()
-            if DebugSupport.isInsideLiveContainer {
+            if !DebugSupport.hasOwnExtensions {
                 // Aquí no hay extensión de JIT: va con el JIT permanente (StikDebug al abrir la app).
                 showToast(tr("En LiveContainer, ARMSX2 integrado usa el JIT permanente: abre OmniStation con el JIT de StikDebug."), seconds: 5)
             }
@@ -3603,7 +3609,7 @@ struct HomeView: View {
         // JIT permanente (bloque preparado al abrir la app): sin extensión, VPN ni depurador.
         let pooled: Bool = OSArmsx2Engine.permanentJITUsable
         guard OSArmsx2Engine.supportedHere else {
-            showToast(DebugSupport.isInsideLiveContainer
+            showToast(!DebugSupport.hasOwnExtensions
                       ? tr("En LiveContainer, ARMSX2 integrado necesita el JIT permanente: abre OmniStation con el JIT de StikDebug.")
                       : tr("El núcleo integrado necesita iOS 18."), seconds: 5)
             return
@@ -6557,7 +6563,7 @@ struct HomeView: View {
         items.append(SettingItem(id: "installMethod", title: tr("Método de instalación"), subtitle: installMethodTitle(method), symbol: method?.symbol ?? "questionmark.app.fill", tint: SettingTint.violet, control: .symbol("chevron.right"), action: {
             sheet = .installMethod
         }))
-        if method == .sideStore {
+        if method == .sideStore || DebugSupport.isBuiltIntoLiveContainer {
             items.append(jitEnablerSettingItem())
             if usesBuiltInJIT {
                 items.append(builtInJITSettingItem())
@@ -6656,7 +6662,8 @@ struct HomeView: View {
 
     private var liveContainerSettings: SettingGroup {
         let inside: Bool = DebugSupport.isInsideLiveContainer
-        let statusText: String = inside ? tr("Dentro de LiveContainer") : tr("Fuera de LiveContainer")
+        let statusText: String = DebugSupport.isBuiltIntoLiveContainer ? tr("Integrada en LiveContainer")
+            : (inside ? tr("Dentro de LiveContainer") : tr("Fuera de LiveContainer"))
         let statusControl: SettingControl = inside ? .badge(tr("DENTRO"), Color.green) : .badge(tr("FUERA"), Color.gray)
         var items: [SettingItem] = []
         items.append(SettingItem(id: "lcStatus", title: tr("Estado"), subtitle: statusText, symbol: "shippingbox.fill", tint: SettingTint.aqua, control: statusControl, action: {
