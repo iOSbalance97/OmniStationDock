@@ -26,8 +26,8 @@ targets:
     settings:
       base:
         
-        MARKETING_VERSION: "0.9.1"
-        CURRENT_PROJECT_VERSION: "91"
+        MARKETING_VERSION: "0.9.2"
+        CURRENT_PROJECT_VERSION: "92"
         PRODUCT_BUNDLE_IDENTIFIER: com.omnistation.dock
         PRODUCT_NAME: OmniStationDock
         SWIFT_VERSION: "5.0"
@@ -82,8 +82,8 @@ targets:
       - path: OmniStation/JIT/StikJIT
     settings:
       base:
-        MARKETING_VERSION: "0.9.1"
-        CURRENT_PROJECT_VERSION: "91"
+        MARKETING_VERSION: "0.9.2"
+        CURRENT_PROJECT_VERSION: "92"
         PRODUCT_BUNDLE_IDENTIFIER: com.omnistation.dock.jithelper
         PRODUCT_NAME: OmniStationJITHelper
         SWIFT_VERSION: "5.0"
@@ -113,8 +113,8 @@ targets:
       - path: RamDonor
     settings:
       base:
-        MARKETING_VERSION: "0.9.1"
-        CURRENT_PROJECT_VERSION: "91"
+        MARKETING_VERSION: "0.9.2"
+        CURRENT_PROJECT_VERSION: "92"
         PRODUCT_BUNDLE_IDENTIFIER: com.omnistation.dock.ramdonor
         PRODUCT_NAME: OmniStationRamDonor
         TARGETED_DEVICE_FAMILY: "1"
