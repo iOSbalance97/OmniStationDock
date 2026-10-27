@@ -1,6 +1,7 @@
 import MachO
 import SwiftUI
 import UIKit
+import UIKit.UIGestureRecognizerSubclass
 import GameController
 import AudioToolbox
 import CoreText
@@ -833,6 +834,8 @@ final class ControllerMonitor: ObservableObject {
 
     private func bind(_ controller: GCController) {
         guard let pad = controller.extendedGamepad else { return }
+        // Usar el mando cuenta como usar la app (el vídeo de fondo sigue).
+        pad.valueChangedHandler = { _, _ in InterfaceIdle.shared.poke() }
         pad.leftShoulder.pressedChangedHandler = { [weak self] _, _, pressed in
             guard pressed, self?.navigationEnabled == true else { return }
             self?.onShoulder?(-1)
@@ -884,6 +887,61 @@ final class ControllerMonitor: ObservableObject {
     }
 }
 
+
+/// Reposo: tras un rato sin tocar la pantalla ni el mando, el vídeo de fondo se queda en su
+/// fotograma (con el cristal de iOS encima, cada fotograma del vídeo obliga a recalcular todo el
+/// cristal: es lo que más calienta). Vuelve en cuanto se toca. Se puede apagar en Apariencia.
+final class InterfaceIdle: ObservableObject {
+    static let shared = InterfaceIdle()
+    static let enabledKey = "pauseBackgroundWhenIdle"
+    @Published private(set) var idle = false
+    private var timer: DispatchWorkItem?
+    private var lastPoke: CFTimeInterval = 0
+    private static let delay: Double = 20
+
+    static var enabled: Bool { UserDefaults.standard.object(forKey: enabledKey) as? Bool ?? true }
+
+    func poke() {
+        guard Thread.isMainThread else {
+            DispatchQueue.main.async { self.poke() }
+            return
+        }
+        let now: CFTimeInterval = CACurrentMediaTime()
+        if !idle && now - lastPoke < 1 { return }
+        lastPoke = now
+        if idle { idle = false }
+        timer?.cancel()
+        guard Self.enabled else { return }
+        let item = DispatchWorkItem { [weak self] in self?.idle = true }
+        timer = item
+        DispatchQueue.main.asyncAfter(deadline: .now() + Self.delay, execute: item)
+    }
+
+    /// Mira los toques de toda la ventana sin quitarle ninguno a la interfaz.
+    func watch(_ window: UIWindow?) {
+        guard let window, !(window.gestureRecognizers ?? []).contains(where: { $0 is IdleTouchRecognizer }) else { return }
+        window.addGestureRecognizer(IdleTouchRecognizer())
+        poke()
+    }
+}
+
+/// Reconocedor que nunca se reconoce: solo avisa de que se ha tocado la pantalla.
+private final class IdleTouchRecognizer: UIGestureRecognizer {
+    init() {
+        super.init(target: nil, action: nil)
+        cancelsTouchesInView = false
+        delaysTouchesBegan = false
+        delaysTouchesEnded = false
+    }
+
+    override func touchesBegan(_ touches: Set<UITouch>, with event: UIEvent) {
+        InterfaceIdle.shared.poke()
+        state = .failed
+    }
+
+    override func canPrevent(_ preventedGestureRecognizer: UIGestureRecognizer) -> Bool { false }
+    override func canBePrevented(by preventingGestureRecognizer: UIGestureRecognizer) -> Bool { false }
+}
 
 /// Tinte suave de todo el cristal de la app (el azul de las plataformas, casi transparente).
 /// Ajuste «Cristal de iOS» (Apariencia): con él apagado, el cristal es la imitación pintada (gasta
@@ -1117,6 +1175,13 @@ final class ScrollProgress: ObservableObject {
         settle?.cancel()
         if value {
             if !moving { moving = true }
+            // Por si la pantalla se va sin decir que ha parado (al cambiar de pestaña deslizando, la
+            // barra de abajo se quedaba plegada).
+            let fallback = DispatchWorkItem { [weak self] in
+                if self?.moving == true { self?.moving = false }
+            }
+            settle = fallback
+            DispatchQueue.main.asyncAfter(deadline: .now() + 2.5, execute: fallback)
             return
         }
         let item = DispatchWorkItem { [weak self] in

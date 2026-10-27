@@ -167,6 +167,8 @@ extension L10n {
         "Si no, se llama como el parche.": "Otherwise it's named like the patch.",
         "Toca para cerrar": "Tap to close",
         "Traducciones, hacks y arreglos para tus juegos": "Translations, hacks and fixes for your games",
-        "¡Gracias!": "Thank you!"
+        "¡Gracias!": "Thank you!",
+        "Fondo en reposo": "Background at rest",
+        "Tras 20 s sin tocar nada, el vídeo de fondo se queda quieto hasta que vuelvas a tocar. Calienta mucho menos.": "After 20 s without touching anything, the background video stays still until you touch again. Much less heat."
     ]
 }

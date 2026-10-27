@@ -205,6 +205,7 @@ struct HomeView: View {
     @AppStorage("closeAfterLaunch") private var closeAfterLaunch = true
     /// Cristal de iOS 26 (con él apagado, una imitación pintada que gasta mucho menos).
     @AppStorage(LiquidGlassSetting.key) private var nativeGlass = true
+    @AppStorage(InterfaceIdle.enabledKey) private var pauseBackgroundIdle = true
     @AppStorage(CoverDownloader.enabledKey) private var autoCoversEnabled = true
 
     // Dispositivos
@@ -228,6 +229,7 @@ struct HomeView: View {
     @State private var swipe = PageSwipe()
     @State private var pageForward = true
     @State private var categoryForward = true
+    @State private var horizontalSwiping = false
     // Sorpresa: 4 toques seguidos en el título.
     @State private var showThanks = false
     @State private var titleTaps = 0
@@ -654,6 +656,7 @@ struct HomeView: View {
         if !landscape && !dock {
             // Vertical: cada pestaña es una página que entra por su lado y sigue al dedo al deslizar.
             pageContent(landscape: false, dock: false)
+                .scrollDisabled(horizontalSwiping)
                 .id(selectedSection)
                 .transition(.page(forward: pageForward))
                 .modifier(SwipeShift(swipe: swipe, active: selectedSection != .ajustes))
@@ -1006,7 +1009,12 @@ struct HomeView: View {
                 IncomingLinks.shared.url = nil
                 handleIncomingLink(url)
             }
-            .onChange(of: dialog) { _, _ in menuIndex = 0 }
+            .onChange(of: dialog) { _, _ in
+                menuIndex = 0
+                resetPageSwipe()
+            }
+            .onChange(of: sheet) { _, _ in resetPageSwipe() }
+            .onChange(of: pauseBackgroundIdle) { _, _ in InterfaceIdle.shared.poke() }
             .onChange(of: showAbout) { _, _ in menuIndex = 0 }
             .onChange(of: keepLandscape) { _, value in handleKeepLandscapeChange(value) }
             .onChange(of: hdmi.isConnected) { _, connected in handleHDMI(connected) }
@@ -1218,6 +1226,7 @@ struct HomeView: View {
     }
 
     private func handleSectionChange(_ section: DockSection) {
+        resetPageSwipe()
         // La pantalla nueva empieza arriba: el título debe verse entero.
         scrollProgress.activate(section.rawValue)
         optionsExpanded = false
@@ -1260,7 +1269,12 @@ struct HomeView: View {
     }
 
     private func handleAppear() {
-        // Toques de toda la ventana: para dejar quieto lo animado cuando no se usa la app.
+        // Toques de toda la ventana: para dejar quieto el vídeo de fondo cuando no se usa la app.
+        let windows: [UIWindow] = UIApplication.shared.connectedScenes
+            .compactMap { $0 as? UIWindowScene }
+            .filter { $0.session.role == .windowApplication }
+            .flatMap { $0.windows }
+        InterfaceIdle.shared.watch(windows.first(where: { $0.isKeyWindow }) ?? windows.first)
         // El mando siempre maneja la interfaz.
         controllers.navigationEnabled = true
         sheetPad.gamepadConnected = gamepadConnected
@@ -1624,7 +1638,7 @@ struct HomeView: View {
         SettingsEdgeReveal(enabled: !isLandscapeNow && selectedSection != .ajustes && !modalActive && !controllersDrawerOpen && !activity.running,
                            swipe: swipe, title: tr("Ajustes")) {
             feedback()
-            goToSection(.ajustes)
+            goToSection(.ajustes, animated: false)
         }
         .zIndex(15)
     }
@@ -2290,6 +2304,8 @@ struct HomeView: View {
 
     /// Abre las opciones (cambiar nombre, carátula, plataforma, favoritos) de un juego.
     private func openGameOptions(_ id: String) {
+        // Al soltar un deslizamiento encima de algo, no se abre.
+        if swipe.justSwiped { return }
         editingGameID = id
         feedback()
         // Modo Dock: la rueda de opciones se cierra para que la ventana quede encima y con el mando.
@@ -2979,6 +2995,8 @@ struct HomeView: View {
 
     /// Elegir un juego (✕ o toque) abre su pantalla; desde ella, «Jugar» lo lanza.
     private func open(_ game: Game) {
+        // Al soltar un deslizamiento encima de algo, no se abre.
+        if swipe.justSwiped { return }
         feedback()
         optionsExpanded = false
         detailFocus = .play
@@ -2993,6 +3011,8 @@ struct HomeView: View {
 
     /// Abre el juego en su emulador o app.
     private func launch(_ game: Game) {
+        // Al soltar un deslizamiento encima de algo, no se abre.
+        if swipe.justSwiped { return }
         feedback()
         if let item = libraryGames.first(where: { $0.id == game.id }), let system = RetroSystem.from(source: item.source) {
             playCounts[game.id, default: 0] += 1
@@ -4689,6 +4709,8 @@ struct HomeView: View {
     }
 
     private func toggleFavorite(_ id: String) {
+        // Al soltar un deslizamiento encima de algo, no se abre.
+        if swipe.justSwiped { return }
         var names = favoriteNames
         if names.contains(id) { names.remove(id) } else { names.insert(id) }
         favoritesRaw = names.sorted().joined(separator: "|")
@@ -5576,14 +5598,13 @@ struct HomeView: View {
     }
 
     /// Vertical, en «Todos»: un grupo de tarjetas por plataforma con su nombre encima.
+    /// Cada grupo va suelto en la lista perezosa (antes iban todos dentro de un VStack y se
+    /// creaban todas las tarjetas de golpe, también las de abajo del todo).
     private func groupedGameGrid(_ items: [Game], columns: Int, compact: Bool) -> some View {
-        let groups = platformGroups(items)
-        return VStack(alignment: .leading, spacing: 16) {
-            ForEach(Array(groups.enumerated()), id: \.element.platform) { index, group in
-                VStack(alignment: .leading, spacing: 9) {
-                    platformGroupHeader(group.platform, count: group.games.count)
-                    gameGrid(group.games, columns: columns, compact: compact, reportFirst: index == 0)
-                }
+        ForEach(Array(platformGroups(items).enumerated()), id: \.element.platform) { index, group in
+            VStack(alignment: .leading, spacing: 9) {
+                platformGroupHeader(group.platform, count: group.games.count)
+                gameGrid(group.games, columns: columns, compact: compact, reportFirst: index == 0)
             }
         }
     }
@@ -5955,6 +5976,8 @@ struct HomeView: View {
     }
 
     private func activateTransfer(_ index: Int) {
+        // Al soltar un deslizamiento encima de algo, no se abre.
+        if swipe.justSwiped { return }
         transferIndex = index
         switch index {
         case 0:
@@ -6221,7 +6244,7 @@ struct HomeView: View {
         let all: [SettingsCategory] = SettingsCategory.allCases
         let forward: Bool = (all.firstIndex(of: category) ?? 0) > (all.firstIndex(of: settingsCategory) ?? 0)
         let change = {
-            withAnimation(.spring(response: 0.42, dampingFraction: 0.86)) {
+            withAnimation(.spring(response: 0.32, dampingFraction: 0.92)) {
                 settingsCategory = category
                 swipe.offset = 0
             }
@@ -6350,6 +6373,7 @@ struct HomeView: View {
             sheet = .sounds
         }))
         items.append(toggleSetting("grid", tr("Cuadrícula completa"), tr("Más juegos por pantalla"), "square.grid.3x3.fill", Color.cyan, $compactGrid))
+        items.append(toggleSetting("idlePause", tr("Fondo en reposo"), tr("Tras 20 s sin tocar nada, el vídeo de fondo se queda quieto hasta que vuelvas a tocar. Calienta mucho menos."), "moon.zzz.fill", SettingTint.periwinkle, $pauseBackgroundIdle))
         items.append(toggleSetting("nativeGlass", tr("Cristal de iOS"), tr("El cristal líquido de iOS 26. Si el iPhone se calienta en la interfaz, apágalo: se usa una imitación que gasta mucho menos."), "drop.fill", SettingTint.sky, $nativeGlass))
         return SettingGroup(id: "appearance", title: tr("Apariencia"), items: items)
     }
@@ -6696,6 +6720,8 @@ struct HomeView: View {
     }
 
     private func runSetting(_ item: SettingItem) {
+        // Al soltar un deslizamiento encima de algo, no se abre.
+        if swipe.justSwiped { return }
         if case .toggle = item.control {
             feedback(.toggle)
         } else {
@@ -6784,6 +6810,8 @@ struct HomeView: View {
 
     /// Explicación entera de un ajuste (mantener pulsada su tarjeta).
     private func showSettingInfo(_ item: SettingItem) {
+        // Al soltar un deslizamiento encima de algo, no se abre.
+        if swipe.justSwiped { return }
         guard !item.subtitle.isEmpty else { return }
         settingLongPressed = true
         feedback()
@@ -7493,7 +7521,7 @@ extension HomeView {
     private var portraitTabBar: some View {
         // Con mando la barra no se esconde: cada paso de la cruceta mueve la pantalla y la barra
         // parpadeaba (se iba y volvía).
-        TabBarCollapse(progress: scrollProgress, enabled: tabBarTouchX == nil && !controllersDrawerOpen && !gamepadConnected) { collapsed in
+        TabBarCollapse(progress: scrollProgress, enabled: tabBarTouchX == nil && !controllersDrawerOpen && !gamepadConnected && !horizontalSwiping) { collapsed in
             tabBarBody(collapsed: collapsed)
         }
         .frame(height: Self.tabBarHeight)
@@ -7689,12 +7717,22 @@ extension HomeView {
     }
 
     /// Cambia de pestaña con la página entrando por su lado (en vertical).
-    private func goToSection(_ section: DockSection) {
+    private func goToSection(_ section: DockSection, animated: Bool = true) {
         guard section != selectedSection else { return }
+        guard animated else {
+            // Ajustes desde el borde: el panel ya lo tapa todo, se cambia de golpe debajo.
+            var transaction = Transaction()
+            transaction.disablesAnimations = true
+            withTransaction(transaction) {
+                selectedSection = section
+                swipe.offset = 0
+            }
+            return
+        }
         let order: [DockSection] = DockSection.tabs(landscape: isLandscapeNow) + [.favoritos, .transfer]
         let forward: Bool = (order.firstIndex(of: section) ?? 0) > (order.firstIndex(of: selectedSection) ?? 0)
         let change = {
-            withAnimation(.spring(response: 0.44, dampingFraction: 0.86)) {
+            withAnimation(.spring(response: 0.32, dampingFraction: 0.92)) {
                 selectedSection = section
                 swipe.offset = 0
             }
@@ -7725,21 +7763,39 @@ extension HomeView {
                     swipe.axis = abs(dx) > abs(dy) * 1.7 && swipeAllowed(from: value.startLocation) ? .horizontal : .vertical
                 }
                 guard swipe.axis == .horizontal else { return }
-                // Sin pestaña hacia ese lado: goma.
-                swipe.offset = swipeTarget(dx < 0 ? 1 : -1) ? dx : dx * 0.22
+                // Mientras se desliza a un lado, la pantalla no sube ni baja (antes se iba a todas partes).
+                if !horizontalSwiping { horizontalSwiping = true }
+                // Sigue al dedo a medio camino y con tope; sin pestaña hacia ese lado, goma.
+                let limit: CGFloat = UIScreen.main.bounds.width * 0.32
+                let follow: CGFloat = swipeTarget(dx < 0 ? 1 : -1) ? dx * 0.5 : dx * 0.15
+                swipe.offset = max(-limit, min(limit, follow))
             }
             .onEnded { value in
-                defer { swipe.axis = .undecided }
+                defer {
+                    swipe.axis = .undecided
+                    horizontalSwiping = false
+                }
                 guard swipe.axis == .horizontal else { return }
+                swipe.lastHorizontal = Date()
                 let dx: CGFloat = value.translation.width
                 let step: Int = dx < 0 ? 1 : -1
-                let far: Bool = abs(dx) > 80 || abs(value.predictedEndTranslation.width) > 240
+                let far: Bool = abs(dx) > 90 || abs(value.predictedEndTranslation.width) > 260
                 if far && swipeTarget(step) {
                     commitSwipe(step)
                 } else {
-                    withAnimation(.spring(response: 0.38, dampingFraction: 0.8)) { swipe.offset = 0 }
+                    withAnimation(.spring(response: 0.3, dampingFraction: 0.9)) { swipe.offset = 0 }
                 }
             }
+    }
+
+    /// Si el gesto se corta sin terminar (se abre una ventana, cambia la página), todo vuelve a su
+    /// sitio (antes la página se quedaba movida a un lado).
+    private func resetPageSwipe() {
+        swipe.axis = .undecided
+        if horizontalSwiping { horizontalSwiping = false }
+        if swipe.offset != 0 {
+            withAnimation(.spring(response: 0.3, dampingFraction: 0.9)) { swipe.offset = 0 }
+        }
     }
 
     private func swipeAllowed(from point: CGPoint) -> Bool {

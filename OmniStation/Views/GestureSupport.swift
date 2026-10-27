@@ -7,15 +7,20 @@ import SwiftUI
 final class PageSwipe: ObservableObject {
     enum Axis { case undecided, horizontal, vertical }
 
-    /// Desplazamiento de la página con el dedo.
+    /// Desplazamiento de la página con el dedo (ya amortiguado).
     @Published var offset: CGFloat = 0
-    /// Lo que se ha sacado el panel de Ajustes desde el borde derecho (la página se aparta un poco).
+    /// Lo que se ha sacado el panel de Ajustes desde el borde derecho.
     @Published var edge: CGFloat = 0
     var axis: Axis = .undecided
+    /// Cuándo terminó el último deslizamiento: los toques de justo después no cuentan (al soltar el
+    /// dedo encima de una tarjeta se abría sin querer).
+    var lastHorizontal: Date = .distantPast
+
+    var justSwiped: Bool { Date().timeIntervalSince(lastHorizontal) < 0.4 }
 }
 
-/// La página sigue al dedo con un toque de profundidad (como en iOS 26): se aparta, se encoge
-/// muy poco y se aclara.
+/// La página sigue al dedo (solo se desplaza y se aclara un poco: nada de desenfoques ni escalas,
+/// que en una pantalla entera con cristal se notaban y calentaban).
 struct SwipeShift: ViewModifier {
     @ObservedObject var swipe: PageSwipe
     var active: Bool
@@ -23,13 +28,9 @@ struct SwipeShift: ViewModifier {
     func body(content: Content) -> some View {
         let width: CGFloat = max(UIScreen.main.bounds.width, 1)
         let x: CGFloat = active ? swipe.offset : 0
-        let parallax: CGFloat = -swipe.edge * 0.18
-        let amount: CGFloat = min(1, abs(x) / width)
         return content
-            .offset(x: x + parallax)
-            .scaleEffect(1 - 0.05 * amount - 0.03 * min(1, swipe.edge / width), anchor: .center)
-            .opacity(Double(1 - 0.45 * amount))
-            .blur(radius: 2.5 * amount)
+            .offset(x: x)
+            .opacity(Double(1 - 0.35 * min(1, abs(x) / (width * 0.5))))
     }
 }
 
@@ -37,16 +38,17 @@ struct SwipeShift: ViewModifier {
 extension AnyTransition {
     static func page(forward: Bool) -> AnyTransition {
         .asymmetric(
-            insertion: .move(edge: forward ? .trailing : .leading).combined(with: .opacity).combined(with: .scale(scale: 0.96)),
-            removal: .move(edge: forward ? .leading : .trailing).combined(with: .opacity).combined(with: .scale(scale: 0.96))
+            insertion: .offset(x: forward ? 90 : -90).combined(with: .opacity),
+            removal: .offset(x: forward ? -90 : 90).combined(with: .opacity)
         )
     }
 }
 
 // MARK: - Ajustes desde el borde derecho
 
-/// Arrastrar desde el borde derecho hacia la izquierda: aparece un panel de cristal con Ajustes que
-/// sigue al dedo; al soltar (pasada la mitad o con impulso) se abren los Ajustes.
+/// Arrastrar desde el borde derecho hacia la izquierda: un panel de cristal con Ajustes entra con el
+/// dedo; al soltar (pasado un tercio o con impulso) tapa la pantalla, se abren los Ajustes debajo y
+/// el panel se desvanece.
 struct SettingsEdgeReveal: View {
     let enabled: Bool
     @ObservedObject var swipe: PageSwipe
@@ -54,17 +56,22 @@ struct SettingsEdgeReveal: View {
     let onOpen: () -> Void
 
     @State private var opening = false
+    @State private var fade: Double = 1
+    /// Si el gesto se corta (otra ventana, cambio de pestaña), vuelve a su sitio solo.
+    @GestureState private var dragging = false
 
     private var width: CGFloat { UIScreen.main.bounds.width }
 
     var body: some View {
         let pulled: CGFloat = swipe.edge
-        let progress: CGFloat = min(1, pulled / (width * 0.55))
+        let progress: CGFloat = min(1, pulled / (width * 0.5))
         ZStack(alignment: .trailing) {
             if pulled > 0 {
+                // Tamaño fijo y solo se desplaza (cambiar su ancho en cada fotograma costaba mucho).
                 panel(pulled: pulled, progress: progress)
+                    .offset(x: width - pulled)
+                    .opacity(fade)
                     .allowsHitTesting(false)
-                    .transition(.opacity)
             }
             if enabled {
                 Color.clear
@@ -74,15 +81,19 @@ struct SettingsEdgeReveal: View {
                     .gesture(edgeGesture)
             }
         }
-        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .trailing)
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .leading)
         .allowsHitTesting(enabled || pulled > 0)
+        .onChange(of: dragging) { _, active in
+            if !active && !opening && swipe.edge > 0 {
+                withAnimation(.spring(response: 0.35, dampingFraction: 0.85)) { swipe.edge = 0 }
+            }
+        }
     }
 
     private func panel(pulled: CGFloat, progress: CGFloat) -> some View {
         let shape = UnevenRoundedRectangle(topLeadingRadius: 34, bottomLeadingRadius: 34, style: .continuous)
-        return ZStack {
-            shape.fill(Color(red: 0.02, green: 0.05, blue: 0.14).opacity(0.55 + 0.35 * progress))
-            Color.clear.liquidGlass(in: shape)
+        return ZStack(alignment: .leading) {
+            shape.fill(Color(red: 0.02, green: 0.05, blue: 0.14).opacity(0.92))
             shape.strokeBorder(LinearGradient(colors: [Color.cyan.opacity(0.75), Color(red: 0.55, green: 0.42, blue: 1.0).opacity(0.35)],
                                               startPoint: .top, endPoint: .bottom), lineWidth: 1)
             VStack(spacing: 12) {
@@ -90,44 +101,47 @@ struct SettingsEdgeReveal: View {
                     .font(.system(size: 30, weight: .semibold))
                     .foregroundStyle(LinearGradient(colors: [Color.cyan, Color(red: 0.55, green: 0.42, blue: 1.0)], startPoint: .top, endPoint: .bottom))
                     .rotationEffect(.degrees(Double(pulled) * 0.9))
-                    .shadow(color: Color.cyan.opacity(0.7), radius: 10)
                 Text(title)
                     .font(AppFont.text(16, .bold))
                     .foregroundStyle(.white)
                     .opacity(Double(min(1, progress * 1.6)))
-                Image(systemName: "chevron.left.2")
-                    .font(.system(size: 12, weight: .bold))
-                    .foregroundStyle(.white.opacity(0.45 * (1 - progress)))
             }
-            .scaleEffect(0.8 + 0.2 * progress)
+            .frame(width: max(90, min(pulled, width * 0.5)))
+            .scaleEffect(0.85 + 0.15 * progress)
         }
-        .frame(width: max(0, pulled))
+        .frame(width: width)
         .frame(maxHeight: .infinity)
-        .shadow(color: Color.cyan.opacity(0.25 * progress), radius: 24, x: -6)
         .ignoresSafeArea()
     }
 
     private var edgeGesture: some Gesture {
         DragGesture(minimumDistance: 6, coordinateSpace: .global)
+            .updating($dragging) { _, state, _ in state = true }
             .onChanged { value in
                 guard !opening else { return }
-                // Con goma: cuanto más se saca, más cuesta.
+                // Con goma: pasado el 60 % cuesta más.
                 let raw: CGFloat = max(0, -value.translation.width)
                 swipe.edge = raw < width * 0.6 ? raw : width * 0.6 + (raw - width * 0.6) * 0.3
             }
             .onEnded { value in
                 guard !opening else { return }
+                swipe.lastHorizontal = Date()
                 let open: Bool = -value.translation.width > width * 0.33 || -value.predictedEndTranslation.width > width * 0.6
-                if open {
-                    opening = true
-                    withAnimation(.spring(response: 0.3, dampingFraction: 0.9)) { swipe.edge = width }
-                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.18) {
-                        onOpen()
-                        withAnimation(.easeOut(duration: 0.32)) { swipe.edge = 0 }
+                guard open else {
+                    withAnimation(.spring(response: 0.35, dampingFraction: 0.85)) { swipe.edge = 0 }
+                    return
+                }
+                opening = true
+                withAnimation(.spring(response: 0.28, dampingFraction: 0.92)) { swipe.edge = width }
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.24) {
+                    // Debajo del panel (ya tapa todo) se cambia a Ajustes sin animar; luego se desvanece.
+                    onOpen()
+                    withAnimation(.easeOut(duration: 0.3)) { fade = 0 }
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.32) {
+                        swipe.edge = 0
+                        fade = 1
                         opening = false
                     }
-                } else {
-                    withAnimation(.spring(response: 0.35, dampingFraction: 0.82)) { swipe.edge = 0 }
                 }
             }
     }

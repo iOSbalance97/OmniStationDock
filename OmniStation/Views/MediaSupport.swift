@@ -3,6 +3,7 @@ import UIKit
 import AVFoundation
 import AudioToolbox
 import Security
+import Combine
 
 // MARK: - Archivos incluidos en la app
 
@@ -124,6 +125,7 @@ final class LoopingVideoView: UIView {
     private var player: AVQueuePlayer?
     private var looper: AVPlayerLooper?
     private var currentURL: URL?
+    private var idleWatch: AnyCancellable?
 
     init(url: URL) {
         super.init(frame: .zero)
@@ -131,6 +133,12 @@ final class LoopingVideoView: UIView {
         layer.addSublayer(playerLayer)
         isUserInteractionEnabled = false
         load(url)
+        // En reposo el vídeo se para en su fotograma y sigue al tocar (ver InterfaceIdle).
+        idleWatch = InterfaceIdle.shared.$idle
+            .removeDuplicates()
+            .sink { [weak self] idle in
+                if idle { self?.player?.pause() } else { self?.player?.play() }
+            }
     }
 
     required init?(coder: NSCoder) {
@@ -149,7 +157,7 @@ final class LoopingVideoView: UIView {
         looper = AVPlayerLooper(player: queue, templateItem: item)
         player = queue
         playerLayer.player = queue
-        queue.play()
+        if !InterfaceIdle.shared.idle { queue.play() }
     }
 
     override func layoutSubviews() {
