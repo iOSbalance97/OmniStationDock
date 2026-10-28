@@ -2,12 +2,19 @@ name: Build and Release OmniStation Dock
 
 on:
   workflow_dispatch:
+    inputs:
+      solo_limpiar:
+        description: "Solo borrar las releases antiguas (sin compilar)"
+        type: boolean
+        required: false
+        default: false
 
 permissions:
   contents: write
 
 jobs:
   build:
+    if: ${{ !inputs.solo_limpiar }}
     runs-on: macos-26
     env:
       # Versiones fijas de lo que se descarga. Al cambiarlas se invalida su caché y se vuelve a bajar.
@@ -375,3 +382,34 @@ jobs:
             --title "OmniStation Dock ${VERSION}" \
             --notes "Compilación automática de OmniStation Dock." \
             --prerelease
+
+  # Deja solo las 3 últimas releases build-N y borra sus etiquetas. Las de núcleos (armsx2-core,
+  # libretro-cores, melonx-runtime…) no se tocan: el build las descarga. Si el build falla no se
+  # borra nada.
+  limpiar-releases:
+    needs: build
+    if: ${{ always() && (needs.build.result == 'success' || inputs.solo_limpiar) }}
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ github.token }}
+      KEEP: 3
+    steps:
+      - name: Borrar releases build-N antiguas
+        run: |
+          gh api --paginate "repos/$GITHUB_REPOSITORY/releases?per_page=100" \
+            --jq '.[] | select(.tag_name | test("^build-[0-9]+$")) | .tag_name' \
+            | sort -t- -k2 -n -r > releases.txt
+          head -n "$KEEP" releases.txt > keep.txt
+          echo "Se quedan: $(tr '\n' ' ' < keep.txt)"
+          tail -n +"$((KEEP + 1))" releases.txt | while read -r tag; do
+            echo "Borrando la release $tag"
+            gh release delete "$tag" --repo "$GITHUB_REPOSITORY" --cleanup-tag --yes || echo "::warning::No se pudo borrar $tag"
+          done
+          # Etiquetas build-N que se quedaron sin release
+          gh api --paginate "repos/$GITHUB_REPOSITORY/tags?per_page=100" --jq '.[].name' \
+            | grep -E '^build-[0-9]+$' | while read -r tag; do
+              if ! grep -qx "$tag" keep.txt; then
+                echo "Borrando la etiqueta $tag"
+                gh api -X DELETE "repos/$GITHUB_REPOSITORY/git/refs/tags/$tag" >/dev/null || echo "::warning::No se pudo borrar la etiqueta $tag"
+              fi
+            done
